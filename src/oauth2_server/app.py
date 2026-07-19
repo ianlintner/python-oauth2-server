@@ -9,6 +9,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from oauth2_server.config import Config
 from oauth2_server.routes.authorize import router as authorize_router
+from oauth2_server.routes.device import router as device_router
 from oauth2_server.routes.introspect import router as introspect_router
 from oauth2_server.routes.login import router as login_router
 from oauth2_server.routes.register import router as register_router
@@ -57,6 +58,7 @@ def create_app(config: Config, storage: Storage) -> FastAPI:
     app.include_router(token_router, prefix="/oauth")
     app.include_router(introspect_router, prefix="/oauth")
     app.include_router(authorize_router, prefix="/oauth")
+    app.include_router(device_router, prefix="/oauth")
     app.include_router(login_router, prefix="/auth")
     app.include_router(register_router, prefix="/connect")
     app.include_router(wellknown_router)

@@ -183,4 +183,39 @@ async def token(request: Request) -> ORJSONResponse:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    if grant_type == "urn:ietf:params:oauth:grant-type:device_code":
+        device_code = form.get("device_code")
+        device = (
+            await storage.get_device_authorization_by_device_code(device_code)
+            if device_code
+            else None
+        )
+        if device is None or device.client_id != client.client_id:
+            return oauth_error("invalid_grant", "device_code not found for this client")
+
+        if device.expires_at <= datetime.now(timezone.utc):
+            return oauth_error("expired_token", "device_code has expired")
+
+        if device.denied:
+            return oauth_error("access_denied", "user denied the device authorization request")
+
+        if device.used:
+            return oauth_error("invalid_grant", "device_code has already been redeemed")
+
+        if not device.approved:
+            return oauth_error("authorization_pending", "authorization request is still pending")
+
+        await storage.mark_device_authorization_used(device.device_code)
+
+        token_response = await TokenService(storage, config).issue(
+            client,
+            device.user_id,
+            device.scope,
+            with_refresh=True,
+            token_family=uuid.uuid4().hex,
+        )
+        response = ORJSONResponse(token_response.model_dump(exclude_none=True))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     return oauth_error("unsupported_grant_type", f"grant_type '{grant_type}' is not supported")
