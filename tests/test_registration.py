@@ -85,3 +85,18 @@ async def test_invalid_auth_method_rejected(client):
     )
     assert resp.status_code == 400
     assert resp.json()["error"] == "invalid_client_metadata"
+
+
+async def test_missing_body_fields_return_400_not_500(client):
+    resp = await client.post("/connect/register", json={})
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_client_metadata"
+
+
+async def test_fragment_redirect_uri_rejected(client):
+    resp = await client.post(
+        "/connect/register",
+        json={"redirect_uris": ["https://app.example/cb#frag"]},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_client_metadata"

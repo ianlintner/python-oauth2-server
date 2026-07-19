@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
+from pydantic import ValidationError
 
 from oauth2_server.models import Client, ClientRegistration, ClientRegistrationResponse
 
@@ -28,13 +29,23 @@ def _registration_error(description: str) -> ORJSONResponse:
 
 def _is_valid_redirect_uri(uri: str) -> bool:
     parsed = urlparse(uri)
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    # RFC 6749 §3.1.2 forbids fragments in redirect URIs
+    has_fragment = bool(parsed.fragment) or uri.endswith("#")
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc) and not has_fragment
 
 
 @router.post("/register")
 async def register_client(request: Request) -> ORJSONResponse:
-    body = await request.json()
-    reg = ClientRegistration.model_validate(body)
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return _registration_error("invalid registration request")
+
+    try:
+        reg = ClientRegistration.model_validate(body)
+    except ValidationError:
+        return _registration_error("invalid registration request")
+
     storage = request.app.state.storage
     config = request.app.state.config
 
