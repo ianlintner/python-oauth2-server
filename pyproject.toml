@@ -13,6 +13,7 @@ dependencies = [
     "pyjwt>=2.9",
     "argon2-cffi>=23.1",
     "orjson>=3.10",
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]

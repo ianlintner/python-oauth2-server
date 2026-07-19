@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.config import Config
+from oauth2_server.routes.token import router as token_router
 from oauth2_server.storage.base import Storage
 
 _SECURITY_HEADERS = {
@@ -38,6 +39,8 @@ def create_app(config: Config, storage: Storage) -> FastAPI:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+    app.include_router(token_router, prefix="/oauth")
 
     @app.get("/health")
     async def health() -> dict[str, str]:

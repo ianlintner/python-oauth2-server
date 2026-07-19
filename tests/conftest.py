@@ -1,0 +1,23 @@
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from oauth2_server.app import create_app
+from oauth2_server.config import Config
+from tests.helpers import make_storage, seed_client, seed_user
+
+
+@pytest.fixture
+async def client_app():
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+    )
+    storage = await make_storage()
+    await seed_client(storage)
+    await seed_user(storage)
+    app = create_app(config, storage)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://auth.example.com"
+    ) as c:
+        c.storage = storage
+        yield c
