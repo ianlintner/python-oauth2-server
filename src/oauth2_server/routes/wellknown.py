@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import jwt
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
+from pydantic import ValidationError
 
 from oauth2_server.security import decode_access_token
 
@@ -98,9 +99,10 @@ async def userinfo(request: Request) -> ORJSONResponse:
 
     # Try the JWT path first (verifies signature, issuer, and expiry); fall
     # back to an opaque-token storage lookup on any decode failure.
+    # Note: the storage row lookup is the authoritative gate for token validity.
     try:
         decode_access_token(token_str, config.jwt_secret, config.issuer)
-    except jwt.PyJWTError:
+    except (jwt.PyJWTError, ValidationError):
         pass
 
     row = await storage.get_token_by_access_token(token_str)

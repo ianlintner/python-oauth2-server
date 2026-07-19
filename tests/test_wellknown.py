@@ -97,3 +97,24 @@ async def test_userinfo_rejects_revoked_token(client_app):
     info_resp = await _get_userinfo(client_app, access_token)
     assert info_resp.status_code == 401
     assert info_resp.json()["error"] == "invalid_token"
+
+
+async def test_userinfo_foreign_jwt_rejected_not_500(client_app):
+    """Verify that a validly-signed but foreign-shaped JWT returns 401, not 500.
+
+    A JWT signed with the correct secret but with a payload that doesn't match
+    the Claims model (e.g., minted by another system sharing the secret) should
+    raise pydantic.ValidationError, which must be caught and treated as an
+    invalid token (storage lookup path) rather than allowed to bubble up as a 500.
+    """
+    import jwt as pyjwt
+
+    jwt_secret = "unit-test-secret-not-for-production-0123456789abcdef"
+    foreign = pyjwt.encode(
+        {"sub": "u1", "iss": "https://auth.example.com", "exp": 9999999999, "iat": 1},
+        jwt_secret,
+        algorithm="HS256",
+    )
+    resp = await _get_userinfo(client_app, foreign)
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "invalid_token"
