@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import secrets
 import uuid
 from datetime import datetime, timezone
 
@@ -103,7 +104,7 @@ async def token(request: Request) -> ORJSONResponse:
                 return oauth_error(
                     "invalid_request", "code_verifier must be between 43 and 128 characters"
                 )
-            if _pkce_challenge(verifier) != auth_code.code_challenge:
+            if not secrets.compare_digest(_pkce_challenge(verifier), auth_code.code_challenge):
                 return oauth_error("invalid_grant", "code_verifier does not match code_challenge")
         elif client.is_public():
             return oauth_error("invalid_grant", "public clients must use PKCE")
