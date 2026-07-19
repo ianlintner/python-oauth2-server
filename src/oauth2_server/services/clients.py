@@ -18,11 +18,19 @@ class ClientService:
 
     async def authenticate(self, request_form: dict, authorization_header: str | None) -> Client:
         basic = _parse_basic_auth(authorization_header)
+        form_client_id = request_form.get("client_id")
+        form_client_secret = request_form.get("client_secret")
         if basic is not None:
             client_id, client_secret = basic
+            # RFC 6749 §2.3: reject duplicate credentials that disagree; allow
+            # matching duplicates.
+            if form_client_id and form_client_id != client_id:
+                raise OAuthError("invalid_request", "client_id mismatch", 400)
+            if form_client_secret and not secrets.compare_digest(form_client_secret, client_secret):
+                raise OAuthError("invalid_client", "client_secret mismatch")
         else:
-            client_id = request_form.get("client_id")
-            client_secret = request_form.get("client_secret")
+            client_id = form_client_id
+            client_secret = form_client_secret
 
         if not client_id:
             raise OAuthError("invalid_client", "missing client_id")

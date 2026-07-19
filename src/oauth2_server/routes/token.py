@@ -28,6 +28,11 @@ async def token(request: Request) -> ORJSONResponse:
     grant_type = form.get("grant_type")
 
     if grant_type == "client_credentials":
+        if client.is_public():
+            return oauth_error(
+                "invalid_client", "Public clients cannot use the client_credentials grant"
+            )
+
         if "client_credentials" not in client.grant_type_list():
             return oauth_error(
                 "unauthorized_client", "client is not authorized for this grant type"

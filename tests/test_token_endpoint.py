@@ -41,3 +41,38 @@ async def test_unsupported_grant_type(client_app):
     )
     assert resp.status_code == 400
     assert resp.json()["error"] == "unsupported_grant_type"
+
+
+async def test_public_client_cannot_use_client_credentials(client_app):
+    await seed_client(
+        client_app.storage,
+        client_id="public-client",
+        client_secret="",
+        token_endpoint_auth_method="none",
+        grant_types='["client_credentials"]',
+    )
+    resp = await post_token(
+        client_app, {"grant_type": "client_credentials", "client_id": "public-client"}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def test_basic_auth_client_id_mismatched_with_form_rejected(client_app):
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials", "client_id": "other"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+
+
+async def test_basic_auth_secret_mismatched_with_form_rejected(client_app):
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials", "client_secret": "wrong"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "invalid_client"
