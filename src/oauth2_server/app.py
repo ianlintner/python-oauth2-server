@@ -48,7 +48,7 @@ def create_app(config: Config, storage: Storage) -> FastAPI:
         secret_key=config.jwt_secret,
         session_cookie="oauth2_session",
         same_site="lax",
-        https_only=False,
+        https_only=not config.allow_insecure_defaults,
     )
 
     app.include_router(token_router, prefix="/oauth")

@@ -3,7 +3,7 @@ from httpx import ASGITransport, AsyncClient
 
 from oauth2_server.app import create_app
 from oauth2_server.config import Config
-from tests.helpers import make_storage
+from tests.helpers import make_storage, seed_client, seed_user, login_session
 
 
 @pytest.fixture
@@ -37,3 +37,21 @@ def test_config_reads_env_vars(monkeypatch):
     c = Config()
     assert c.issuer == "https://issuer.test"
     assert c.allowed_origins == ["https://a.test", "https://b.test"]
+
+
+async def test_session_cookie_is_secure_by_default():
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+    )
+    storage = await make_storage()
+    await seed_client(storage)
+    await seed_user(storage)
+    app = create_app(config, storage)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://auth.example.com"
+    ) as c:
+        resp = await login_session(c)
+        assert resp.status_code == 302
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert "Secure" in set_cookie or "secure" in set_cookie

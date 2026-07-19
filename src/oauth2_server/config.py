@@ -24,6 +24,7 @@ class Config(BaseSettings):
     access_token_ttl_secs: int = 3600
     refresh_token_ttl_secs: int = 86400
     authorization_code_ttl_secs: int = 600
+    allow_insecure_defaults: bool = False
     host: str = "0.0.0.0"
     port: int = 8080
 
