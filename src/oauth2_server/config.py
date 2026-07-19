@@ -5,8 +5,10 @@ Mirrors `crates/oauth2-config/src/lib.rs::ServerConfig`.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 _INSECURE_JWT_SECRETS = {"secret", "changeme", "your-256-bit-secret", "jwt_secret"}
 
@@ -17,7 +19,7 @@ class Config(BaseSettings):
     database_url: str = "sqlite+aiosqlite://"
     jwt_secret: str
     issuer: str = Field(default="http://localhost:8080", validation_alias="OAUTH2_PUBLIC_URL")
-    allowed_origins: list[str] = Field(default_factory=list)
+    allowed_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
     access_tokens_opaque: bool = False
     access_token_ttl_secs: int = 3600
     refresh_token_ttl_secs: int = 86400

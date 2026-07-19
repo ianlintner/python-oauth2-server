@@ -14,6 +14,7 @@ MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations" / "sql"
 
 def main() -> None:
     config = Config()
+    config.validate_for_production()
     storage = SqlStorage(config.database_url, MIGRATIONS)
     asyncio.run(storage.init())
     app = create_app(config, storage)

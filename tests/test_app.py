@@ -28,3 +28,12 @@ async def test_health(client):
 def test_insecure_jwt_secret_rejected():
     with pytest.raises(ValueError):
         Config(jwt_secret="secret", issuer="x").validate_for_production()
+
+
+def test_config_reads_env_vars(monkeypatch):
+    monkeypatch.setenv("OAUTH2_JWT_SECRET", "0123456789abcdef0123456789abcdef")
+    monkeypatch.setenv("OAUTH2_PUBLIC_URL", "https://issuer.test")
+    monkeypatch.setenv("OAUTH2_ALLOWED_ORIGINS", "https://a.test, https://b.test")
+    c = Config()
+    assert c.issuer == "https://issuer.test"
+    assert c.allowed_origins == ["https://a.test", "https://b.test"]
