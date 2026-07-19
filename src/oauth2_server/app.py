@@ -5,8 +5,11 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
+from starlette.middleware.sessions import SessionMiddleware
 
 from oauth2_server.config import Config
+from oauth2_server.routes.authorize import router as authorize_router
+from oauth2_server.routes.login import router as login_router
 from oauth2_server.routes.token import router as token_router
 from oauth2_server.storage.base import Storage
 
@@ -40,7 +43,17 @@ def create_app(config: Config, storage: Storage) -> FastAPI:
             allow_headers=["*"],
         )
 
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=config.jwt_secret,
+        session_cookie="oauth2_session",
+        same_site="lax",
+        https_only=False,
+    )
+
     app.include_router(token_router, prefix="/oauth")
+    app.include_router(authorize_router, prefix="/oauth")
+    app.include_router(login_router, prefix="/auth")
 
     @app.get("/health")
     async def health() -> dict[str, str]:

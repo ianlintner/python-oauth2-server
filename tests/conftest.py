@@ -21,3 +21,9 @@ async def client_app():
     ) as c:
         c.storage = storage
         yield c
+
+
+@pytest.fixture
+async def app_with_session(client_app):
+    """Alias for `client_app` — every app instance carries SessionMiddleware."""
+    return client_app

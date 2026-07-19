@@ -48,6 +48,11 @@ async def seed_user(storage) -> User:
     return user
 
 
+async def login_session(client, username: str = "user_rfc", password: str = "password123"):
+    """POST /auth/login and let the httpx client carry the resulting session cookie."""
+    return await client.post("/auth/login", data={"username": username, "password": password})
+
+
 async def post_token(client_app, data: dict, basic_auth: tuple[str, str] | None = None):
     headers = {}
     if basic_auth is not None:
