@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import jwt
+from fastapi import Request
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 
 # +/-5 minutes acceptance window on the proof's `iat` claim (dpop.rs line 55).
@@ -53,6 +54,35 @@ class DpopError(Exception):
         self.error = error
         self.description = description
         super().__init__(description)
+
+
+def read_dpop_header(request: Request) -> str | None:
+    """Extract the raw `DPoP` request header, UTF-8-decoded from the raw ASGI
+    bytes. Starlette's `request.headers.get` hands back a `str` that has
+    already been latin-1-decoded from the raw ASGI bytes — latin-1 maps
+    every byte 0-255 to a codepoint, so it can never observe a decode
+    failure the way Rust's `HeaderValue::to_str()` (which requires valid
+    UTF-8) does. To reproduce that check, this reads `request.headers.raw`
+    directly and UTF-8-decodes the value itself instead of going through
+    `.get`.
+
+    Shared by `routes/token.py` (POST /oauth/token) and `routes/introspect.py`
+    (POST /oauth/introspect) — both endpoints need the identical raw-header
+    read + non-UTF-8 detection, per research-dpop.md's `endpoints` entries
+    for each.
+
+    Returns `None` when the header is absent. Raises `DpopError
+    ("invalid_request", "DPoP header is not valid UTF-8")` when present but
+    undecodable — the caller turns that into the RFC 6749 §5.2 400
+    response, matching the Rust handler's `to_str()` failure path.
+    """
+    for name, value in request.headers.raw:
+        if name.lower() == b"dpop":
+            try:
+                return value.decode("utf-8")
+            except UnicodeDecodeError:
+                raise DpopError("invalid_request", "DPoP header is not valid UTF-8") from None
+    return None
 
 
 @dataclass

@@ -217,6 +217,7 @@ class IntrospectionResponse(BaseModel):
     aud: list[str] | str | None = None
     jti: str | None = None
     iss: str | None = None
+    cnf: dict | None = None
 
 
 class ClientRegistration(BaseModel):

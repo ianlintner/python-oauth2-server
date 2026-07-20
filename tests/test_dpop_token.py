@@ -26,6 +26,7 @@ from tests.helpers import generate_dpop_key, make_dpop_proof, post_token, seed_c
 from tests.test_token_endpoint import run_code_flow
 
 TOKEN_URL = "https://auth.example.com/oauth/token"
+INTROSPECT_URL = "https://auth.example.com/oauth/introspect"
 
 
 async def _seed_nonce_required_client(client_app, **overrides):
@@ -224,6 +225,91 @@ async def test_discovery_advertises_dpop_algs(client_app):
 
     assert resp.status_code == 200
     assert resp.json()["dpop_signing_alg_values_supported"] == ["ES256", "RS256"]
+
+
+# --- POST /oauth/introspect DPoP jkt binding (RFC 9449 §7.1) ---------------
+#
+# `routes/introspect.py` wiring: after locating an active token, its access
+# token's claims are decoded unverified to check for `cnf.jkt`. When present,
+# the introspection request itself must carry a valid, matching DPoP proof
+# (validated against the *introspection* URL, not the token URL) — missing
+# header / invalid proof / jkt mismatch all collapse to `{"active": false}`.
+# `token_type` stays "Bearer" even on a successful DPoP-bound introspection
+# (Rust parity quirk); only `cnf` is echoed back on success.
+
+
+async def _post_introspect(
+    client_app, token: str, basic_auth=("client1", "s3cret"), headers: dict | None = None
+):
+    request_headers = dict(headers or {})
+    if basic_auth is not None:
+        raw = f"{basic_auth[0]}:{basic_auth[1]}".encode()
+        request_headers["Authorization"] = "Basic " + base64.b64encode(raw).decode()
+    return await client_app.post(
+        "/oauth/introspect", data={"token": token}, headers=request_headers
+    )
+
+
+async def _issue_dpop_bound_access_token(client_app, key=None) -> tuple[str, dict]:
+    proof, pub_jwk = make_dpop_proof(TOKEN_URL, "POST", key)
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials"},
+        basic_auth=("client1", "s3cret"),
+        headers={"DPoP": proof},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["access_token"], pub_jwk
+
+
+async def test_introspect_jkt_bound_token_requires_proof(client_app):
+    access_token, _pub_jwk = await _issue_dpop_bound_access_token(client_app)
+
+    resp = await _post_introspect(client_app, access_token)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"active": False}
+
+
+async def test_introspect_with_matching_proof_active_true_and_cnf(client_app):
+    key = generate_dpop_key()
+    access_token, pub_jwk = await _issue_dpop_bound_access_token(client_app, key)
+
+    introspect_proof, _ = make_dpop_proof(INTROSPECT_URL, "POST", key)
+    resp = await _post_introspect(client_app, access_token, headers={"DPoP": introspect_proof})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["active"] is True
+    assert body["token_type"] == "Bearer"
+    assert body["cnf"]["jkt"] == jwk_thumbprint(pub_jwk)
+
+
+async def test_introspect_with_wrong_key_proof_inactive(client_app):
+    bound_key = generate_dpop_key()
+    access_token, _pub_jwk = await _issue_dpop_bound_access_token(client_app, bound_key)
+
+    wrong_key = generate_dpop_key()
+    introspect_proof, _ = make_dpop_proof(INTROSPECT_URL, "POST", wrong_key)
+    resp = await _post_introspect(client_app, access_token, headers={"DPoP": introspect_proof})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"active": False}
+
+
+async def test_introspect_unbound_token_unaffected(client_app):
+    resp = await post_token(
+        client_app, {"grant_type": "client_credentials"}, basic_auth=("client1", "s3cret")
+    )
+    assert resp.status_code == 200, resp.text
+    access_token = resp.json()["access_token"]
+
+    introspect_resp = await _post_introspect(client_app, access_token)
+
+    assert introspect_resp.status_code == 200, introspect_resp.text
+    body = introspect_resp.json()
+    assert body["active"] is True
+    assert "cnf" not in body
 
 
 # --- _read_dpop_header (non-UTF-8 detection) --------------------------------

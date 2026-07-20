@@ -17,8 +17,9 @@ source this is ported from):
   bytes — latin-1 maps every byte 0-255 to a codepoint, so it can never
   observe a decode failure the way Rust's `HeaderValue::to_str()` (which
   requires valid UTF-8) does. To reproduce that check, `_read_dpop_header`
-  below reads `request.headers.raw` directly and UTF-8-decodes the value
-  itself instead of going through `.get`.
+  (an alias for `services.dpop.read_dpop_header`, shared with
+  `routes/introspect.py`) reads `request.headers.raw` directly and
+  UTF-8-decodes the value itself instead of going through `.get`.
 - **Client auth runs BEFORE DPoP proof validation** (Rust validates the
   proof first). Deliberate ordering divergence: an unauthenticated caller
   can neither burn replay-store jti entries nor farm nonces here, closing a
@@ -47,7 +48,12 @@ from oauth2_server.models import Client, IdTokenClaims, User
 from oauth2_server.security import encode_id_token
 from oauth2_server.services.auth import scope_is_subset
 from oauth2_server.services.clients import ClientService
-from oauth2_server.services.dpop import DpopError, DpopValidated, validate_dpop_proof
+from oauth2_server.services.dpop import (
+    DpopError,
+    DpopValidated,
+    read_dpop_header as _read_dpop_header,
+    validate_dpop_proof,
+)
 from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
 from oauth2_server.services.tokens import TokenService
 
@@ -66,23 +72,6 @@ def _half_hash(value: str) -> str:
 def _pkce_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-
-
-def _read_dpop_header(request: Request) -> str | None:
-    """Extract the raw `DPoP` request header, UTF-8-decoded from the raw ASGI
-    bytes (see module docstring for why `request.headers.get` can't detect a
-    non-UTF-8 value). Returns `None` when the header is absent. Raises
-    `DpopError("invalid_request", "DPoP header is not valid UTF-8")` when
-    present but undecodable — the caller turns that into the RFC 6749 §5.2
-    400 response, matching the Rust handler's `to_str()` failure path.
-    """
-    for name, value in request.headers.raw:
-        if name.lower() == b"dpop":
-            try:
-                return value.decode("utf-8")
-            except UnicodeDecodeError:
-                raise DpopError("invalid_request", "DPoP header is not valid UTF-8") from None
-    return None
 
 
 def _salvage_old_cnf(access_token: str) -> dict | None:
