@@ -16,11 +16,17 @@ faithful reproduction of the spoofable behavior would carry the vulnerability
 forward for no benefit.
 
 `check_subject_denylisted` is the non-IP counterpart for the other four
-kinds (`user_id`/`username`/`email`/`client_id`). It exists and is unit
-tested here (Rust parity: `crates/oauth2-actix/src/middleware/
-denylist.rs:93` — defined, tested, zero production call sites) but is NOT
-wired into any handler. Whether login/token/introspection should enforce
-subject-kind entries is an explicit Phase 3 decision, not a gap in this task.
+kinds (`user_id`/`username`/`email`/`client_id`). It originated unit tested
+but unwired (Rust parity: `crates/oauth2-actix/src/middleware/
+denylist.rs:93` — defined, tested, zero production call sites); wiring it in
+was an explicit Phase 3 decision. Phase 3a wires three of the four kinds:
+`routes/login.py::login` consults `username` (and the looked-up user's
+`email`) before completing a session login, and `ClientService.authenticate`
+(`services/clients.py`) plus `routes/authorize.py::authorize` both consult
+`client_id` after the client row loads. `user_id` remains unwired — nothing
+in this codebase authenticates a subject by `user_id` pre-auth (sessions and
+tokens are keyed by `username`/`client_id`), so there is no call site to hang
+the check on.
 """
 
 from __future__ import annotations

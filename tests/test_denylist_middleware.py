@@ -22,7 +22,7 @@ from oauth2_server.app import create_app
 from oauth2_server.config import Config
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import DenylistEntry
-from tests.helpers import make_storage, seed_client, seed_user
+from tests.helpers import login_session, make_storage, post_token, seed_client, seed_user
 
 
 def _now() -> datetime:
@@ -218,3 +218,89 @@ async def test_check_subject_denylisted_fails_open_on_storage_error():
 
     reason = await check_subject_denylisted(storage, "username", "mallory")
     assert reason is None
+
+
+# --- subject-denylist enforcement (login + client auth) ---
+
+
+async def _add_denylist_entry(storage, kind: str, value: str, **overrides) -> DenylistEntry:
+    fields = dict(
+        id=uuid.uuid4().hex,
+        kind=kind,
+        value=value,
+        reason="abuse",
+        created_at=_now(),
+    )
+    fields.update(overrides)
+    entry = DenylistEntry(**fields)
+    await storage.add_denylist_entry(entry)
+    return entry
+
+
+async def test_denylisted_username_cannot_login(client_app):
+    await _add_denylist_entry(client_app.storage, "username", "user_rfc")
+
+    resp = await login_session(client_app)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+
+    # Session must NOT have been established: a follow-up authorize request
+    # still requires login rather than proceeding as an authenticated user.
+    resp = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+        },
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/auth/login"
+
+
+async def test_denylisted_email_cannot_login(client_app):
+    await _add_denylist_entry(client_app.storage, "email", "user_rfc@example.test")
+
+    resp = await login_session(client_app)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+
+
+async def test_expired_username_entry_does_not_block(client_app):
+    await _add_denylist_entry(
+        client_app.storage,
+        "username",
+        "user_rfc",
+        expires_at=_now() - timedelta(hours=1),
+    )
+
+    resp = await login_session(client_app)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+
+
+async def test_denylisted_client_id_rejected_at_token_endpoint(client_app):
+    await _add_denylist_entry(client_app.storage, "client_id", "client1")
+
+    resp = await post_token(
+        client_app, {"grant_type": "client_credentials"}, basic_auth=("client1", "s3cret")
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def test_denylisted_client_id_rejected_at_authorize(client_app):
+    await _add_denylist_entry(client_app.storage, "client_id", "client1")
+
+    resp = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_client"

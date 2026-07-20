@@ -20,14 +20,18 @@ from __future__ import annotations
 
 import html
 import importlib.resources
+import logging
 import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.security import verify_password_async
 from oauth2_server.services.auth import is_safe_redirect
 from oauth2_server.sessions import set_login
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -125,13 +129,34 @@ async def login(request: Request):
     storage = request.app.state.storage
     user = await storage.get_user_by_username(username)
 
-    # Generic error for unknown username, disabled account, and bad password
-    # alike, to avoid leaking account existence/state.
+    # Subject-kind denylist (Phase 3a): a hit on either the submitted
+    # username or the looked-up user's email blocks the login just like an
+    # unknown user or bad password would — same generic redirect below, so
+    # a denylisted account is indistinguishable from any other login
+    # failure (no oracle). Only meaningful once a user row exists; an
+    # unknown username already falls through to the same generic error.
+    denylist_reason = None
+    denylist_kind = None
+    if user is not None:
+        denylist_reason = await check_subject_denylisted(storage, "username", username)
+        denylist_kind = "username"
+        if denylist_reason is None:
+            denylist_reason = await check_subject_denylisted(storage, "email", user.email)
+            denylist_kind = "email"
+
+    # Generic error for unknown username, disabled account, bad password, and
+    # a denylisted username/email alike, to avoid leaking account
+    # existence/state.
     if (
         user is None
         or not user.enabled
         or not await verify_password_async(password, user.password_hash)
+        or denylist_reason is not None
     ):
+        if denylist_reason is not None:
+            logger.warning(
+                "login blocked: %s is denylisted (reason=%s)", denylist_kind, denylist_reason
+            )
         return RedirectResponse("/auth/login?error=invalid_credentials", status_code=303)
 
     # Successful login — clear only the per-username key. The user proved

@@ -29,14 +29,18 @@ Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
 
 from __future__ import annotations
 
+import logging
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse
 
+from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.services.auth import AuthorizeService, scope_is_subset
 from oauth2_server.sessions import current_user_id
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -125,7 +129,17 @@ async def authorize(request: Request):
 
     # --- 1. client_id must exist and be enabled — 400, never redirect ---
     client = await storage.get_client(client_id) if client_id else None
-    if client is None or not client.enabled:
+    denylist_reason = (
+        await check_subject_denylisted(storage, "client_id", client_id) if client_id else None
+    )
+    if client is None or not client.enabled or denylist_reason is not None:
+        # Subject-kind denylist (Phase 3a): a denylisted client_id gets the
+        # identical unknown/disabled-client 400 — no oracle distinguishing
+        # "denylisted" from "never registered".
+        if denylist_reason is not None:
+            logger.warning(
+                "authorize blocked: client_id is denylisted (reason=%s)", denylist_reason
+            )
         return _error_page(400, "invalid_client", "unknown or disabled client_id")
 
     # --- 2. redirect_uri must exact-match the registered list — 400, never redirect ---
