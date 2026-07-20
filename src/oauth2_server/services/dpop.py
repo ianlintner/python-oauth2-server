@@ -153,7 +153,7 @@ def validate_dpop_proof(
         raise DpopError("invalid_dpop_proof", 'DPoP proof typ must be "dpop+jwt"')
 
     jwk = header.get("jwk")
-    if not jwk:
+    if not isinstance(jwk, dict) or not jwk:
         raise DpopError("invalid_dpop_proof", "DPoP proof missing 'jwk' header claim")
 
     jkt = jwk_thumbprint(jwk)
@@ -176,6 +176,13 @@ def validate_dpop_proof(
                 "require": _REQUIRED_CLAIMS,
                 "verify_aud": False,
                 "verify_exp": False,
+                # PyJWT's own iat check uses leeway 0, which would reject
+                # any future iat (e.g. +5s clock skew) with "not yet
+                # valid" before the manual +/-300s window below ever
+                # runs. The manual check is the sole iat authority here,
+                # matching the Rust validator (dpop.rs), which has no
+                # separate library-level iat gate.
+                "verify_iat": False,
             },
         )
     except Exception as exc:

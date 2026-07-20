@@ -207,6 +207,20 @@ def test_dpop_missing_jwk_header_rejected():
     assert "jwk" in exc_info.value.description
 
 
+@pytest.mark.parametrize("bad_jwk", ["foo", 123, ["a"]])
+def test_dpop_non_dict_jwk_header_rejected(bad_jwk):
+    proof = jwt.encode(
+        {"htm": DEFAULT_METHOD, "htu": DEFAULT_URL, "iat": int(time.time()), "jti": "bad-jwk"},
+        "shared-secret-at-least-32-bytes-long-000000",
+        algorithm="HS256",
+        headers={"typ": "dpop+jwt", "jwk": bad_jwk},
+    )
+    with pytest.raises(DpopError) as exc_info:
+        validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
+    assert exc_info.value.error == "invalid_dpop_proof"
+    assert "jwk" in exc_info.value.description
+
+
 def test_dpop_malformed_proof_rejected():
     with pytest.raises(DpopError) as exc_info:
         validate_dpop_proof("not-a-jwt", DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
@@ -252,6 +266,27 @@ def test_stale_iat_rejected():
     assert "iat" in exc_info.value.description
 
 
+def test_future_iat_within_skew_window_validates():
+    # PyJWT's own iat check has zero leeway and would reject this at
+    # decode time with "not yet valid" if verify_iat weren't disabled,
+    # before the manual +/-300s window ever runs.
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    proof = _build_proof(priv_pem, pub_jwk, iat=time.time() + 200, jti="future-iat-ok-jti")
+
+    result = validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
+    assert result.jkt == jwk_thumbprint(pub_jwk)
+
+
+def test_future_iat_outside_skew_window_rejected():
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    proof = _build_proof(priv_pem, pub_jwk, iat=time.time() + 301, jti="future-iat-bad-jti")
+
+    with pytest.raises(DpopError) as exc_info:
+        validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
+    assert exc_info.value.error == "invalid_dpop_proof"
+    assert exc_info.value.description == "DPoP proof iat is outside the acceptance window"
+
+
 def test_unsupported_alg_rejected():
     _, pub_jwk = _generate_ec_keypair()
     claims = {
@@ -270,6 +305,19 @@ def test_unsupported_alg_rejected():
     with pytest.raises(DpopError) as exc_info:
         validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
     assert "algorithm" in exc_info.value.description
+
+
+def test_proof_signed_with_different_key_rejected():
+    # Sign with key A's private key but embed key B's public JWK in the
+    # header — the signature must not verify against the wrong key.
+    priv_pem_a, _ = _generate_ec_keypair()
+    _, pub_jwk_b = _generate_ec_keypair()
+    proof = _build_proof(priv_pem_a, pub_jwk_b, jti="mismatched-key-jti")
+
+    with pytest.raises(DpopError) as exc_info:
+        validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
+    assert exc_info.value.error == "invalid_dpop_proof"
+    assert "signature invalid" in exc_info.value.description
 
 
 def test_replayed_jti_rejected_on_second_proof():
