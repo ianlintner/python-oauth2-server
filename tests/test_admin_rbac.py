@@ -1,8 +1,8 @@
 """Admin RBAC guard tests — ported from Rust `tests/admin_rbac.rs` +
 `crates/oauth2-actix/src/middleware/admin_guard.rs` unit tests.
 
-`/admin/api/ping` (added purely for this task) exercises the guard;
-real admin endpoints land in Tasks 8-10.
+Exercises the guard via `GET /admin/api/users` (Task 8); the guard itself
+lives in `routes/admin/guard.py` and is shared by every admin endpoint.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ async def _seed_token(
 
 async def test_unauthenticated_admin_api_redirects_to_login():
     async with build_client_app() as client:
-        resp = await client.get("/admin/api/ping", follow_redirects=False)
+        resp = await client.get("/admin/api/users", follow_redirects=False)
         assert resp.status_code == 302
         assert "/auth/login?error=login_required" in resp.headers["location"]
 
@@ -53,7 +53,7 @@ async def test_unauthenticated_admin_api_redirects_to_login():
 async def test_plain_user_session_gets_403():
     async with build_client_app() as client:
         await login_session(client)  # default seeded user_rfc, role=user
-        resp = await client.get("/admin/api/ping")
+        resp = await client.get("/admin/api/users")
         assert resp.status_code == 403
         assert resp.json() == {
             "error": "insufficient_permissions",
@@ -65,9 +65,11 @@ async def test_admin_session_passes():
     async with build_client_app() as client:
         await seed_admin(client.storage)
         await login_admin(client)
-        resp = await client.get("/admin/api/ping")
+        resp = await client.get("/admin/api/users")
         assert resp.status_code == 200
-        assert resp.json() == {"ok": True}
+        # migration-seeded "testuser" + default seeded user_rfc + the
+        # just-seeded admin_rfc (see migrations/sql/V5__insert_default_data.sql).
+        assert resp.json()["total"] == 3
 
 
 async def test_admin_email_allowlist_grants_admin():
@@ -75,9 +77,10 @@ async def test_admin_email_allowlist_grants_admin():
     # Uppercase in config to also exercise the lowercasing validator.
     async with build_client_app({"admin_emails": ["USER_RFC@EXAMPLE.TEST"]}) as client:
         await login_session(client)
-        resp = await client.get("/admin/api/ping")
+        resp = await client.get("/admin/api/users")
         assert resp.status_code == 200
-        assert resp.json() == {"ok": True}
+        # migration-seeded "testuser" + default seeded user_rfc.
+        assert resp.json()["total"] == 2
 
 
 # --- Bearer path ---
@@ -87,7 +90,7 @@ async def test_bearer_without_admin_scope_403():
     async with build_client_app({"admin_client_ids": ["client1"]}) as client:
         token = await _seed_token(client.storage, "client1", "read")
         resp = await client.get(
-            "/admin/api/ping", headers={"Authorization": f"Bearer {token.access_token}"}
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
         )
         assert resp.status_code == 403
         assert resp.json() == {
@@ -100,17 +103,18 @@ async def test_bearer_with_admin_scope_and_allowlist_passes():
     async with build_client_app({"admin_client_ids": ["client1"]}) as client:
         token = await _seed_token(client.storage, "client1", "admin read")
         resp = await client.get(
-            "/admin/api/ping", headers={"Authorization": f"Bearer {token.access_token}"}
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
         )
         assert resp.status_code == 200
-        assert resp.json() == {"ok": True}
+        # migration-seeded "testuser" + default seeded user_rfc.
+        assert resp.json()["total"] == 2
 
 
 async def test_bearer_admin_scope_non_allowlisted_client_403():
     async with build_client_app({"admin_client_ids": ["other-client"]}) as client:
         token = await _seed_token(client.storage, "client1", "admin read")
         resp = await client.get(
-            "/admin/api/ping", headers={"Authorization": f"Bearer {token.access_token}"}
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
         )
         assert resp.status_code == 403
         assert resp.json()["error"] == "insufficient_scope"
@@ -122,7 +126,7 @@ async def test_bearer_admin_scope_empty_allowlist_denies_all():
     async with build_client_app() as client:
         token = await _seed_token(client.storage, "client1", "admin read")
         resp = await client.get(
-            "/admin/api/ping", headers={"Authorization": f"Bearer {token.access_token}"}
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
         )
         assert resp.status_code == 403
         assert resp.json()["error"] == "insufficient_scope"
@@ -131,7 +135,7 @@ async def test_bearer_admin_scope_empty_allowlist_denies_all():
 async def test_invalid_bearer_401():
     async with build_client_app() as client:
         resp = await client.get(
-            "/admin/api/ping", headers={"Authorization": "Bearer does-not-exist"}
+            "/admin/api/users", headers={"Authorization": "Bearer does-not-exist"}
         )
         assert resp.status_code == 401
         assert resp.json() == {
@@ -149,7 +153,7 @@ async def test_expired_bearer_401():
             expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         )
         resp = await client.get(
-            "/admin/api/ping", headers={"Authorization": f"Bearer {token.access_token}"}
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
         )
         assert resp.status_code == 401
         assert resp.json()["error"] == "invalid_token"
@@ -159,7 +163,7 @@ async def test_revoked_bearer_401():
     async with build_client_app({"admin_client_ids": ["client1"]}) as client:
         token = await _seed_token(client.storage, "client1", "admin read", revoked=True)
         resp = await client.get(
-            "/admin/api/ping", headers={"Authorization": f"Bearer {token.access_token}"}
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
         )
         assert resp.status_code == 401
         assert resp.json()["error"] == "invalid_token"

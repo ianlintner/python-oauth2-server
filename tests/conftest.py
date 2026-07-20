@@ -26,6 +26,7 @@ async def build_client_app(config_overrides: dict | None = None):
         transport=ASGITransport(app=app), base_url="https://auth.example.com"
     ) as c:
         c.storage = storage
+        c.app = app
         yield c
 
 
