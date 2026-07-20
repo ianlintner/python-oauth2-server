@@ -140,6 +140,28 @@ async def test_forged_nonce_gets_invalid_dpop_proof_no_fresh_nonce(client_app):
     assert "dpop-nonce" not in {k.lower() for k in resp.headers}
 
 
+async def test_non_string_nonce_rejected_400_not_500(client_app):
+    # `validate_dpop_proof` (services/dpop.py) used to hand a raw,
+    # untyped `claims.get("nonce")` straight through to
+    # `DpopNonceIssuer.verify` (services/dpop_nonce.py), which string-slices
+    # its argument — a validly-signed proof with `"nonce": 12345` raised an
+    # unhandled TypeError there instead of a clean 400. This pins the fix at
+    # the real endpoint (not just the unit-level `validate_dpop_proof` call
+    # in tests/test_dpop.py).
+    await _seed_nonce_required_client(client_app)
+
+    proof, _ = make_dpop_proof(TOKEN_URL, "POST", nonce=12345)  # type: ignore[arg-type]
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials"},
+        basic_auth=("dpop-client", "dpop-secret"),
+        headers={"DPoP": proof},
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_dpop_proof"
+
+
 async def test_refresh_carries_cnf_forward(client_app):
     proof, pub_jwk = make_dpop_proof(TOKEN_URL, "POST")
     resp, _code = await run_code_flow(client_app, headers={"DPoP": proof})

@@ -32,9 +32,11 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import jwt
+import pytest
 
 from oauth2_server.models import Token
 from oauth2_server.services.dpop import jwk_thumbprint
+from tests.conftest import build_client_app
 from tests.helpers import make_dpop_proof, post_token, seed_client
 
 EXCHANGE_URN = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -356,6 +358,40 @@ async def test_act_embedded_in_jwt_even_without_actor_token(client_app):
 
     claims = jwt.decode(body["access_token"], options={"verify_signature": False})
     assert claims["act"] == {"sub": "tx_client"}
+
+
+async def test_opaque_mode_response_body_act_survives_while_token_is_opaque():
+    # PHASE2-BACKLOG.md correction: opaque mode (`access_tokens_opaque`)
+    # drops `cnf`/`authorization_details` from BOTH the JWT and the response
+    # body, but `act` is the exception — `routes/token.py` computes `act`
+    # locally and sets `body["act"] = act` unconditionally (gated only on
+    # `actor_token` presence, not on opaque mode), so the response-body `act`
+    # member survives even though the access token itself is a bare opaque
+    # string with nowhere to carry the JWT claim.
+    async with build_client_app({"access_tokens_opaque": True}) as opaque_app:
+        await _seed_exchange_client(opaque_app)
+        await _seed_subject_token(opaque_app, access_token="subj_act_opaque_tok", scope="read")
+
+        resp = await post_token(
+            opaque_app,
+            {
+                "grant_type": EXCHANGE_URN,
+                "subject_token": "subj_act_opaque_tok",
+                "subject_token_type": ACCESS_TOKEN_TYPE,
+                "actor_token": "some-opaque-actor-token",
+                "actor_token_type": ACCESS_TOKEN_TYPE,
+            },
+            basic_auth=_basic("tx_client", "tx_secret"),
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["act"] == {"sub": "tx_client"}
+
+        # An opaque access token is a bare random string, not a JWT — so
+        # there is no JWT claim for `act` to have survived into.
+        with pytest.raises(jwt.PyJWTError):
+            jwt.decode(body["access_token"], options={"verify_signature": False})
 
 
 # --- DPoP binding on an exchanged token (review carry-over) --------------------

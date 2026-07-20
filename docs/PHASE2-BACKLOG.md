@@ -120,6 +120,22 @@ From Phase 3b (`docs/plans/2026-07-20-python-oauth2-port-phase-3b.md` → "Globa
     way to see it was issued via delegation. The response-body `act` member keeps Rust's conditional
     shape (present only when `actor_token` was supplied on that request) for response-format parity.
     Task 6 (commit `1226433`).
+20. Client authentication runs BEFORE DPoP proof validation on `POST /oauth/token`
+    (`ClientService(storage).authenticate(...)` at the top of `routes/token.py::token`, DPoP header
+    read/validated only after it succeeds) — a request with both a bad client secret and a malformed/bad
+    DPoP proof gets 401 `invalid_client` and the proof's `jti` is never parsed, let alone burned in the
+    replay store. Rust validates the DPoP proof first (`handlers/oauth.rs::token`), so the same request
+    there would 400 `invalid_dpop_proof` and could consume replay-store state before client auth ever
+    runs. The Python ordering is deliberately DoS-hardening: an unauthenticated caller can't spend replay-
+    store entries (or the signature-verification cost of a proof) against a client it doesn't hold
+    credentials for.
+21. DPoP `htu` is compared against a URL built from `config.issuer` (e.g.
+    `config.issuer.rstrip("/") + "/oauth/token"` in `routes/token.py`, same pattern in
+    `routes/introspect.py`), not from the incoming request's `Host`/`Forwarded` headers. Rust rebuilds
+    the comparison URL from `connection_info()` (scheme/host honoring `Forwarded`/`X-Forwarded-*` per
+    actix config) plus the request path. Behind a reverse proxy, `OAUTH2_ISSUER` must be set to the
+    externally-visible URL (matching what clients put in their proof's `htu`) or every DPoP-bound request
+    will fail `htu` matching — there is no header-reconstruction fallback.
 
 ## Phase 3 candidates
 
@@ -294,14 +310,31 @@ for a future Phase 3c/3d hardening pass, not as bugs introduced by the port:
   client always has a fresh nonce ready for its next request. This server only ever sends
   `DPoP-Nonce` on the `use_dpop_nonce` 400 challenge; a client must always expect (and handle) one
   challenge/retry round trip per proof, never a proactively-refreshed nonce on a 200.
-- **Opaque-token mode silently drops `cnf`/`authorization_details`/`act`** — `access_tokens_opaque` is
-  a Python-only mode with no equivalent in Rust; an opaque access token is a bare random string with
-  nowhere to carry any of the three claims, so `TokenService.issue` drops all of them before building
-  the `TokenResponse` — the response-body echoes (RAR §7.1) disappear along with the JWT claims, not
-  just the JWT side. Pinned by `tests/test_dpop_token.py::test_opaque_mode_drops_cnf_silently` and
-  `tests/test_rar.py::test_opaque_mode_drops_authorization_details`.
+- **Opaque-token mode silently drops `cnf`/`authorization_details` from both the JWT and the response
+  body** — `access_tokens_opaque` is a Python-only mode with no equivalent in Rust; an opaque access
+  token is a bare random string with nowhere to carry either claim, so `TokenService.issue` drops both
+  before building the `TokenResponse`, and the response-body echoes (RAR §7.1) disappear along with the
+  JWT claims for these two. Pinned by `tests/test_dpop_token.py::test_opaque_mode_drops_cnf_silently`
+  and `tests/test_rar.py::test_opaque_mode_drops_authorization_details`. **`act` is the exception**: the
+  token-exchange handler (`routes/token.py`) computes `act` locally and sets
+  `body["act"] = act` unconditionally (gated only on `actor_token` having been supplied, not on opaque
+  mode) — so in opaque mode the response-body `act` member still survives; only the JWT claim embedding
+  (`TokenService.issue`'s `bound_act`) is dropped.
 - **Flat `act` on exchange chains** — if a token issued by one token-exchange call is itself later
   used as the `subject_token` of a second exchange, the resulting `act` claim is overwritten with the
   second exchanging client rather than nested per RFC 8693 §4.1's `act.act` delegation-chain shape.
   Noted at Task 6 review (`.superpowers/sdd/progress.md` "3b Task 6" minor(open)) — no test currently
   exercises a two-hop exchange chain.
+- **Introspection via a refresh-token value skips the `cnf` binding check** — `POST /oauth/introspect`
+  decodes the PRESENTED `token` value for its unverified-claims `cnf` lookup (`routes/introspect.py`);
+  when that value is an opaque refresh token rather than the JWT access token, `jwt.decode` fails, so
+  `cnf`/`jkt` come back empty and the whole DPoP-binding-required block is skipped even though the
+  underlying access token IS cnf-bound. Sibling of the refresh-grant `cnf`-carry gap above (a
+  refresh-token holder can already mint a fresh bound access token via the refresh grant without a
+  proof) — already called out inline in `routes/introspect.py`, recorded here for the doc-level ledger.
+- **RFC 9728 OAuth protected-resource metadata not ported** — Rust discovery advertises
+  `dpop_signing_alg_values_supported` on both `/.well-known/openid-configuration` AND a
+  `/.well-known/oauth-protected-resource` document (research-dpop.md); this port has no
+  protected-resource metadata endpoint at all. Relatedly, token exchange (`routes/token.py`) never reads
+  or validates a `resource` request parameter — RFC 8707 (Resource Indicators) is entirely absent
+  server-wide, not just from token exchange.

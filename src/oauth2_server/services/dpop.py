@@ -225,15 +225,29 @@ def validate_dpop_proof(
     if strip_query(str(claims.get("htu") or "")) != strip_query(url):
         raise DpopError("invalid_dpop_proof", "DPoP proof htu does not match request URI")
 
-    try:
-        iat = float(claims["iat"])
-    except (TypeError, ValueError) as exc:
-        raise DpopError(
-            "invalid_dpop_proof", "DPoP proof iat is outside the acceptance window"
-        ) from exc
+    iat_claim = claims["iat"]
+    if not isinstance(iat_claim, (int, float)):
+        # PyJWT decodes JSON numbers as int/float; a numeric *string* like
+        # "1690000000" used to sail through `float(claims["iat"])` below —
+        # tightened to a strict type check so a malformed/hostile proof
+        # can't smuggle a non-numeric-typed `iat` past this gate.
+        raise DpopError("invalid_dpop_proof", "DPoP proof iat must be a number")
+    iat = float(iat_claim)
     if not (-DPOP_IAT_SKEW_SECS <= (time.time() - iat) <= DPOP_IAT_SKEW_SECS):
         raise DpopError("invalid_dpop_proof", "DPoP proof iat is outside the acceptance window")
 
+    # A validly-signed proof can carry any JSON type for the optional
+    # `nonce` claim (e.g. `"nonce": 12345`). `DpopNonceIssuer.verify`
+    # (services/dpop_nonce.py) does `nonce + "=" * (-len(nonce) % 4)` on
+    # whatever it's handed — a non-str value raises an unhandled TypeError
+    # there instead of the intended `DpopError`, which would surface as an
+    # uncaught 500 on the token endpoint. Reject non-str nonces here so
+    # every downstream consumer of `DpopValidated.nonce` can assume `str |
+    # None`.
+    nonce = claims.get("nonce")
+    if nonce is not None and not isinstance(nonce, str):
+        raise DpopError("invalid_dpop_proof", "DPoP proof nonce must be a string")
+
     replay_store.check_and_insert(str(claims["jti"]))
 
-    return DpopValidated(jkt=jkt, nonce=claims.get("nonce"))
+    return DpopValidated(jkt=jkt, nonce=nonce)

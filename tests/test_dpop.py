@@ -287,6 +287,49 @@ def test_future_iat_outside_skew_window_rejected():
     assert exc_info.value.description == "DPoP proof iat is outside the acceptance window"
 
 
+def test_string_iat_rejected():
+    # A numeric *string* iat (e.g. `"1690000000"`) used to sail through
+    # `float(claims["iat"])` and be treated as a valid timestamp — tightened
+    # to a strict int/float type check.
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    claims = {
+        "htm": DEFAULT_METHOD,
+        "htu": DEFAULT_URL,
+        "iat": str(int(time.time())),
+        "jti": "string-iat-jti",
+    }
+    proof = jwt.encode(
+        claims, priv_pem, algorithm="ES256", headers={"typ": "dpop+jwt", "jwk": pub_jwk}
+    )
+
+    with pytest.raises(DpopError) as exc_info:
+        validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
+    assert exc_info.value.error == "invalid_dpop_proof"
+    assert exc_info.value.description == "DPoP proof iat must be a number"
+
+
+def test_non_string_nonce_rejected():
+    # A validly-signed proof with a non-str `nonce` claim (e.g. an int) must
+    # not reach `DpopNonceIssuer.verify`'s string slicing, which would raise
+    # an unhandled TypeError instead of a clean 400 `invalid_dpop_proof`.
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    claims = {
+        "htm": DEFAULT_METHOD,
+        "htu": DEFAULT_URL,
+        "iat": int(time.time()),
+        "jti": "int-nonce-jti",
+        "nonce": 12345,
+    }
+    proof = jwt.encode(
+        claims, priv_pem, algorithm="ES256", headers={"typ": "dpop+jwt", "jwk": pub_jwk}
+    )
+
+    with pytest.raises(DpopError) as exc_info:
+        validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
+    assert exc_info.value.error == "invalid_dpop_proof"
+    assert exc_info.value.description == "DPoP proof nonce must be a string"
+
+
 def test_unsupported_alg_rejected():
     _, pub_jwk = _generate_ec_keypair()
     claims = {
