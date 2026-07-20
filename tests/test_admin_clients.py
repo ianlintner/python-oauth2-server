@@ -108,15 +108,35 @@ async def test_search_percent_matches_literally():
         storage = client.storage
         await storage.delete_client("client1")
         await _seed_extra_client(storage, "100%")
-        await _seed_extra_client(storage, "other-client")
+        # Wildcard-vulnerable decoy: unescaped LIKE '%0%%' would match any name
+        # containing a "0", so this row is exactly what an escaping regression
+        # would wrongly include in the "0%" search below.
+        await _seed_extra_client(storage, "abc0def")
 
         resp = await client.get("/admin/api/clients", params={"search": "0%"})
         names = [item["name"] for item in resp.json()["items"]]
         assert "100%" in names
+        assert "abc0def" not in names
 
         resp = await client.get("/admin/api/clients", params={"search": "0x"})
         names = [item["name"] for item in resp.json()["items"]]
         assert "100%" not in names
+
+
+async def test_search_underscore_matches_literally():
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        await storage.delete_client("client1")
+        await _seed_extra_client(storage, "a_b")
+        # Unescaped LIKE '%a_b%' treats "_" as any-single-char and would match
+        # this decoy; escaped it must match the literal underscore only.
+        await _seed_extra_client(storage, "axb")
+
+        resp = await client.get("/admin/api/clients", params={"search": "a_b"})
+        names = [item["name"] for item in resp.json()["items"]]
+        assert "a_b" in names
+        assert "axb" not in names
 
 
 async def test_list_clients_returns_raw_string_list_fields():
