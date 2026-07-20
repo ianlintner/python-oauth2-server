@@ -6,6 +6,7 @@ equivalents, and special-case the handful of files that use Postgres-only
 constructs (PL/pgSQL `DO $$` blocks, `IF NOT EXISTS` on `ADD COLUMN`) that
 cannot be handled by textual rewrite alone.
 """
+
 import re
 from pathlib import Path
 

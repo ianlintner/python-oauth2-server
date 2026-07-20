@@ -10,14 +10,16 @@ Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
    JSON, never redirect, for the same reason.
 3. Everything else is delivered via redirect to `redirect_uri` (`error=...`), since
    the redirect target is now trusted.
-4. Unauthenticated -> 302 to `/auth/login?return_to=...`.
+4. Unauthenticated (or `prompt=login`/expired `max_age`) -> save `return_to` in the
+   session and 302 to `/auth/login`.
 5. Success -> 302 to `redirect_uri` with `code`, `state` (if given), and `iss`
    (RFC 9207, to prevent authorization-response mix-up attacks).
 """
 
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse
@@ -29,6 +31,23 @@ router = APIRouter()
 
 _MIN_CODE_CHALLENGE_LEN = 43
 _MAX_CODE_CHALLENGE_LEN = 128
+
+
+def _strip_reauth_params(query: str) -> str:
+    """Drop `max_age` and the `login` prompt value from a query string before
+    saving it as the post-login `return_to` replay URL — otherwise replaying
+    it after re-authentication would immediately force another re-login."""
+    kept = []
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if key == "max_age":
+            continue
+        if key == "prompt":
+            remaining = " ".join(p for p in value.split() if p != "login")
+            if remaining:
+                kept.append((key, remaining))
+            continue
+        kept.append((key, value))
+    return urlencode(kept)
 
 
 def _build_redirect_url(redirect_uri: str, params: dict[str, str]) -> str:
@@ -123,14 +142,42 @@ async def authorize(request: Request):
             )
 
     # --- 4. Require an authenticated session ---
+    # OIDC Core §3.1.2.1: `prompt` is a space-delimited list of values.
+    prompt_values = (params.get("prompt") or "").split()
+    force_login = "login" in prompt_values or "select_account" in prompt_values
+
     user_id = current_user_id(request)
-    if user_id is None:
+
+    # prompt=none: the AS must not display any UI. Without a session, this is
+    # an error delivered via the redirect channel (OIDC Core §3.1.2.6).
+    if "none" in prompt_values and user_id is None:
+        return _error_redirect(
+            redirect_uri,
+            "login_required",
+            "User is not authenticated and prompt=none was requested",
+            state,
+            config.issuer,
+        )
+
+    # max_age: if the session's auth_time is older than max_age seconds (or
+    # missing entirely), the user must re-authenticate.
+    auth_expired = False
+    max_age = params.get("max_age")
+    if max_age is not None:
+        try:
+            max_age_secs = int(max_age)
+        except ValueError:
+            max_age_secs = None
+        if max_age_secs is not None:
+            auth_time = request.session.get("auth_time")
+            auth_expired = auth_time is None or (time.time() - auth_time) >= max_age_secs
+
+    if user_id is None or force_login or auth_expired:
         original = request.url.path
         if request.url.query:
-            original += "?" + request.url.query
-        return RedirectResponse(
-            f"/auth/login?return_to={quote(original, safe='')}", status_code=302
-        )
+            original += "?" + _strip_reauth_params(request.url.query)
+        request.session["return_to"] = original
+        return RedirectResponse("/auth/login", status_code=302)
 
     # --- 5. Success: mint the authorization code and redirect back to the client ---
     auth_code = await AuthorizeService(storage, config).issue_code(

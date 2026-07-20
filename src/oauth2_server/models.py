@@ -1,4 +1,5 @@
 """Domain models — field-for-field port of crates/oauth2-core/src/models/."""
+
 from __future__ import annotations
 
 import json
@@ -18,7 +19,7 @@ class Client(BaseModel):
     client_id: str
     client_secret: str
     redirect_uris: str  # JSON array stored as string (TEXT column)
-    grant_types: str    # JSON array stored as string
+    grant_types: str  # JSON array stored as string
     scope: str
     name: str
     created_at: datetime
@@ -118,6 +119,7 @@ class DeviceAuthorization(BaseModel):
 
 class Claims(BaseModel):
     """RFC 9068 access-token claims."""
+
     sub: str
     iss: str
     aud: list[str]
@@ -128,12 +130,19 @@ class Claims(BaseModel):
     client_id: str | None = None
 
     @classmethod
-    def new(cls, subject: str, client_id: str, scope: str,
-            duration_seconds: int, issuer: str) -> "Claims":
+    def new(
+        cls, subject: str, client_id: str, scope: str, duration_seconds: int, issuer: str
+    ) -> "Claims":
         iat = int(_now().timestamp())
         return cls(
-            sub=subject, iss=issuer, aud=[client_id], exp=iat + duration_seconds,
-            iat=iat, scope=scope, jti=uuid.uuid4().hex, client_id=client_id,
+            sub=subject,
+            iss=issuer,
+            aud=[client_id],
+            exp=iat + duration_seconds,
+            iat=iat,
+            scope=scope,
+            jti=uuid.uuid4().hex,
+            client_id=client_id,
         )
 
     def to_payload(self) -> dict[str, Any]:

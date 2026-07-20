@@ -12,11 +12,12 @@ from tests.helpers import make_storage, seed_client, seed_user
 async def build_client_app(config_overrides: dict | None = None):
     """Build an app+client with the default seeded client1/user_rfc, honoring
     `config_overrides` on top of the standard unit-test Config."""
-    config = Config(
-        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
-        issuer="https://auth.example.com",
+    overrides = {
+        "jwt_secret": "unit-test-secret-not-for-production-0123456789abcdef",
+        "issuer": "https://auth.example.com",
         **(config_overrides or {}),
-    )
+    }
+    config = Config(**overrides)
     storage = await make_storage()
     await seed_client(storage)
     await seed_user(storage)

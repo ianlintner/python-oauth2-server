@@ -22,7 +22,6 @@ async def login(request: Request):
     form = await request.form()
     username = form.get("username", "")
     password = form.get("password", "")
-    return_to = form.get("return_to")
 
     storage = request.app.state.storage
     user = await storage.get_user_by_username(username)
@@ -32,6 +31,9 @@ async def login(request: Request):
     if user is None or not user.enabled or not verify_password(password, user.password_hash):
         return ORJSONResponse({"error": "invalid_credentials"}, status_code=401)
 
+    # `return_to` was saved to the session by GET /oauth/authorize before
+    # redirecting here; read it before set_login() clears the session.
+    return_to = request.session.get("return_to")
     set_login(request, user.id)
 
     target = return_to if is_safe_redirect(return_to) else "/"

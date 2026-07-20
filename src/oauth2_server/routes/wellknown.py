@@ -50,6 +50,7 @@ def _discovery_document(issuer: str) -> dict:
         "scopes_supported": ["openid", "profile", "email", "read", "write", "admin"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["HS256"],
+        "claims_supported": ["sub", "email", "preferred_username"],
     }
 
 
