@@ -36,6 +36,17 @@ def _is_valid_redirect_uri(uri: str) -> bool:
 
 @router.post("/register")
 async def register_client(request: Request) -> ORJSONResponse:
+    config = request.app.state.config
+    if not config.dynamic_registration_enabled:
+        return ORJSONResponse(
+            {
+                "error": "access_denied",
+                "error_description": "dynamic client registration is disabled",
+            },
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+        )
+
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
@@ -47,7 +58,6 @@ async def register_client(request: Request) -> ORJSONResponse:
         return _registration_error("invalid registration request")
 
     storage = request.app.state.storage
-    config = request.app.state.config
 
     if not reg.redirect_uris or not all(_is_valid_redirect_uri(u) for u in reg.redirect_uris):
         return _registration_error("redirect_uris must be a non-empty list of absolute URLs")

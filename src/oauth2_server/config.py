@@ -21,6 +21,7 @@ class Config(BaseSettings):
     issuer: str = Field(default="http://localhost:8080", validation_alias="OAUTH2_PUBLIC_URL")
     allowed_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
     access_tokens_opaque: bool = False
+    dynamic_registration_enabled: bool = False
     access_token_ttl_secs: int = 3600
     refresh_token_ttl_secs: int = 86400
     authorization_code_ttl_secs: int = 600
