@@ -492,13 +492,14 @@ writeup (install, backend selection, caveats).
   not one atomic operation. A benign race under concurrent admin writes to the same
   `(kind, value)` pair (admin-only, low-traffic surface). Rust's own Mongo backend has the same
   non-atomicity.
-- **`mongomock-motor` fidelity caveats** — it's a dev-convenience fast-path only where its
-  fidelity is verified; the actual contract suite (`tests/test_mongo_storage.py`,
-  `tests/test_mongo_admin.py`, `tests/test_mongo_e2e.py`) always runs against a REAL `mongo:7.0`
-  via `testcontainers` (gated on `RUN_TESTCONTAINERS=1`), specifically because `mongomock-motor`
-  is known to diverge from real MongoDB on unique-index `E11000` error shape and `$type` query
-  operator support (both of which `MongoStorage` depends on — duplicate-key detection and
-  `_normalize_legacy_timestamps`'s BSON-date healer, respectively).
+- **No in-memory Mongo fake** — `mongomock-motor` was evaluated as a dev-convenience fast path but
+  deliberately NOT adopted (and removed from the dev deps), because it diverges from real MongoDB
+  on the two behaviors `MongoStorage` depends on: the unique-index `E11000` error shape
+  (duplicate-key detection) and the `$type` query operator (`_normalize_legacy_timestamps`'s
+  BSON-date healer). The contract suite (`tests/test_mongo_storage.py`, `tests/test_mongo_admin.py`,
+  `tests/test_mongo_e2e.py`) therefore ALWAYS runs against a real `mongo:7.0` via `testcontainers`
+  (gated on `RUN_TESTCONTAINERS=1`, run in the CI `db-tests` job); the default `gate` job stays
+  SQLite-only and Docker-free.
 - **No Postgres-equivalent cross-server parity smoke automated in CI** — `scripts/
   mongo_parity_smoke.sh` (documentation-grade, manually run) proves client_credentials +
   introspect + revoke over real HTTP against a real mongod; it is intentionally NOT wired into
