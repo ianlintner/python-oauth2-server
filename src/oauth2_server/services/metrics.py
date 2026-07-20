@@ -17,7 +17,18 @@ string (not composed via a `namespace=` kwarg) so exposition text matches
 the Rust server's family names byte-for-byte. Two families deliberately have
 NO `_total` suffix — `oauth2_server_oauth_authorization_codes_issued` and
 `oauth2_server_oauth_failed_authentications` — copied verbatim; Rust breaks
-Prometheus naming convention on purpose here (research doc `gotchas`).
+Prometheus naming convention on purpose here (research doc `gotchas`). A
+third family, `oauth2_server_http_requests_total_by_route`, has `_total` in
+the MIDDLE of its name rather than at the end; `prometheus_client`'s
+`Counter` unconditionally appends a literal `_total` suffix unless the
+declared name already ENDS with `_total`, so a `Counter` here would double
+up to `..._total_by_route_total`. All three families are declared as
+`Gauge` (each is only ever `.inc()`'d, which `Gauge` supports) to get exact
+name parity — see each declaration below for the full rationale.
+
+This module also calls `disable_created_metrics()` at import time so no
+family emits the extra `..._created` gauge series `prometheus_client` adds
+by default (a registration-timestamp series with no Rust equivalent).
 
 Only a subset of the registered families is ever incremented by application
 code in this task (the HTTP middleware families, `oauth_token_issued_total`,
@@ -36,9 +47,25 @@ from __future__ import annotations
 
 import platform
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    disable_created_metrics,
+    generate_latest,
+)
 
 from oauth2_server import __version__ as _APP_VERSION
+
+# Every Counter/Histogram normally also emits an `..._created` gauge series
+# (the family's registration timestamp) on top of its `# HELP`/`# TYPE` and
+# value lines. Rust's `prometheus` exposition has no such series, so a cold
+# scrape here would carry extra lines the Rust server never emits. Disabling
+# this process-wide at import time (before any `Metrics()` instance is
+# constructed) drops those series for every family/instance for exact
+# byte-parity with the Rust exposition.
+disable_created_metrics()
 
 # The Rust exposition content-type is exactly 'text/plain; version=0.0.4'
 # with no charset; `prometheus_client`'s own `CONTENT_TYPE_LATEST` appends
@@ -90,7 +117,19 @@ class Metrics:
             ["status_class"],
             registry=r,
         )
-        self.http_requests_total_by_route = Counter(
+        # Declared as `Gauge`, not `Counter`, and only ever `.inc()`'d, never
+        # `.dec()`/`.set()` — same trap and same fix as the two `_total`-less
+        # families above, but here it bites for the opposite reason: this
+        # name has `_total` in the *middle* (`..._total_by_route`), not at
+        # the end. `prometheus_client`'s `Counter` unconditionally appends a
+        # literal `_total` suffix unless the declared name already ENDS with
+        # `_total` (see `Counter._metric_init` in `prometheus_client.metrics`);
+        # since this name doesn't end with `_total`, the library appends a
+        # second one, emitting `oauth2_server_http_requests_total_by_route_total`
+        # instead of the Rust name `oauth2_server_http_requests_total_by_route`.
+        # `Gauge` never mangles the name, so it's the only way to get exact
+        # byte-parity here too.
+        self.http_requests_total_by_route = Gauge(
             "oauth2_server_http_requests_total_by_route",
             "Total HTTP requests by method, route, and status",
             ["method", "route", "status"],

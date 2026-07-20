@@ -142,6 +142,37 @@ async def test_matched_route_uses_route_template_not_raw_path(client_app):
     assert 'route="/health"' in body
 
 
+async def test_by_route_family_name_has_no_double_total(client_app):
+    # `oauth2_server_http_requests_total_by_route` has `_total` in the
+    # *middle* of its name, not at the end. `prometheus_client`'s `Counter`
+    # unconditionally appends a literal `_total` suffix to the declared name
+    # unless it already ENDS with `_total`; since this name doesn't, a
+    # `Counter` would emit a doubled-up
+    # `oauth2_server_http_requests_total_by_route_total`, which the Rust
+    # exposition (and any dashboard querying the Rust name) never produces.
+    # It's declared as a `Gauge` instead (only ever `.inc()`'d in
+    # middleware.py, which `Gauge` supports) specifically to avoid this.
+    await client_app.get("/health")
+    body = (await client_app.get("/metrics")).text
+    assert "oauth2_server_http_requests_total_by_route{" in body
+    assert "_by_route_total" not in body
+
+
+def test_no_created_series_in_scrape():
+    # `prometheus_client` normally emits an extra `..._created` gauge series
+    # per Counter/Histogram family (registration timestamp) that Rust's
+    # `prometheus` exposition doesn't have. `disable_created_metrics()` is
+    # called once at module import in `services/metrics.py`, so no `_created`
+    # series should ever appear in a scrape, even after real increments.
+    metrics = Metrics()
+    metrics.bootstrap_seed()
+    metrics.http_requests_total.inc()
+    metrics.oauth_token_issued_total.inc()
+    metrics.http_request_duration_seconds.observe(0.01)
+    text = metrics.render().decode()
+    assert "_created" not in text
+
+
 # --- oauth_authorization_codes_issued --------------------------------------
 
 
