@@ -184,6 +184,7 @@ async def revoke(request: Request) -> ORJSONResponse:
             await storage.revoke_token_family(row.token_family)
         else:
             await storage.revoke_token(token_value)
+        request.app.state.metrics.oauth_token_revoked_total.inc()
 
     response = ORJSONResponse({})
     response.headers["Cache-Control"] = "no-store"

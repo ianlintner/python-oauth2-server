@@ -299,6 +299,7 @@ async def authorize(request: Request):
         nonce=merged.get("nonce"),
         authorization_details=authorization_details,
     )
+    request.app.state.metrics.oauth_authorization_codes_issued.inc()
 
     success_params = {"code": auth_code.code, "iss": config.issuer}
     if state is not None:

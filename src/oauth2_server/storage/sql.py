@@ -130,6 +130,12 @@ class SqlStorage:
     async def init(self) -> None:
         await run_migrations(self._engine, self._migrations_dir)
 
+    async def healthcheck(self) -> None:
+        """`GET /ready`'s dependency check (routes/system.py). Raises on any
+        connection/query failure; the caller turns that into a 503."""
+        async with self._engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+
     async def table_exists(self, name: str) -> bool:
         q = (
             "SELECT name FROM sqlite_master WHERE type='table' AND name=:n"

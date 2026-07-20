@@ -161,6 +161,9 @@ async def token(request: Request) -> ORJSONResponse:
             form, request.headers.get("authorization")
         )
     except OAuthError as exc:
+        # Rust parity site (oauth.rs bad-client-auth): every client-auth
+        # failure at the token endpoint counts as a failed authentication.
+        request.app.state.metrics.oauth_failed_authentications.inc()
         return oauth_error(exc.error, exc.description, exc.status)
 
     # RFC 9449 DPoP: read + validate an optional proof once, before dispatching
@@ -241,6 +244,7 @@ async def token(request: Request) -> ORJSONResponse:
             cnf=cnf,
             authorization_details=authorization_details,
         )
+        request.app.state.metrics.oauth_token_issued_total.inc()
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -328,6 +332,7 @@ async def token(request: Request) -> ORJSONResponse:
             cnf=cnf,
             authorization_details=authorization_details,
         )
+        request.app.state.metrics.oauth_token_issued_total.inc()
 
         scope_set = set(auth_code.scope.split())
         if "openid" in scope_set:
@@ -364,6 +369,9 @@ async def token(request: Request) -> ORJSONResponse:
             else None
         )
         if old_token is None:
+            # Rust parity site (oauth.rs bad-refresh): an unrecognized
+            # refresh_token counts as a failed authentication.
+            request.app.state.metrics.oauth_failed_authentications.inc()
             return oauth_error("invalid_grant", "refresh token not found")
 
         if old_token.client_id != client.client_id:
@@ -409,6 +417,7 @@ async def token(request: Request) -> ORJSONResponse:
             token_family=family,
             cnf=refresh_cnf,
         )
+        request.app.state.metrics.oauth_token_issued_total.inc()
 
         scope_set = set(scope.split())
         if "openid" in scope_set and old_token.user_id:
@@ -477,6 +486,7 @@ async def token(request: Request) -> ORJSONResponse:
             with_refresh=True,
             token_family=uuid.uuid4().hex,
         )
+        request.app.state.metrics.oauth_token_issued_total.inc()
 
         scope_set = set(device.scope.split())
         if "openid" in scope_set and device.user_id:
@@ -581,6 +591,7 @@ async def token(request: Request) -> ORJSONResponse:
             cnf=cnf,
             act=act,
         )
+        request.app.state.metrics.oauth_token_issued_total.inc()
 
         body: dict[str, object] = {
             "access_token": token_response.access_token,
