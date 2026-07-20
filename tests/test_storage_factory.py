@@ -2,9 +2,10 @@
 
 Dispatches on `config.database_url`'s scheme: `mongodb://`/`mongodb+srv://` ->
 MongoStorage (imported lazily so the default SQLite path never imports
-`motor`); anything else -> SqlStorage. MongoStorage doesn't exist yet (lands
-in a later Phase 3d task), so the mongo branch currently always raises
-RuntimeError — that's the behavior under test here.
+`motor`); anything else -> SqlStorage. `motor` is in the dev dependency
+group, so both mongo schemes construct a real `MongoStorage` here —
+`MongoStorage.__init__` never connects (motor is lazy), so this is safe
+without a live mongod.
 """
 
 import pytest
@@ -33,16 +34,35 @@ def test_factory_returns_sqlstorage_for_postgres_url():
     assert isinstance(storage, SqlStorage)
 
 
-def test_factory_mongo_scheme_raises_until_backend_exists():
+def test_factory_dispatches_mongo_scheme():
+    try:
+        from oauth2_server.storage.mongo import MongoStorage
+    except ImportError:
+        config = Config(jwt_secret=_JWT_SECRET, database_url="mongodb://localhost:27017/oauth2")
+        with pytest.raises(RuntimeError, match="motor"):
+            create_storage(config)
+        return
+
     config = Config(jwt_secret=_JWT_SECRET, database_url="mongodb://localhost:27017/oauth2")
-    with pytest.raises(RuntimeError, match="motor"):
-        create_storage(config)
+    storage = create_storage(config)
+    assert isinstance(storage, MongoStorage)
 
 
 def test_factory_mongo_srv_scheme_also_dispatches():
+    try:
+        from oauth2_server.storage.mongo import MongoStorage
+    except ImportError:
+        config = Config(
+            jwt_secret=_JWT_SECRET,
+            database_url="mongodb+srv://user:pass@cluster0.example.mongodb.net/oauth2",
+        )
+        with pytest.raises(RuntimeError, match="motor"):
+            create_storage(config)
+        return
+
     config = Config(
         jwt_secret=_JWT_SECRET,
         database_url="mongodb+srv://user:pass@cluster0.example.mongodb.net/oauth2",
     )
-    with pytest.raises(RuntimeError, match="motor"):
-        create_storage(config)
+    storage = create_storage(config)
+    assert isinstance(storage, MongoStorage)
