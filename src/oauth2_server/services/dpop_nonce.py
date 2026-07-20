@@ -27,6 +27,7 @@ import base64
 import binascii
 import hmac
 import logging
+import re
 import secrets
 import struct
 import time
@@ -150,7 +151,17 @@ def enforce_dpop_nonce(validated: DpopValidated, issuer: DpopNonceIssuer) -> ORJ
     return None
 
 
+# base64.urlsafe_b64decode has no validate= parameter and always decodes
+# leniently, silently discarding characters outside the alphabet — which
+# would let a garbled secret (stray quotes/whitespace from a secrets
+# manager) "successfully" decode to unpredictable bytes instead of falling
+# through to the loud random-fallback warning below. Pre-validate strictly.
+_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _decode_b64url_nopad(raw: str) -> bytes:
+    if not _B64URL_RE.fullmatch(raw):
+        raise ValueError("not base64url")
     padded = raw + "=" * (-len(raw) % 4)
     return base64.urlsafe_b64decode(padded)
 

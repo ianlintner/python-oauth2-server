@@ -235,6 +235,24 @@ def test_secret_decoding_wrong_length_falls_back(caplog):
     assert any("OAUTH2_DPOP_NONCE_SECRET" in record.message for record in caplog.records)
 
 
+def test_garbled_secret_falls_back_loudly_not_leniently(caplog):
+    """urlsafe_b64decode is lenient (silently strips non-alphabet chars), so a
+    valid secret with trailing garbage — stray quotes/whitespace from a
+    secrets manager — must NOT silently decode via character-stripping; it
+    must hit the loud random-fallback path instead."""
+    raw_secret = bytes(range(32))
+    clean = base64.urlsafe_b64encode(raw_secret).rstrip(b"=").decode()
+
+    for garbled in (clean + "!!", clean + "###", f'"{clean}"', clean + " "):
+        with caplog.at_level(logging.WARNING):
+            caplog.clear()
+            result = decode_dpop_nonce_secret(garbled)
+        assert result != raw_secret, f"garbled secret {garbled!r} silently decoded"
+        assert any("OAUTH2_DPOP_NONCE_SECRET" in record.message for record in caplog.records), (
+            f"no fallback warning for {garbled!r}"
+        )
+
+
 # --- bucket-id wire format ----------------------------------------------------
 
 
