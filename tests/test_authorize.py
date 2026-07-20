@@ -92,3 +92,56 @@ async def test_implicit_response_type_rejected(app_with_session):
     assert resp.status_code == 302
     q = parse_qs(urlparse(resp.headers["location"]).query)
     assert q["error"] == ["unsupported_response_type"]
+
+
+# --- return_to staleness hardening (login-CSRF) -------------------------------
+#
+# GET /oauth/authorize stores `return_to` (+ `return_to_ts`) in the session
+# before redirecting to /auth/login. A stale return_to from an abandoned
+# (possibly attacker-initiated) authorization request must NOT be replayed on
+# a later unrelated login — only a fresh, timestamped return_to is honored.
+
+_AUTHORIZE_PARAMS = {
+    "response_type": "code",
+    "client_id": "client1",
+    "redirect_uri": "https://a.example/cb",
+    "scope": "read",
+}
+
+
+async def test_fresh_return_to_is_replayed_after_login(app_with_session):
+    # Unauthenticated authorize request -> redirected to login, return_to saved.
+    resp = await app_with_session.get("/oauth/authorize", params=_AUTHORIZE_PARAMS)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/auth/login"
+
+    # Logging in promptly replays the pending authorize URL.
+    resp = await login_session(app_with_session)
+    assert resp.status_code == 302
+    assert resp.headers["location"].startswith("/oauth/authorize?")
+
+
+async def test_stale_return_to_is_not_replayed_after_login(app_with_session, monkeypatch):
+    import oauth2_server.routes.login as login_routes
+
+    resp = await app_with_session.get("/oauth/authorize", params=_AUTHORIZE_PARAMS)
+    assert resp.status_code == 302
+
+    # Advance the clock past the freshness window, as seen by the login route.
+    real_time = login_routes.time.time
+    monkeypatch.setattr(
+        login_routes.time,
+        "time",
+        lambda: real_time() + login_routes.RETURN_TO_MAX_AGE_SECS + 1,
+    )
+
+    resp = await login_session(app_with_session)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/", "stale return_to must not be replayed"
+
+
+async def test_login_without_pending_authorize_does_not_replay(app_with_session):
+    # A login not initiated by an authorize redirect has no return_to to honor.
+    resp = await login_session(app_with_session)
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/"

@@ -7,6 +7,8 @@ and the HTML login page are out of scope for this port.
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse
 
@@ -15,6 +17,10 @@ from oauth2_server.services.auth import is_safe_redirect
 from oauth2_server.sessions import set_login
 
 router = APIRouter()
+
+# How long a pending `return_to` saved by GET /oauth/authorize stays valid.
+# After this window a login no longer replays the stored authorize URL.
+RETURN_TO_MAX_AGE_SECS = 600
 
 
 @router.post("/login")
@@ -34,7 +40,13 @@ async def login(request: Request):
     # `return_to` was saved to the session by GET /oauth/authorize before
     # redirecting here; read it before set_login() clears the session.
     return_to = request.session.get("return_to")
+    return_to_ts = request.session.get("return_to_ts")
     set_login(request, user.id)
 
-    target = return_to if is_safe_redirect(return_to) else "/"
+    # Only honor return_to when it was stamped by a recent authorize redirect.
+    # A stale (or unstamped) value from an abandoned authorization request must
+    # not be replayed on a later unrelated login (login-CSRF hardening).
+    fresh = isinstance(return_to_ts, int) and time.time() - return_to_ts <= RETURN_TO_MAX_AGE_SECS
+
+    target = return_to if fresh and is_safe_redirect(return_to) else "/"
     return RedirectResponse(target, status_code=302)

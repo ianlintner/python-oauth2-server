@@ -177,6 +177,10 @@ async def authorize(request: Request):
         if request.url.query:
             original += "?" + _strip_reauth_params(request.url.query)
         request.session["return_to"] = original
+        # Timestamp the pending redirect so POST /auth/login can reject a stale
+        # return_to left over from an abandoned (possibly attacker-initiated)
+        # authorization request instead of silently replaying it.
+        request.session["return_to_ts"] = int(time.time())
         return RedirectResponse("/auth/login", status_code=302)
 
     # --- 5. Success: mint the authorization code and redirect back to the client ---
