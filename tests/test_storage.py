@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from oauth2_server.models import AuthorizationCode, Client, Token, User
+from oauth2_server.models import AuthorizationCode, Client, DeviceAuthorization, Token, User
 from oauth2_server.storage.sql import SqlStorage
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations" / "sql"
@@ -68,6 +68,38 @@ async def test_authorization_code_single_use(storage):
     await storage.mark_authorization_code_used("c1")
     got = await storage.get_authorization_code("c1")
     assert got.used is True
+
+
+async def test_mark_authorization_code_used_is_single_claim(storage):
+    await storage.save_client(_client())
+    await storage.save_user(_user())
+    code = AuthorizationCode(
+        id=uuid.uuid4().hex,
+        code="c-race",
+        client_id="client1",
+        user_id="u1",
+        redirect_uri="https://a.example/cb",
+        scope="read",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    await storage.save_authorization_code(code)
+    assert await storage.mark_authorization_code_used("c-race") == 1
+    assert await storage.mark_authorization_code_used("c-race") == 0
+
+
+async def test_mark_device_authorization_used_is_single_claim(storage):
+    await storage.save_client(_client())
+    d = DeviceAuthorization(
+        id=uuid.uuid4().hex,
+        device_code="dc-race",
+        user_code="UC-RACE",
+        client_id="client1",
+        scope="read",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    await storage.save_device_authorization(d)
+    assert await storage.mark_device_authorization_used("dc-race") == 1
+    assert await storage.mark_device_authorization_used("dc-race") == 0
 
 
 def _client() -> Client:

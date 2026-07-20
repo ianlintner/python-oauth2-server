@@ -109,7 +109,12 @@ async def token(request: Request) -> ORJSONResponse:
         elif client.is_public():
             return oauth_error("invalid_grant", "public clients must use PKCE")
 
-        await storage.mark_authorization_code_used(auth_code.code)
+        claimed = await storage.mark_authorization_code_used(auth_code.code)
+        if claimed == 0:
+            # Lost the race to a concurrent request that already claimed this code.
+            if auth_code.token_family:
+                await storage.revoke_token_family(auth_code.token_family)
+            return oauth_error("invalid_grant", "authorization code has already been used")
 
         token_response = await TokenService(storage, config).issue(
             client,
@@ -205,7 +210,10 @@ async def token(request: Request) -> ORJSONResponse:
         if not device.approved:
             return oauth_error("authorization_pending", "authorization request is still pending")
 
-        await storage.mark_device_authorization_used(device.device_code)
+        claimed = await storage.mark_device_authorization_used(device.device_code)
+        if claimed == 0:
+            # Lost the race to a concurrent request that already claimed this code.
+            return oauth_error("invalid_grant", "device_code has already been redeemed")
 
         token_response = await TokenService(storage, config).issue(
             client,

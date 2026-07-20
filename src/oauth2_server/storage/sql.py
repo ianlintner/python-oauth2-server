@@ -5,6 +5,7 @@ SQLAlchemy's `text()` uses named `:param` placeholders for both dialects, so
 (unlike the Rust sqlx code, which hand-writes `?` vs `$n` per branch) a single
 query string works for both backends here.
 """
+
 from pathlib import Path
 
 from sqlalchemy import text
@@ -183,8 +184,7 @@ class SqlStorage:
         async with self._engine.begin() as conn:
             await conn.execute(
                 text(
-                    "UPDATE tokens SET revoked = :r "
-                    "WHERE access_token = :t OR refresh_token = :t"
+                    "UPDATE tokens SET revoked = :r WHERE access_token = :t OR refresh_token = :t"
                 ),
                 {"r": True, "t": token},
             )
@@ -218,9 +218,7 @@ class SqlStorage:
             row = (
                 (
                     await conn.execute(
-                        text(
-                            f"SELECT {_AUTH_CODE_COLS} FROM authorization_codes WHERE code = :c"
-                        ),
+                        text(f"SELECT {_AUTH_CODE_COLS} FROM authorization_codes WHERE code = :c"),
                         {"c": code},
                     )
                 )
@@ -229,12 +227,13 @@ class SqlStorage:
             )
         return AuthorizationCode(**row) if row else None
 
-    async def mark_authorization_code_used(self, code: str) -> None:
+    async def mark_authorization_code_used(self, code: str) -> int:
         async with self._engine.begin() as conn:
-            await conn.execute(
-                text("UPDATE authorization_codes SET used = :u WHERE code = :c"),
-                {"u": True, "c": code},
+            result = await conn.execute(
+                text("UPDATE authorization_codes SET used = :u WHERE code = :c AND used = :f"),
+                {"u": True, "c": code, "f": False},
             )
+        return result.rowcount
 
     # --- Device authorizations (RFC 8628) ---
 
@@ -303,18 +302,20 @@ class SqlStorage:
                 {"d": True, "a": False, "uc": user_code},
             )
 
-    async def mark_device_authorization_used(self, device_code: str) -> None:
+    async def mark_device_authorization_used(self, device_code: str) -> int:
         async with self._engine.begin() as conn:
-            await conn.execute(
-                text("UPDATE device_authorizations SET used = :u WHERE device_code = :dc"),
-                {"u": True, "dc": device_code},
+            result = await conn.execute(
+                text(
+                    "UPDATE device_authorizations SET used = :u "
+                    "WHERE device_code = :dc AND used = :f"
+                ),
+                {"u": True, "dc": device_code, "f": False},
             )
+        return result.rowcount
 
     async def expire_device_authorization(self, device_code: str) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(
-                text(
-                    "UPDATE device_authorizations SET expires_at = :e WHERE device_code = :dc"
-                ),
+                text("UPDATE device_authorizations SET expires_at = :e WHERE device_code = :dc"),
                 {"e": "1970-01-01T00:00:00+00:00", "dc": device_code},
             )
