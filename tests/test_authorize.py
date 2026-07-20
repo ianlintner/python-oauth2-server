@@ -117,7 +117,7 @@ async def test_fresh_return_to_is_replayed_after_login(app_with_session):
 
     # Logging in promptly replays the pending authorize URL.
     resp = await login_session(app_with_session)
-    assert resp.status_code == 302
+    assert resp.status_code == 303
     assert resp.headers["location"].startswith("/oauth/authorize?")
 
 
@@ -136,14 +136,14 @@ async def test_stale_return_to_is_not_replayed_after_login(app_with_session, mon
     )
 
     resp = await login_session(app_with_session)
-    assert resp.status_code == 302
+    assert resp.status_code == 303
     assert resp.headers["location"] == "/", "stale return_to must not be replayed"
 
 
 async def test_login_without_pending_authorize_does_not_replay(app_with_session):
     # A login not initiated by an authorize redirect has no return_to to honor.
     resp = await login_session(app_with_session)
-    assert resp.status_code == 302
+    assert resp.status_code == 303
     assert resp.headers["location"] == "/"
 
 

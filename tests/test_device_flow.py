@@ -51,7 +51,7 @@ async def test_device_flow_pending_then_approved_returns_token(client_app):
     assert pending.json()["error"] == "authorization_pending"
 
     login_resp = await login_session(client_app)
-    assert login_resp.status_code == 302
+    assert login_resp.status_code == 303
 
     verify_resp = await client_app.post(
         "/oauth/device/verify", data={"user_code": user_code, "action": "approve"}
@@ -162,7 +162,7 @@ async def test_device_flow_mints_id_token_for_openid_scope(client_app):
     user_code = body["user_code"]
 
     login_resp = await login_session(client_app)
-    assert login_resp.status_code == 302
+    assert login_resp.status_code == 303
 
     verify_resp = await client_app.post(
         "/oauth/device/verify", data={"user_code": user_code, "action": "approve"}
