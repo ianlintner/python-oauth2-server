@@ -12,8 +12,10 @@ redirect (with `Retry-After`) without touching storage or Argon2 at all. Both
 keys are checked (and thus recorded) on *every* attempt, matching the Rust
 comment "Check on every attempt — not just failures — to prevent evasion via
 unknown usernames"; unlike Rust (whose token bucket has no reset), a
-*successful* login resets both keys here so a user who mistypes their
-password a few times isn't left throttled after finally getting it right.
+*successful* login resets the per-username key here so a user who mistypes
+their password a few times isn't left throttled after finally getting it
+right — the per-IP key deliberately survives success (see
+services/ratelimit.py for the credential-stuffing rationale).
 """
 
 from __future__ import annotations
