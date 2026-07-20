@@ -182,9 +182,7 @@ class SqlStorage:
             rows = (
                 (
                     await conn.execute(
-                        text(
-                            f"SELECT {_CLIENT_COLS} FROM clients ORDER BY created_at DESC LIMIT 200"
-                        )
+                        text(f"SELECT {_CLIENT_COLS} FROM clients ORDER BY created_at DESC")
                     )
                 )
                 .mappings()
@@ -296,7 +294,7 @@ class SqlStorage:
             rows = (
                 (
                     await conn.execute(
-                        text(f"SELECT {_USER_COLS} FROM users ORDER BY created_at DESC LIMIT 200")
+                        text(f"SELECT {_USER_COLS} FROM users ORDER BY created_at DESC")
                     )
                 )
                 .mappings()
