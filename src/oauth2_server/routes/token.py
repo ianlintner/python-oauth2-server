@@ -13,6 +13,7 @@ from fastapi.responses import ORJSONResponse
 
 from oauth2_server.config import Config
 from oauth2_server.errors import OAuthError, oauth_error
+from oauth2_server.keys import KeySet
 from oauth2_server.models import Client, IdTokenClaims, User
 from oauth2_server.security import encode_id_token
 from oauth2_server.services.auth import scope_is_subset
@@ -43,6 +44,7 @@ def _mint_id_token(
     user: User | None,
     scope: str,
     access_token: str,
+    keyset: KeySet | None,
     *,
     nonce: str | None = None,
     code: str | None = None,
@@ -57,9 +59,12 @@ def _mint_id_token(
     still set from `user_id` and email/preferred_username are simply omitted.
     `nonce`/`code` are only supplied on the initial code exchange — OIDC Core
     §12.2 forbids echoing `nonce` on a refreshed id_token, and there is no
-    code to hash on refresh. Raises `ValueError` (caught by both call sites,
-    turned into a 500 `server_error`) when `config.id_token_alg == "RS256"`
-    but `config.id_token_private_key_pem` is unset.
+    code to hash on refresh. `keyset` (from `app.state.keyset`) lets RS256
+    id_tokens sign with the current rotated key instead of always the static
+    env PEM — see `encode_id_token`. Raises `ValueError` (caught by both call
+    sites, turned into a 500 `server_error`) when `config.id_token_alg ==
+    "RS256"` but neither the keyset nor `config.id_token_private_key_pem`
+    can supply a signing key.
     """
     scope_set = set(scope.split())
     now = int(datetime.now(timezone.utc).timestamp())
@@ -79,7 +84,7 @@ def _mint_id_token(
             id_claims.email = user.email
         if "profile" in scope_set:
             id_claims.preferred_username = user.username
-    return encode_id_token(id_claims, config.jwt_secret, config=config)
+    return encode_id_token(id_claims, config.jwt_secret, config=config, keyset=keyset)
 
 
 @router.post("/token")
@@ -189,6 +194,7 @@ async def token(request: Request) -> ORJSONResponse:
                     user,
                     auth_code.scope,
                     token_response.access_token,
+                    keyset,
                     nonce=auth_code.nonce,
                     code=auth_code.code,
                 )
@@ -248,7 +254,13 @@ async def token(request: Request) -> ORJSONResponse:
             user = await storage.get_user_by_id(old_token.user_id)
             try:
                 token_response.id_token = _mint_id_token(
-                    config, client, old_token.user_id, user, scope, token_response.access_token
+                    config,
+                    client,
+                    old_token.user_id,
+                    user,
+                    scope,
+                    token_response.access_token,
+                    keyset,
                 )
             except ValueError as exc:
                 return oauth_error("server_error", str(exc), status=500)
@@ -302,7 +314,13 @@ async def token(request: Request) -> ORJSONResponse:
             user = await storage.get_user_by_id(device.user_id)
             try:
                 token_response.id_token = _mint_id_token(
-                    config, client, device.user_id, user, device.scope, token_response.access_token
+                    config,
+                    client,
+                    device.user_id,
+                    user,
+                    device.scope,
+                    token_response.access_token,
+                    keyset,
                 )
             except ValueError as exc:
                 return oauth_error("server_error", str(exc), status=500)
