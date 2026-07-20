@@ -319,6 +319,15 @@ async def test_refresh_reissues_id_token_for_openid_scope(client_app):
     assert claims["sub"] == "u1"
     assert "nonce" not in claims  # OIDC Core §12.2: no nonce on refresh
     assert claims["aud"] == "client1"
+    assert claims["email"] == "user_rfc@example.test"
+    # OIDC Core §3.3.2.11: at_hash = base64url-no-pad(left-half(SHA-256(access_token))),
+    # computed here the same way the implementation does, against the NEW access token.
+    expected_at_hash = (
+        base64.urlsafe_b64encode(hashlib.sha256(body["access_token"].encode()).digest()[:16])
+        .rstrip(b"=")
+        .decode()
+    )
+    assert claims["at_hash"] == expected_at_hash
 
 
 async def test_refresh_without_openid_scope_has_no_id_token(client_app):

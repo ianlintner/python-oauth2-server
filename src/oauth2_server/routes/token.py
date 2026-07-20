@@ -39,7 +39,8 @@ def _pkce_challenge(verifier: str) -> str:
 def _mint_id_token(
     config: Config,
     client: Client,
-    user: User,
+    user_id: str,
+    user: User | None,
     scope: str,
     access_token: str,
     *,
@@ -49,16 +50,20 @@ def _mint_id_token(
     """Build and encode an OIDC id_token (OIDC Core §2).
 
     Shared by the authorization_code and refresh_token grant branches. Callers
-    must check `"openid" in scope` and resolve `user` via `get_user_by_id`
-    before calling. `nonce`/`code` are only supplied on the initial code
-    exchange — OIDC Core §12.2 forbids echoing `nonce` on a refreshed id_token,
-    and there is no code to hash on refresh.
+    must check `"openid" in scope` before calling; the id_token is minted
+    unconditionally for openid scope, using `user_id` as `sub`. `user` is an
+    optional best-effort lookup (`get_user_by_id`) — when the user row is
+    missing (e.g. the user was deleted after the token was issued), `sub` is
+    still set from `user_id` and email/preferred_username are simply omitted.
+    `nonce`/`code` are only supplied on the initial code exchange — OIDC Core
+    §12.2 forbids echoing `nonce` on a refreshed id_token, and there is no
+    code to hash on refresh.
     """
     scope_set = set(scope.split())
     now = int(datetime.now(timezone.utc).timestamp())
     id_claims = IdTokenClaims(
         iss=config.issuer,
-        sub=user.id,
+        sub=user_id,
         aud=client.client_id,
         exp=now + config.access_token_ttl_secs,
         iat=now,
@@ -67,10 +72,11 @@ def _mint_id_token(
     )
     if code is not None:
         id_claims.c_hash = _half_hash(code)
-    if "email" in scope_set:
-        id_claims.email = user.email
-    if "profile" in scope_set:
-        id_claims.preferred_username = user.username
+    if user is not None:
+        if "email" in scope_set:
+            id_claims.email = user.email
+        if "profile" in scope_set:
+            id_claims.preferred_username = user.username
     return encode_id_token(id_claims, config.jwt_secret)
 
 
@@ -166,16 +172,16 @@ async def token(request: Request) -> ORJSONResponse:
         scope_set = set(auth_code.scope.split())
         if "openid" in scope_set:
             user = await storage.get_user_by_id(auth_code.user_id)
-            if user is not None:
-                token_response.id_token = _mint_id_token(
-                    config,
-                    client,
-                    user,
-                    auth_code.scope,
-                    token_response.access_token,
-                    nonce=auth_code.nonce,
-                    code=auth_code.code,
-                )
+            token_response.id_token = _mint_id_token(
+                config,
+                client,
+                auth_code.user_id,
+                user,
+                auth_code.scope,
+                token_response.access_token,
+                nonce=auth_code.nonce,
+                code=auth_code.code,
+            )
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
@@ -223,10 +229,9 @@ async def token(request: Request) -> ORJSONResponse:
         scope_set = set(scope.split())
         if "openid" in scope_set and old_token.user_id:
             user = await storage.get_user_by_id(old_token.user_id)
-            if user is not None:
-                token_response.id_token = _mint_id_token(
-                    config, client, user, scope, token_response.access_token
-                )
+            token_response.id_token = _mint_id_token(
+                config, client, old_token.user_id, user, scope, token_response.access_token
+            )
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
