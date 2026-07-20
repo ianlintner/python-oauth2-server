@@ -1,6 +1,8 @@
 import base64
 import hashlib
 import secrets
+import uuid
+from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -277,3 +279,53 @@ async def test_id_token_echoes_nonce(client_app):
     id_token = resp.json()["id_token"]
     claims = jwt.decode(id_token, JWT_SECRET, algorithms=["HS256"], audience="client1")
     assert claims["nonce"] == "nonce-value-123"
+
+
+async def test_expired_refresh_token_rejected(client_app):
+    resp, _ = await run_code_flow(client_app, scope="read")
+    refresh = resp.json()["refresh_token"]
+    # Age the token row past the refresh TTL directly in storage.
+    row = await client_app.storage.get_token_by_refresh_token(refresh)
+    aged = row.model_copy(update={"created_at": row.created_at - timedelta(seconds=86400 + 60)})
+    await client_app.storage.revoke_token(row.access_token)
+    await client_app.storage.save_token(
+        aged.model_copy(
+            update={"id": uuid.uuid4().hex, "access_token": "at-aged", "refresh_token": "rt-aged"}
+        )
+    )
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": "rt-aged"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp2.status_code == 400
+    body = resp2.json()
+    assert body["error"] == "invalid_grant"
+    assert "expired" in body["error_description"]
+
+
+async def test_refresh_reissues_id_token_for_openid_scope(client_app):
+    resp, _ = await run_code_flow(client_app, scope="openid email")
+    refresh = resp.json()["refresh_token"]
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": refresh},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp2.status_code == 200
+    body = resp2.json()
+    assert body.get("id_token")
+    claims = jwt.decode(body["id_token"], options={"verify_signature": False})
+    assert claims["sub"] == "u1"
+    assert "nonce" not in claims  # OIDC Core §12.2: no nonce on refresh
+    assert claims["aud"] == "client1"
+
+
+async def test_refresh_without_openid_scope_has_no_id_token(client_app):
+    resp, _ = await run_code_flow(client_app, scope="read")
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": resp.json()["refresh_token"]},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp2.json().get("id_token") is None

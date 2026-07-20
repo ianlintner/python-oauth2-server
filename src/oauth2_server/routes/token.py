@@ -6,13 +6,14 @@ import base64
 import hashlib
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
+from oauth2_server.config import Config
 from oauth2_server.errors import OAuthError, oauth_error
-from oauth2_server.models import IdTokenClaims
+from oauth2_server.models import Client, IdTokenClaims, User
 from oauth2_server.security import encode_id_token
 from oauth2_server.services.auth import scope_is_subset
 from oauth2_server.services.clients import ClientService
@@ -33,6 +34,44 @@ def _half_hash(value: str) -> str:
 def _pkce_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def _mint_id_token(
+    config: Config,
+    client: Client,
+    user: User,
+    scope: str,
+    access_token: str,
+    *,
+    nonce: str | None = None,
+    code: str | None = None,
+) -> str:
+    """Build and encode an OIDC id_token (OIDC Core §2).
+
+    Shared by the authorization_code and refresh_token grant branches. Callers
+    must check `"openid" in scope` and resolve `user` via `get_user_by_id`
+    before calling. `nonce`/`code` are only supplied on the initial code
+    exchange — OIDC Core §12.2 forbids echoing `nonce` on a refreshed id_token,
+    and there is no code to hash on refresh.
+    """
+    scope_set = set(scope.split())
+    now = int(datetime.now(timezone.utc).timestamp())
+    id_claims = IdTokenClaims(
+        iss=config.issuer,
+        sub=user.id,
+        aud=client.client_id,
+        exp=now + config.access_token_ttl_secs,
+        iat=now,
+        nonce=nonce,
+        at_hash=_half_hash(access_token),
+    )
+    if code is not None:
+        id_claims.c_hash = _half_hash(code)
+    if "email" in scope_set:
+        id_claims.email = user.email
+    if "profile" in scope_set:
+        id_claims.preferred_username = user.username
+    return encode_id_token(id_claims, config.jwt_secret)
 
 
 @router.post("/token")
@@ -126,25 +165,17 @@ async def token(request: Request) -> ORJSONResponse:
 
         scope_set = set(auth_code.scope.split())
         if "openid" in scope_set:
-            now = int(datetime.now(timezone.utc).timestamp())
-            id_claims = IdTokenClaims(
-                iss=config.issuer,
-                sub=auth_code.user_id,
-                aud=client.client_id,
-                exp=now + config.access_token_ttl_secs,
-                iat=now,
-                nonce=auth_code.nonce,
-                c_hash=_half_hash(auth_code.code),
-                at_hash=_half_hash(token_response.access_token),
-            )
-            if "email" in scope_set or "profile" in scope_set:
-                user = await storage.get_user_by_id(auth_code.user_id)
-                if user is not None:
-                    if "email" in scope_set:
-                        id_claims.email = user.email
-                    if "profile" in scope_set:
-                        id_claims.preferred_username = user.username
-            token_response.id_token = encode_id_token(id_claims, config.jwt_secret)
+            user = await storage.get_user_by_id(auth_code.user_id)
+            if user is not None:
+                token_response.id_token = _mint_id_token(
+                    config,
+                    client,
+                    user,
+                    auth_code.scope,
+                    token_response.access_token,
+                    nonce=auth_code.nonce,
+                    code=auth_code.code,
+                )
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
@@ -170,6 +201,10 @@ async def token(request: Request) -> ORJSONResponse:
                 await storage.revoke_token_family(old_token.token_family)
             return oauth_error("invalid_grant", "refresh token has been revoked")
 
+        refresh_deadline = old_token.created_at + timedelta(seconds=config.refresh_token_ttl_secs)
+        if datetime.now(timezone.utc) >= refresh_deadline:
+            return oauth_error("invalid_grant", "refresh token has expired")
+
         requested_scope = form.get("scope")
         if requested_scope:
             if not scope_is_subset(requested_scope, old_token.scope):
@@ -184,6 +219,15 @@ async def token(request: Request) -> ORJSONResponse:
         token_response = await TokenService(storage, config).issue(
             client, old_token.user_id, scope, with_refresh=True, token_family=family
         )
+
+        scope_set = set(scope.split())
+        if "openid" in scope_set and old_token.user_id:
+            user = await storage.get_user_by_id(old_token.user_id)
+            if user is not None:
+                token_response.id_token = _mint_id_token(
+                    config, client, user, scope, token_response.access_token
+                )
+
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
         return response

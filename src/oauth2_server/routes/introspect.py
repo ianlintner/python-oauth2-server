@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
+from oauth2_server.config import Config
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.models import IntrospectionResponse, Token
 from oauth2_server.security import decode_access_token
@@ -16,17 +17,30 @@ from oauth2_server.services.clients import ClientService
 router = APIRouter()
 
 
-async def _lookup_token(storage, token_value: str) -> Token | None:
+async def _lookup_token(storage, token_value: str) -> tuple[Token | None, bool]:
+    """Look up a token by access or refresh value.
+
+    Returns `(row, matched_via_refresh)` so callers can tell which column
+    matched — a refresh-token match has its own expiry (`created_at +
+    refresh_token_ttl_secs`) rather than the access token's `expires_at`.
+    """
     row = await storage.get_token_by_access_token(token_value)
-    if row is None:
-        row = await storage.get_token_by_refresh_token(token_value)
-    return row
+    if row is not None:
+        return row, False
+    row = await storage.get_token_by_refresh_token(token_value)
+    return row, row is not None
 
 
-def _is_active(row: Token | None) -> bool:
-    if row is None or row.revoked:
+def _expiry_deadline(row: Token, matched_via_refresh: bool, config: Config) -> datetime:
+    if matched_via_refresh:
+        return row.created_at + timedelta(seconds=config.refresh_token_ttl_secs)
+    return row.expires_at
+
+
+def _is_active(row: Token | None, deadline: datetime | None) -> bool:
+    if row is None or row.revoked or deadline is None:
         return False
-    return row.expires_at > datetime.now(timezone.utc)
+    return deadline > datetime.now(timezone.utc)
 
 
 @router.post("/introspect")
@@ -43,9 +57,12 @@ async def introspect(request: Request) -> ORJSONResponse:
         return oauth_error(exc.error, exc.description, exc.status)
 
     token_value = form.get("token")
-    row = await _lookup_token(storage, token_value) if token_value else None
+    row, matched_via_refresh = (
+        await _lookup_token(storage, token_value) if token_value else (None, False)
+    )
+    deadline = _expiry_deadline(row, matched_via_refresh, config) if row is not None else None
 
-    if not _is_active(row) or row.client_id != client.client_id:
+    if not _is_active(row, deadline) or row.client_id != client.client_id:
         response = ORJSONResponse(IntrospectionResponse(active=False).model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -69,7 +86,7 @@ async def introspect(request: Request) -> ORJSONResponse:
         client_id=row.client_id,
         username=username,
         token_type="Bearer",
-        exp=int(row.expires_at.timestamp()),
+        exp=int(deadline.timestamp()),
         iat=iat,
         nbf=iat,
         sub=row.user_id or row.client_id,
@@ -95,7 +112,7 @@ async def revoke(request: Request) -> ORJSONResponse:
         return oauth_error(exc.error, exc.description, exc.status)
 
     token_value = form.get("token")
-    row = await _lookup_token(storage, token_value) if token_value else None
+    row, _ = await _lookup_token(storage, token_value) if token_value else (None, False)
 
     if row is not None and row.client_id == client.client_id:
         if row.token_family:
