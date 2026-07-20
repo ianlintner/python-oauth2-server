@@ -239,12 +239,15 @@ async def test_denylist_add_find_remove_round_trip(storage):
 
 
 async def test_denylist_upsert_on_duplicate_kind_value(storage):
+    # created_at is set well in the past so it can't accidentally collide
+    # with the second add's timestamp and mask a regression.
+    original_created_at = _now() - timedelta(days=1)
     first = DenylistEntry(
         id=uuid.uuid4().hex,
         kind="username",
         value="mallory",
         reason="first",
-        created_at=_now(),
+        created_at=original_created_at,
     )
     await storage.add_denylist_entry(first)
 
@@ -263,8 +266,12 @@ async def test_denylist_upsert_on_duplicate_kind_value(storage):
     found = await storage.find_denylist_entry("username", "mallory")
     assert found is not None
     assert found.reason == "updated"
-    # Upsert keeps the ORIGINAL row id — the second add's id never persists.
+    # Upsert keeps the ORIGINAL row's id AND created_at — the second add's
+    # id/created_at never persist. Matches `SqlStorage`'s
+    # `ON CONFLICT(kind, value) DO UPDATE SET` which only touches
+    # reason/created_by/expires_at, leaving id and created_at untouched.
     assert found.id == first.id
+    assert found.created_at == original_created_at
 
 
 async def test_denylist_list_is_paginated(storage):

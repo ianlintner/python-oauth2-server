@@ -100,7 +100,11 @@ CLIENT_SECRET=$(echo "${REGISTER_RESPONSE}" | json_get client_secret)
 }
 echo "registered client_id=${CLIENT_ID}"
 
-BASIC=$(printf '%s:%s' "${CLIENT_ID}" "${CLIENT_SECRET}" | base64)
+# `tr -d '\n'` strips the line wrap `base64` inserts every 76 chars on GNU
+# coreutils (Linux) — without it the Basic auth header gets split across
+# multiple lines and curl sends a garbled Authorization value. macOS's BSD
+# base64 wraps too, so this is needed on both platforms.
+BASIC=$(printf '%s:%s' "${CLIENT_ID}" "${CLIENT_SECRET}" | base64 | tr -d '\n')
 
 echo "== 4. client_credentials grant =="
 TOKEN_RESPONSE=$(curl -s -X POST "${BASE_URL}/oauth/token" \

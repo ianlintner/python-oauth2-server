@@ -503,16 +503,19 @@ class MongoStorage:
     # --- Denylist ---
 
     async def add_denylist_entry(self, entry: DenylistEntry) -> None:
-        # Upsert on (kind, value) that keeps the ORIGINAL row's `id` on
-        # conflict — matches `SqlStorage`'s `ON CONFLICT(kind, value) DO
-        # UPDATE ... ` (which deliberately omits `id` from its SET clause).
-        # A plain `replace_one(..., upsert=True)` would instead let the
-        # *new* entry's `id` win, so the existing id is read back and
-        # spliced into the replacement document first.
+        # Upsert on (kind, value) that keeps the ORIGINAL row's `id` and
+        # `created_at` on conflict — matches `SqlStorage`'s
+        # `ON CONFLICT(kind, value) DO UPDATE ... ` (which deliberately
+        # omits both `id` and `created_at` from its SET clause, only
+        # updating reason/created_by/expires_at). A plain
+        # `replace_one(..., upsert=True)` would instead let the *new*
+        # entry's `id`/`created_at` win, so both are read back from the
+        # existing row and spliced into the replacement document first.
         existing = await self.denylist.find_one({"kind": entry.kind, "value": entry.value})
         doc = _to_doc(entry)
         if existing is not None:
             doc["id"] = existing["id"]
+            doc["created_at"] = existing["created_at"]
         await self.denylist.replace_one(
             {"kind": entry.kind, "value": entry.value}, doc, upsert=True
         )

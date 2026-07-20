@@ -449,9 +449,11 @@ writeup (install, backend selection, caveats).
     `MongoStorage` and asserts a sibling (rotated-in) access token goes inactive on introspection
     after the replay. Task 3 (commit `32faec8`); e2e proof Task 5.
 29. Denylist (`denylist` collection) and audit-log (`audit_log` collection) storage methods ARE
-    implemented on `MongoStorage`, and `supports_denylist()`/`supports_audit_log()` return
-    `True` — Rust's Mongo backend stubs both as no-ops returning `False`, silently disabling the
-    admin denylist/audit features whenever Mongo is the backend. Kept working here; proven
+    implemented on `MongoStorage`. The `/admin/api/capabilities` endpoint reports
+    denylist/audit_log as available on both backends (hardcoded `True`, see
+    `routes/admin/dashboard.py`), and the Mongo backend actually implements the denylist/audit
+    storage methods — unlike Rust, whose Mongo backend stubs both as no-op trait defaults, silently
+    disabling the admin denylist/audit features whenever Mongo is the backend. Kept working here; proven
     end-to-end (real `DenylistGuard` 403, not just a storage-layer lookup) by
     `tests/test_mongo_e2e.py::test_mongo_e2e_denylist_blocks_request`. Task 4 (commits `1801e38`,
     `635599b`); e2e proof Task 5.
