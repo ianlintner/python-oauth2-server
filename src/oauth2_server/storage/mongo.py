@@ -485,7 +485,9 @@ class MongoStorage:
             _from_doc(DeviceAuthorization, doc) async for doc in self.device_authorizations.find({})
         ]
         items.sort(key=lambda d: d.created_at, reverse=True)
-        return items
+        # Match the SqlStorage 500-row cap (ORDER BY created_at DESC LIMIT 500),
+        # which mirrors the Rust implementation (Rust parity).
+        return items[:500]
 
     async def list_device_authorizations_page(
         self, q: ListQuery

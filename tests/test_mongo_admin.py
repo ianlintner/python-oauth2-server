@@ -12,6 +12,7 @@ database name so pagination/search assertions can't leak across tests.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -42,7 +43,13 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-from oauth2_server.models import AuditLogEntry, Client, DenylistEntry, Token  # noqa: E402
+from oauth2_server.models import (  # noqa: E402
+    AuditLogEntry,
+    Client,
+    DenylistEntry,
+    DeviceAuthorization,
+    Token,
+)
 from oauth2_server.storage.paging import ListQuery  # noqa: E402
 
 
@@ -97,6 +104,19 @@ def _token(
         client_id=client_id,
         user_id=user_id,
         expires_at=expires_at or (_now() + timedelta(hours=1)),
+    )
+
+
+def _device_auth(client_id: str, created_at: datetime) -> DeviceAuthorization:
+    suffix = uuid.uuid4().hex
+    return DeviceAuthorization(
+        id=uuid.uuid4().hex,
+        device_code=f"dc-{suffix}",
+        user_code=f"UC-{suffix[:8]}",
+        client_id=client_id,
+        scope="read",
+        created_at=created_at,
+        expires_at=created_at + timedelta(minutes=10),
     )
 
 
@@ -168,6 +188,32 @@ async def test_tokens_page_status_filter(storage):
     items, total = await storage.list_tokens_page(ListQuery(status="expired"))
     assert total == 1
     assert items[0].access_token == expired.access_token
+
+
+# --- Device authorizations ---
+
+
+async def test_list_all_device_authorizations_caps_at_500_newest(storage):
+    # Mirrors SqlStorage.list_all_device_authorizations (ORDER BY created_at
+    # DESC LIMIT 500) — MongoStorage previously had no cap at all, which
+    # diverged from both SqlStorage and the Rust reference implementation
+    # and could make routes/admin/dashboard.py's pending_device_codes count
+    # unbounded. Seed 501 staggered rows and assert the oldest is dropped.
+    base = _now()
+    devices = [_device_auth("client1", base + timedelta(seconds=i)) for i in range(501)]
+    await asyncio.gather(*(storage.save_device_authorization(d) for d in devices))
+
+    items = await storage.list_all_device_authorizations()
+
+    assert len(items) == 500
+    returned_ids = {d.id for d in items}
+    oldest = devices[0]
+    newest_500 = devices[1:]
+    assert oldest.id not in returned_ids
+    assert returned_ids == {d.id for d in newest_500}
+    # Still newest-first.
+    assert items[0].id == devices[-1].id
+    assert items[-1].id == devices[1].id
 
 
 # --- Denylist ---
