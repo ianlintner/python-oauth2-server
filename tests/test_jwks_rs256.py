@@ -1,0 +1,269 @@
+"""RS256 signing, key rotation, and JWKS publication — integration tests.
+
+Ported per the Task 13 brief / `.superpowers/sdd/research-keys-rs256.md`
+`tests_to_port` "GAP" entry (Rust has no end-to-end coverage for these
+endpoints; the Python port adds it). A single 2048-bit RSA key pair is
+generated once (module-scoped fixture, RSA keygen costs ~100ms) and reused
+by every test below.
+"""
+
+from __future__ import annotations
+
+import base64
+
+import jwt
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+from oauth2_server.security import decode_access_token
+from tests.conftest import build_client_app
+from tests.helpers import login_admin, seed_admin
+from tests.test_introspection import post_introspect
+from tests.test_token_endpoint import run_code_flow
+
+ISSUER = "https://auth.example.com"
+
+_WARNING = (
+    "Key rotation is in-memory only. Rotated keys will be lost on restart. "
+    "DB persistence is not yet implemented."
+)
+
+
+@pytest.fixture(scope="module")
+def rsa_pem() -> str:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return pem.decode()
+
+
+def _rs256_app(rsa_pem: str, **overrides):
+    """`build_client_app` wired with the shared test RSA key, kid
+    `"test-rs256-key"` (so `id_token_alg` defaults to RS256)."""
+    return build_client_app(
+        {"id_token_private_key_pem": rsa_pem, "id_token_kid": "test-rs256-key", **overrides}
+    )
+
+
+def _b64url_uint(raw: str) -> int:
+    padded = raw + "=" * (-len(raw) % 4)
+    return int.from_bytes(base64.urlsafe_b64decode(padded), "big")
+
+
+def _public_key_from_jwk(jwk: dict):
+    numbers = rsa.RSAPublicNumbers(_b64url_uint(jwk["e"]), _b64url_uint(jwk["n"]))
+    return numbers.public_key()
+
+
+# ---------------------------------------------------------------------------
+# JWKS publication
+# ---------------------------------------------------------------------------
+
+
+async def test_jwks_publishes_rs256_key_shape(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        resp = await client.get("/.well-known/jwks.json")
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["cache-control"] == "public, max-age=3600"
+
+        body = resp.json()
+        assert len(body["keys"]) == 1
+        jwk = body["keys"][0]
+        assert jwk["kid"] == "test-rs256-key"
+        assert jwk["kty"] == "RSA"
+        assert jwk["use"] == "sig"
+        assert jwk["alg"] == "RS256"
+        assert set(jwk) == {"kid", "kty", "use", "alg", "n", "e"}
+
+        private_key = serialization.load_pem_private_key(rsa_pem.encode(), password=None)
+        public_numbers = private_key.public_key().public_numbers()
+        assert _b64url_uint(jwk["n"]) == public_numbers.n
+        assert _b64url_uint(jwk["e"]) == public_numbers.e
+
+
+async def test_jwks_empty_for_hs256_only(client_app):
+    resp = await client_app.get("/.well-known/jwks.json")
+    assert resp.status_code == 200
+    assert resp.json() == {"keys": []}
+
+
+# ---------------------------------------------------------------------------
+# Access + id token signing
+# ---------------------------------------------------------------------------
+
+
+async def test_access_token_signed_rs256_with_kid_matching_jwks(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        access_token = resp.json()["access_token"]
+
+        header = jwt.get_unverified_header(access_token)
+        assert header["alg"] == "RS256"
+        assert header["kid"] == "test-rs256-key"
+
+        jwks_resp = await client.get("/.well-known/jwks.json")
+        kids = [k["kid"] for k in jwks_resp.json()["keys"]]
+        assert header["kid"] in kids
+
+
+async def test_id_token_rs256_verifiable_via_jwks(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        id_token = resp.json()["id_token"]
+
+        header = jwt.get_unverified_header(id_token)
+        assert header["alg"] == "RS256"
+        assert header["kid"] == "test-rs256-key"
+
+        jwks_resp = await client.get("/.well-known/jwks.json")
+        jwk = jwks_resp.json()["keys"][0]
+        public_key = _public_key_from_jwk(jwk)
+
+        claims = jwt.decode(id_token, public_key, algorithms=["RS256"], audience="client1")
+        assert claims["iss"] == ISSUER
+        assert claims["sub"] == "u1"
+
+
+# ---------------------------------------------------------------------------
+# Rotation
+# ---------------------------------------------------------------------------
+
+
+async def test_rotate_keeps_old_key_in_jwks_during_grace(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        old_access_token = resp.json()["access_token"]
+        old_kid = jwt.get_unverified_header(old_access_token)["kid"]
+
+        await seed_admin(client.storage)
+        await login_admin(client)
+        rotate_resp = await client.post("/admin/api/keys/rotate", json={"algorithm": "RS256"})
+        assert rotate_resp.status_code == 200, rotate_resp.text
+        new_kid = rotate_resp.json()["kid"]
+        assert new_kid != old_kid
+
+        jwks_resp = await client.get("/.well-known/jwks.json")
+        kids = {k["kid"] for k in jwks_resp.json()["keys"]}
+        assert {old_kid, new_kid} <= kids
+
+        config = client.app.state.config
+        keyset = client.app.state.keyset
+        claims = decode_access_token(
+            old_access_token, config.jwt_secret, config.issuer, keyset=keyset
+        )
+        assert claims.sub == "u1"
+
+
+async def test_rotate_response_shape_and_warning(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+
+        resp = await client.post("/admin/api/keys/rotate", json={})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["algorithm"] == "RS256"
+        assert isinstance(body["kid"], str) and body["kid"].startswith("rs256-")
+        assert isinstance(body["created_at"], str)
+        assert body["grace_period_hours"] == 24
+        assert body["warning"] == _WARNING
+
+
+async def test_rotate_rejects_unknown_algorithm(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+
+        resp = await client.post("/admin/api/keys/rotate", json={"algorithm": "bogus"})
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "Unknown algorithm: bogus",
+        }
+
+
+async def test_admin_keys_list_hides_material(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+
+        resp = await client.get("/admin/api/keys")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        kids = {k["kid"] for k in body["keys"]}
+        assert kids == {"hs256-initial", "test-rs256-key"}
+        for key in body["keys"]:
+            assert set(key) == {"kid", "algorithm", "is_current", "created_at", "expires_at"}
+
+
+async def test_pre_rotation_token_still_introspects_active(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        access_token = resp.json()["access_token"]
+
+        await seed_admin(client.storage)
+        await login_admin(client)
+        rotate_resp = await client.post("/admin/api/keys/rotate", json={"algorithm": "RS256"})
+        assert rotate_resp.status_code == 200, rotate_resp.text
+
+        introspect_resp = await post_introspect(client, access_token)
+        assert introspect_resp.status_code == 200, introspect_resp.text
+        assert introspect_resp.json()["active"] is True
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+
+async def test_discovery_advertises_rs256_when_configured(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        resp = await client.get("/.well-known/openid-configuration")
+        assert resp.status_code == 200
+        assert resp.json()["id_token_signing_alg_values_supported"] == ["RS256"]
+
+
+async def test_discovery_advertises_hs256_by_default(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    assert resp.json()["id_token_signing_alg_values_supported"] == ["HS256"]
+
+
+# ---------------------------------------------------------------------------
+# Logout id_token_hint — RS256 verification (routes/logout.py TODO(task-13))
+# ---------------------------------------------------------------------------
+
+
+async def test_logout_accepts_rs256_id_token_hint(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        id_token_hint = resp.json()["id_token"]
+
+        logout_resp = await client.get("/oauth/logout", params={"id_token_hint": id_token_hint})
+        assert logout_resp.status_code == 200, logout_resp.text
+
+
+async def test_logout_rejects_rs256_hint_when_pem_not_configured(client_app):
+    other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = other_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    hint = jwt.encode(
+        {"iss": ISSUER, "sub": "u1", "aud": "client1", "exp": 9999999999, "iat": 0},
+        pem,
+        algorithm="RS256",
+    )
+    resp = await client_app.get("/oauth/logout", params={"id_token_hint": hint})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_request"

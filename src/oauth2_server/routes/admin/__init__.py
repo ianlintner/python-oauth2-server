@@ -9,8 +9,8 @@ adds — see `APIRouter.add_api_route`), so `clients_router`/`users_router`
 don't redeclare it.
 
 Clients and users CRUD land here in Task 8; tokens/devices/dashboard/
-capabilities/events (Task 9) and denylist/audit (Task 10) attach the same
-way.
+capabilities/events (Task 9), denylist/audit (Task 10), and signing-key
+rotation/listing (Task 13) attach the same way.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from oauth2_server.routes.admin.denylist import router as denylist_router
 from oauth2_server.routes.admin.devices import router as devices_router
 from oauth2_server.routes.admin.events import router as events_router
 from oauth2_server.routes.admin.guard import require_admin
+from oauth2_server.routes.admin.keys import router as keys_router
 from oauth2_server.routes.admin.tokens import router as tokens_router
 from oauth2_server.routes.admin.users import router as users_router
 
@@ -37,3 +38,4 @@ admin_router.include_router(dashboard_router)
 admin_router.include_router(events_router)
 admin_router.include_router(denylist_router)
 admin_router.include_router(audit_router)
+admin_router.include_router(keys_router)

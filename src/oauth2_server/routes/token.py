@@ -57,7 +57,9 @@ def _mint_id_token(
     still set from `user_id` and email/preferred_username are simply omitted.
     `nonce`/`code` are only supplied on the initial code exchange — OIDC Core
     §12.2 forbids echoing `nonce` on a refreshed id_token, and there is no
-    code to hash on refresh.
+    code to hash on refresh. Raises `ValueError` (caught by both call sites,
+    turned into a 500 `server_error`) when `config.id_token_alg == "RS256"`
+    but `config.id_token_private_key_pem` is unset.
     """
     scope_set = set(scope.split())
     now = int(datetime.now(timezone.utc).timestamp())
@@ -77,7 +79,7 @@ def _mint_id_token(
             id_claims.email = user.email
         if "profile" in scope_set:
             id_claims.preferred_username = user.username
-    return encode_id_token(id_claims, config.jwt_secret)
+    return encode_id_token(id_claims, config.jwt_secret, config=config)
 
 
 @router.post("/token")
@@ -85,6 +87,7 @@ async def token(request: Request) -> ORJSONResponse:
     form = dict(await request.form())
     storage = request.app.state.storage
     config = request.app.state.config
+    keyset = request.app.state.keyset
 
     try:
         client = await ClientService(storage).authenticate(
@@ -114,7 +117,7 @@ async def token(request: Request) -> ORJSONResponse:
         else:
             scope = client.scope
 
-        token_response = await TokenService(storage, config).issue(
+        token_response = await TokenService(storage, config, keyset).issue(
             client, None, scope, with_refresh=False
         )
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
@@ -167,7 +170,7 @@ async def token(request: Request) -> ORJSONResponse:
                 await storage.revoke_token_family(auth_code.token_family)
             return oauth_error("invalid_grant", "authorization code has already been used")
 
-        token_response = await TokenService(storage, config).issue(
+        token_response = await TokenService(storage, config, keyset).issue(
             client,
             auth_code.user_id,
             auth_code.scope,
@@ -178,16 +181,19 @@ async def token(request: Request) -> ORJSONResponse:
         scope_set = set(auth_code.scope.split())
         if "openid" in scope_set:
             user = await storage.get_user_by_id(auth_code.user_id)
-            token_response.id_token = _mint_id_token(
-                config,
-                client,
-                auth_code.user_id,
-                user,
-                auth_code.scope,
-                token_response.access_token,
-                nonce=auth_code.nonce,
-                code=auth_code.code,
-            )
+            try:
+                token_response.id_token = _mint_id_token(
+                    config,
+                    client,
+                    auth_code.user_id,
+                    user,
+                    auth_code.scope,
+                    token_response.access_token,
+                    nonce=auth_code.nonce,
+                    code=auth_code.code,
+                )
+            except ValueError as exc:
+                return oauth_error("server_error", str(exc), status=500)
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
@@ -233,16 +239,19 @@ async def token(request: Request) -> ORJSONResponse:
         family = old_token.token_family or uuid.uuid4().hex
         await storage.revoke_token(old_token.access_token)
 
-        token_response = await TokenService(storage, config).issue(
+        token_response = await TokenService(storage, config, keyset).issue(
             client, old_token.user_id, scope, with_refresh=True, token_family=family
         )
 
         scope_set = set(scope.split())
         if "openid" in scope_set and old_token.user_id:
             user = await storage.get_user_by_id(old_token.user_id)
-            token_response.id_token = _mint_id_token(
-                config, client, old_token.user_id, user, scope, token_response.access_token
-            )
+            try:
+                token_response.id_token = _mint_id_token(
+                    config, client, old_token.user_id, user, scope, token_response.access_token
+                )
+            except ValueError as exc:
+                return oauth_error("server_error", str(exc), status=500)
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
@@ -280,7 +289,7 @@ async def token(request: Request) -> ORJSONResponse:
             # Lost the race to a concurrent request that already claimed this code.
             return oauth_error("invalid_grant", "device_code has already been redeemed")
 
-        token_response = await TokenService(storage, config).issue(
+        token_response = await TokenService(storage, config, keyset).issue(
             client,
             device.user_id,
             device.scope,

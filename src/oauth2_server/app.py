@@ -14,6 +14,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
+from oauth2_server.keys import seed_keyset
 from oauth2_server.middleware import DenylistGuard
 from oauth2_server.routes.admin import admin_router
 from oauth2_server.routes.admin.guard import AdminAuthError
@@ -57,6 +58,7 @@ def create_app(
     app.state.storage = storage
     app.state.events = RecentEventsStore()
     app.state.par_store = ParStore()
+    app.state.keyset = seed_keyset(config)
     # Shared client for outbound OIDC back-channel logout POSTs
     # (routes/logout.py). Tests swap this for an `httpx.MockTransport`-backed
     # client to capture/assert the dispatched request without real network

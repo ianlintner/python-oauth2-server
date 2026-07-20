@@ -22,6 +22,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 import jwt
+from cryptography.hazmat.primitives import serialization
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
 
@@ -48,7 +49,11 @@ def _error(description: str, status: int = 400) -> ORJSONResponse:
 def _decode_hint(id_token_hint: str, config) -> dict:
     """Decode and verify `id_token_hint`, alg pinned from the JOSE header.
 
-    HS256 is the only supported alg today (verified against `jwt_secret`).
+    HS256 (verified against `jwt_secret`) and RS256 (verified against the
+    *public* half of `config.id_token_private_key_pem`) are supported. RS256
+    is only accepted when that PEM is configured — an RS256 hint with no PEM
+    configured is rejected rather than silently falling back (kept strict,
+    per the module docstring's documented divergence from the Rust server).
     Raises `_InvalidHint` on any decode/verification failure, including an
     unsupported alg — never returns a claims dict for an untrusted token.
     """
@@ -58,15 +63,29 @@ def _decode_hint(id_token_hint: str, config) -> dict:
         raise _InvalidHint from exc
 
     alg = header.get("alg")
-    if alg != "HS256":
-        # TODO(task-13): RS256 hint verification via config PEM public key
+    if alg == "HS256":
+        verify_key = config.jwt_secret
+    elif alg == "RS256":
+        if not config.id_token_private_key_pem:
+            raise _InvalidHint
+        try:
+            # Never feed the private PEM straight into PyJWT's RSA verify
+            # path (see research-keys-rs256.md gotchas) — extract the public
+            # key explicitly.
+            private_key = serialization.load_pem_private_key(
+                config.id_token_private_key_pem.encode(), password=None
+            )
+        except ValueError as exc:
+            raise _InvalidHint from exc
+        verify_key = private_key.public_key()
+    else:
         raise _InvalidHint
 
     try:
         return jwt.decode(
             id_token_hint,
-            config.jwt_secret,
-            algorithms=["HS256"],
+            verify_key,
+            algorithms=[alg],
             issuer=config.issuer,
             options={"verify_aud": False},
         )

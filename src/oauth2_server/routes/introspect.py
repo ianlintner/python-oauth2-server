@@ -74,7 +74,9 @@ async def introspect(request: Request) -> ORJSONResponse:
 
     jti = row.id
     try:
-        claims = decode_access_token(token_value, config.jwt_secret, config.issuer)
+        claims = decode_access_token(
+            token_value, config.jwt_secret, config.issuer, keyset=request.app.state.keyset
+        )
         jti = claims.jti
     except jwt.PyJWTError:
         pass
