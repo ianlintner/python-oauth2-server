@@ -100,6 +100,41 @@ class Config(BaseSettings):
     events_backend: str = "in_memory"
     events_filter_mode: str = "allow_all"
     events_types: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Social login (routes/social.py, services/social.py) — ported from
+    # `oauth2-social-login`/`oauth2-config::SocialConfig` (research doc
+    # research-social-login.md `config_keys`). A provider is "configured"
+    # (Rust: `enabled`) iff BOTH `_client_id` and `_client_secret` are set;
+    # Rust's config-file `enabled` bool is never actually checked by any
+    # handler (decorative) and has no analogue in this env-var-only
+    # `Config`, so it's intentionally not ported. `*_redirect_uri` falls
+    # back to an issuer-based default (`services/social.py::resolve_
+    # provider_config`) rather than Rust's hardcoded `localhost:8080`.
+    # Azure has its own optional client_id/secret/redirect_uri but falls
+    # back whole-hog to the Microsoft credentials when unset (Rust parity:
+    # `config.azure.or(config.microsoft)`), always using ITS OWN
+    # `azure_tenant_id` either way. Okta/Auth0 stay 503 stubs (divergence
+    # 25) — their client_id/secret/redirect_uri fields are accepted for
+    # forward-compat but never read by any handler.
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_redirect_uri: str | None = None
+    microsoft_client_id: str | None = None
+    microsoft_client_secret: str | None = None
+    microsoft_redirect_uri: str | None = None
+    microsoft_tenant_id: str = "common"
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
+    github_redirect_uri: str | None = None
+    azure_client_id: str | None = None
+    azure_client_secret: str | None = None
+    azure_redirect_uri: str | None = None
+    azure_tenant_id: str = "common"
+    okta_client_id: str | None = None
+    okta_client_secret: str | None = None
+    okta_redirect_uri: str | None = None
+    auth0_client_id: str | None = None
+    auth0_client_secret: str | None = None
+    auth0_redirect_uri: str | None = None
 
     @field_validator("events_types", mode="before")
     @classmethod

@@ -27,6 +27,7 @@ from oauth2_server.routes.login import router as login_router
 from oauth2_server.routes.logout import router as logout_router
 from oauth2_server.routes.par import router as par_router
 from oauth2_server.routes.register import router as register_router
+from oauth2_server.routes.social import router as social_router
 from oauth2_server.routes.system import router as system_router
 from oauth2_server.routes.token import router as token_router
 from oauth2_server.routes.wellknown import router as wellknown_router
@@ -40,6 +41,7 @@ from oauth2_server.services.metrics import Metrics
 from oauth2_server.services.par import ParStore
 from oauth2_server.services.ratelimit import FixedWindowLimiter
 from oauth2_server.services.resilience import CircuitBreaker, ConcurrencyLimiter
+from oauth2_server.services.social import OAUTH_PROVIDERS, SocialCircuitBreaker
 from oauth2_server.storage.base import Storage
 from oauth2_server.storage.sql import SqlStorage
 
@@ -99,6 +101,11 @@ def create_app(
         config.resilience_cb_half_open_max_probes,
     )
     app.state.concurrency_limiter = ConcurrencyLimiter(config.resilience_max_concurrent)
+    # One SocialCircuitBreaker per social-login OAuth provider (services/
+    # social.py), guarding only each provider's userinfo fetch. Per-app-
+    # instance (not module-global) so tests never leak breaker state across
+    # apps/test cases, matching the pattern above.
+    app.state.social_breakers = {provider: SocialCircuitBreaker() for provider in OAUTH_PROVIDERS}
     # Event bus (services/events_bus.py) — `None` when `events_enabled` is
     # False, matching Rust's "no EventActor registered" state (`app.state.
     # event_bus is None` is what `routes/events.py` and every emit call site
@@ -205,6 +212,7 @@ def create_app(
     app.include_router(logout_router, prefix="/oauth")
     app.include_router(par_router, prefix="/oauth")
     app.include_router(login_router, prefix="/auth")
+    app.include_router(social_router, prefix="/auth")
     app.include_router(register_router, prefix="/connect")
     app.include_router(wellknown_router)
     app.include_router(admin_router)
