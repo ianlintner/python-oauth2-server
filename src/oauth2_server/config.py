@@ -85,6 +85,28 @@ class Config(BaseSettings):
     resilience_cb_success_threshold: int = 2
     resilience_cb_open_secs: int = 30
     resilience_cb_half_open_max_probes: int = 3
+    # Event bus (services/events_bus.py) — ported from `crates/oauth2-events`
+    # (research-events-observability.md `config_keys`). Enabled by default
+    # (Rust parity: `OAUTH2_EVENTS_ENABLED` defaults true); `events_backend`
+    # only recognizes `console`/`in_memory`/`both` in this port — the
+    # feature-gated Redis Streams/Kafka/RabbitMQ backends are out of scope
+    # (see `services/events_bus.py`'s module docstring). `events_ingest_
+    # bearer_token` unset + `events_public_ingest` False means `POST
+    # /events/ingest` fails CLOSED with 503 `event_ingest_auth_not_configured`
+    # rather than ever accepting an unauthenticated request.
+    events_enabled: bool = True
+    events_public_ingest: bool = False
+    events_ingest_bearer_token: str | None = None
+    events_backend: str = "in_memory"
+    events_filter_mode: str = "allow_all"
+    events_types: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
+    @field_validator("events_types", mode="before")
+    @classmethod
+    def _split_events_types(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [t.strip() for t in v.split(",") if t.strip()]
+        return v
 
     @field_validator("dpop_nonce_lifetime_secs")
     @classmethod

@@ -11,6 +11,7 @@ from urllib.parse import unquote_plus
 from oauth2_server.errors import OAuthError
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import Client
+from oauth2_server.services.events_bus import EventBus, emit_event
 from oauth2_server.storage.base import Storage
 
 logger = logging.getLogger(__name__)
@@ -19,8 +20,22 @@ _UNKNOWN_OR_DISABLED_CLIENT_MESSAGE = "unknown or disabled client"
 
 
 class ClientService:
-    def __init__(self, storage: Storage):
+    def __init__(self, storage: Storage, event_bus: EventBus | None = None):
         self._storage = storage
+        self._event_bus = event_bus
+
+    def _emit_client_validated(self, client_id: str, success: bool) -> None:
+        # `client_validated` (research doc `key_behaviors` EVENT TYPES:
+        # "emitted on BOTH secret match and mismatch") — scoped narrowly to
+        # the actual secret-comparison outcome below, not every possible
+        # `authenticate()` failure (missing client_id, unknown/disabled
+        # client, denylisted client_id raise before ever reaching here).
+        emit_event(
+            self._event_bus,
+            "client_validated",
+            client_id=client_id,
+            metadata={"success": "true" if success else "false"},
+        )
 
     async def authenticate(self, request_form: dict, authorization_header: str | None) -> Client:
         basic = _parse_basic_auth(authorization_header)
@@ -60,11 +75,15 @@ class ClientService:
 
         if client.is_public():
             if client_secret:
+                self._emit_client_validated(client.client_id, success=False)
                 raise OAuthError("invalid_client", "public client must not present a secret")
+            self._emit_client_validated(client.client_id, success=True)
             return client
 
         if not client_secret or not secrets.compare_digest(client_secret, client.client_secret):
+            self._emit_client_validated(client.client_id, success=False)
             raise OAuthError("invalid_client", "invalid client secret")
+        self._emit_client_validated(client.client_id, success=True)
         return client
 
 

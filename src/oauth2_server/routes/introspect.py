@@ -14,6 +14,7 @@ from oauth2_server.models import IntrospectionResponse, Token
 from oauth2_server.security import decode_access_token
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.dpop import DpopError, read_dpop_header, validate_dpop_proof
+from oauth2_server.services.events_bus import emit_event
 
 router = APIRouter()
 
@@ -55,9 +56,10 @@ async def introspect(request: Request) -> ORJSONResponse:
     form = dict(await request.form())
     storage = request.app.state.storage
     config = request.app.state.config
+    event_bus = request.app.state.event_bus
 
     try:
-        client = await ClientService(storage).authenticate(
+        client = await ClientService(storage, event_bus).authenticate(
             form, request.headers.get("authorization")
         )
     except OAuthError as exc:
@@ -69,7 +71,20 @@ async def introspect(request: Request) -> ORJSONResponse:
     )
     deadline = _expiry_deadline(row, matched_via_refresh, config) if row is not None else None
 
-    if not _is_active(row, deadline) or row.client_id != client.client_id:
+    inactive = not _is_active(row, deadline)
+    if inactive and row is not None:
+        # `token_expired` (research doc EVENT TYPES: "severity=Warning, on
+        # ValidateToken hitting expired/revoked token") — only when a row
+        # actually exists (an unrecognized token value is simply not this
+        # event; there's nothing to report as expired).
+        emit_event(
+            event_bus,
+            "token_expired",
+            severity="warning",
+            user_id=row.user_id,
+            client_id=row.client_id,
+        )
+    if inactive or row.client_id != client.client_id:
         return _inactive_response()
 
     # RFC 9449 §7.1: an access token bound to a DPoP key (a `cnf.jkt` claim)
@@ -142,6 +157,8 @@ async def introspect(request: Request) -> ORJSONResponse:
     except jwt.PyJWTError:
         pass
 
+    emit_event(event_bus, "token_validated", user_id=row.user_id, client_id=row.client_id)
+
     iat = int(row.created_at.timestamp())
     body = IntrospectionResponse(
         active=True,
@@ -168,9 +185,10 @@ async def introspect(request: Request) -> ORJSONResponse:
 async def revoke(request: Request) -> ORJSONResponse:
     form = dict(await request.form())
     storage = request.app.state.storage
+    event_bus = request.app.state.event_bus
 
     try:
-        client = await ClientService(storage).authenticate(
+        client = await ClientService(storage, event_bus).authenticate(
             form, request.headers.get("authorization")
         )
     except OAuthError as exc:
@@ -185,6 +203,7 @@ async def revoke(request: Request) -> ORJSONResponse:
         else:
             await storage.revoke_token(token_value)
         request.app.state.metrics.oauth_token_revoked_total.inc()
+        emit_event(event_bus, "token_revoked", user_id=row.user_id, client_id=row.client_id)
 
     response = ORJSONResponse({})
     response.headers["Cache-Control"] = "no-store"

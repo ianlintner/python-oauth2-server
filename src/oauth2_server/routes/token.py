@@ -58,6 +58,7 @@ from oauth2_server.services.dpop import (
     validate_dpop_proof,
 )
 from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
+from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.tokens import TokenService
 
@@ -220,9 +221,10 @@ async def token(request: Request) -> ORJSONResponse:
     storage = request.app.state.storage
     config = request.app.state.config
     keyset = request.app.state.keyset
+    event_bus = request.app.state.event_bus
 
     try:
-        client = await ClientService(storage).authenticate(
+        client = await ClientService(storage, event_bus).authenticate(
             form, request.headers.get("authorization")
         )
     except OAuthError as exc:
@@ -318,6 +320,12 @@ async def token(request: Request) -> ORJSONResponse:
             authorization_details=authorization_details,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
+        emit_event(
+            event_bus,
+            "token_created",
+            client_id=client.client_id,
+            metadata={"scope": scope, "has_refresh_token": "false"},
+        )
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -337,6 +345,13 @@ async def token(request: Request) -> ORJSONResponse:
             return oauth_error("invalid_grant", "authorization code was not issued to this client")
 
         if auth_code.expires_at < datetime.now(timezone.utc):
+            emit_event(
+                event_bus,
+                "authorization_code_expired",
+                severity="warning",
+                user_id=auth_code.user_id,
+                client_id=auth_code.client_id,
+            )
             return oauth_error("invalid_grant", "authorization code has expired")
 
         if auth_code.used:
@@ -396,6 +411,13 @@ async def token(request: Request) -> ORJSONResponse:
                 await storage.revoke_token_family(auth_code.token_family)
             return oauth_error("invalid_grant", "authorization code has already been used")
 
+        emit_event(
+            event_bus,
+            "authorization_code_validated",
+            user_id=auth_code.user_id,
+            client_id=auth_code.client_id,
+        )
+
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             auth_code.user_id,
@@ -406,6 +428,13 @@ async def token(request: Request) -> ORJSONResponse:
             authorization_details=authorization_details,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
+        emit_event(
+            event_bus,
+            "token_created",
+            user_id=auth_code.user_id,
+            client_id=client.client_id,
+            metadata={"scope": auth_code.scope, "has_refresh_token": "true"},
+        )
 
         scope_set = set(auth_code.scope.split())
         if "openid" in scope_set:
@@ -491,6 +520,13 @@ async def token(request: Request) -> ORJSONResponse:
             cnf=refresh_cnf,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
+        emit_event(
+            event_bus,
+            "token_created",
+            user_id=old_token.user_id,
+            client_id=client.client_id,
+            metadata={"scope": scope, "has_refresh_token": "true"},
+        )
 
         scope_set = set(scope.split())
         if "openid" in scope_set and old_token.user_id:
@@ -560,6 +596,13 @@ async def token(request: Request) -> ORJSONResponse:
             token_family=uuid.uuid4().hex,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
+        emit_event(
+            event_bus,
+            "token_created",
+            user_id=device.user_id,
+            client_id=client.client_id,
+            metadata={"scope": device.scope, "has_refresh_token": "true"},
+        )
 
         scope_set = set(device.scope.split())
         if "openid" in scope_set and device.user_id:
@@ -667,6 +710,13 @@ async def token(request: Request) -> ORJSONResponse:
             act=act,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
+        emit_event(
+            event_bus,
+            "token_created",
+            user_id=subject_row.user_id,
+            client_id=client.client_id,
+            metadata={"scope": scope, "has_refresh_token": "false"},
+        )
 
         body: dict[str, object] = {
             "access_token": token_response.access_token,

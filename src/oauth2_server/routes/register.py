@@ -13,6 +13,7 @@ from fastapi.responses import ORJSONResponse
 from pydantic import ValidationError
 
 from oauth2_server.models import Client, ClientRegistration, ClientRegistrationResponse
+from oauth2_server.services.events_bus import emit_event
 
 router = APIRouter()
 
@@ -118,6 +119,12 @@ async def register_client(request: Request) -> ORJSONResponse:
         enabled=True,
     )
     await storage.save_client(client)
+    emit_event(
+        request.app.state.event_bus,
+        "client_registered",
+        client_id=client_id,
+        metadata={"client_name": reg.client_name, "scope": reg.scope},
+    )
 
     response_body = ClientRegistrationResponse(
         client_id=client_id,

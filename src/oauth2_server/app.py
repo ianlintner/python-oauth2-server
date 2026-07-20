@@ -21,6 +21,7 @@ from oauth2_server.routes.admin import admin_router
 from oauth2_server.routes.admin.guard import AdminAuthError
 from oauth2_server.routes.authorize import router as authorize_router
 from oauth2_server.routes.device import router as device_router
+from oauth2_server.routes.events import router as events_router
 from oauth2_server.routes.introspect import router as introspect_router
 from oauth2_server.routes.login import router as login_router
 from oauth2_server.routes.logout import router as logout_router
@@ -33,6 +34,7 @@ from oauth2_server.security import derive_session_key
 from oauth2_server.services.dpop import DpopReplayStore
 from oauth2_server.services.dpop_nonce import DpopNonceIssuer, decode_dpop_nonce_secret
 from oauth2_server.services.events import RecentEventsStore
+from oauth2_server.services.events_bus import IdempotencyStore, build_event_bus
 from oauth2_server.services.limiter import TokenBucketLimiter
 from oauth2_server.services.metrics import Metrics
 from oauth2_server.services.par import ParStore
@@ -97,6 +99,17 @@ def create_app(
         config.resilience_cb_half_open_max_probes,
     )
     app.state.concurrency_limiter = ConcurrencyLimiter(config.resilience_max_concurrent)
+    # Event bus (services/events_bus.py) — `None` when `events_enabled` is
+    # False, matching Rust's "no EventActor registered" state (`app.state.
+    # event_bus is None` is what `routes/events.py` and every emit call site
+    # check to no-op). `event_idempotency` is cheap to construct
+    # unconditionally (no background task) even though it's only ever read
+    # from `POST /events/ingest`, which itself short-circuits before
+    # touching it whenever the bus is absent.
+    app.state.event_bus = (
+        build_event_bus(config, app.state.events) if config.events_enabled else None
+    )
+    app.state.event_idempotency = IdempotencyStore()
     app.state.keyset = seed_keyset(config)
     # RFC 9449 DPoP: a single shared replay store + nonce issuer per app
     # instance, read directly by routes/token.py (and later introspect).
@@ -196,6 +209,7 @@ def create_app(
     app.include_router(wellknown_router)
     app.include_router(admin_router)
     app.include_router(system_router)
+    app.include_router(events_router, prefix="/events")
 
     return app
 
