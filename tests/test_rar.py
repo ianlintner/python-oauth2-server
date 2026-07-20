@@ -18,7 +18,9 @@ import json
 from urllib.parse import parse_qs, urlparse
 
 import jwt
+import pytest
 
+from tests.conftest import build_client_app
 from tests.helpers import login_session, post_token
 
 _VALID_DETAILS = [{"type": "openid", "actions": ["read"]}]
@@ -292,3 +294,38 @@ async def test_par_pushed_details_flow(client_app):
 
     claims = jwt.decode(body["access_token"], options={"verify_signature": False})
     assert claims["authorization_details"] == _VALID_DETAILS
+
+
+# --- Opaque-mode drop (review carry-over) ---------------------------------------
+
+
+async def test_opaque_mode_drops_authorization_details(client_app):
+    """Review carry-over: `services/tokens.py::TokenService.issue` computes
+    `bound_details = authorization_details if not config.access_tokens_opaque
+    else None` and passes `bound_details` (not the raw validated value) into
+    `TokenResponse(authorization_details=bound_details)`. Since the route
+    always serializes with `model_dump(exclude_none=True)`
+    (`routes/token.py`), an opaque-mode response has NO `authorization_details`
+    key at all — this pins that the RESPONSE ECHO drops too, not just the JWT
+    claim (an opaque access token has no JWT to carry it in anyway). The
+    request is still validated against `rar_types_supported` before being
+    silently discarded — a malformed/unsupported type still 400s."""
+    async with build_client_app({"access_tokens_opaque": True}) as opaque_app:
+        resp = await post_token(
+            opaque_app,
+            {
+                "grant_type": "client_credentials",
+                "authorization_details": json.dumps(_VALID_DETAILS),
+            },
+            basic_auth=("client1", "s3cret"),
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "authorization_details" not in body, (
+            "opaque-mode access tokens have nowhere to carry authorization_details "
+            "as a JWT claim, so TokenService.issue drops it before building the "
+            "TokenResponse — the response echo is dropped along with the claim"
+        )
+        # The bare opaque access token is not a JWT.
+        with pytest.raises(jwt.PyJWTError):
+            jwt.decode(body["access_token"], options={"verify_signature": False})

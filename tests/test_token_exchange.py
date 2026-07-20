@@ -34,10 +34,12 @@ from datetime import datetime, timedelta, timezone
 import jwt
 
 from oauth2_server.models import Token
-from tests.helpers import post_token, seed_client
+from oauth2_server.services.dpop import jwk_thumbprint
+from tests.helpers import make_dpop_proof, post_token, seed_client
 
 EXCHANGE_URN = "urn:ietf:params:oauth:grant-type:token-exchange"
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+TOKEN_URL = "https://auth.example.com/oauth/token"
 
 
 async def _seed_exchange_client(client_app, **overrides):
@@ -353,6 +355,40 @@ async def test_act_embedded_in_jwt_even_without_actor_token(client_app):
     assert "act" not in body
 
     claims = jwt.decode(body["access_token"], options={"verify_signature": False})
+    assert claims["act"] == {"sub": "tx_client"}
+
+
+# --- DPoP binding on an exchanged token (review carry-over) --------------------
+
+
+async def test_token_exchange_with_dpop_proof_binds_and_reports_dpop(client_app):
+    """Review carry-over: the token-exchange branch passes `cnf` from the
+    shared pre-grant DPoP block (routes/token.py) straight into
+    `TokenService.issue`, same as every other grant — but no test drove a
+    REAL signed proof through the exchange endpoint end-to-end. Confirms the
+    exchanged token is DPoP-bound (cnf.jkt) AND still carries `act.sub` for
+    the exchanging client, i.e. the two claims coexist correctly."""
+    await _seed_exchange_client(client_app)
+    await _seed_subject_token(client_app, access_token="subj_dpop_tok", scope="read")
+
+    proof, pub_jwk = make_dpop_proof(TOKEN_URL, "POST")
+
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": "subj_dpop_tok",
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client", "tx_secret"),
+        headers={"DPoP": proof},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["token_type"] == "DPoP"
+
+    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
+    assert claims["cnf"]["jkt"] == jwk_thumbprint(pub_jwk)
     assert claims["act"] == {"sub": "tx_client"}
 
 

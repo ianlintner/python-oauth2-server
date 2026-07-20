@@ -32,10 +32,13 @@ from httpx import ASGITransport, AsyncClient
 from oauth2_server.app import create_app
 from oauth2_server.config import Config
 from oauth2_server.models import DenylistEntry, Token
+from oauth2_server.services.dpop import jwk_thumbprint
 from tests.conftest import build_client_app
 from tests.helpers import (
+    generate_dpop_key,
     login_admin,
     login_session,
+    make_dpop_proof,
     make_storage,
     post_token,
     reseed_client,
@@ -1010,3 +1013,194 @@ async def test_authorize_rejects_duplicate_query_params(app_with_session):
     body = resp.json()
     assert body["error"] == "invalid_request"
     assert "duplicate query parameter" in body["error_description"]
+
+
+# --- Phase 3b compliance pins (Task 7) --------------------------------------
+#
+# Each test below is a thin wrapper pinning one Phase 3b behavior that already
+# has full coverage in its own dedicated module (named in each docstring).
+
+
+async def test_dpop_bound_token_round_trip(client_app):
+    """Full coverage: test_dpop_token.py::test_client_credentials_with_es256_proof_binds_cnf
+    and test_introspect_with_matching_proof_active_true_and_cnf."""
+    key = generate_dpop_key()
+    proof, pub_jwk = make_dpop_proof(f"{ISSUER}/oauth/token", "POST", key)
+
+    token_resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials", "scope": "read"},
+        basic_auth=("client1", "s3cret"),
+        headers={"DPoP": proof},
+    )
+    assert token_resp.status_code == 200, token_resp.text
+    body = token_resp.json()
+    assert body["token_type"] == "DPoP", (
+        "RFC 9449: a DPoP-bound access token must report token_type 'DPoP'"
+    )
+    access_token = body["access_token"]
+    claims = jwt.decode(access_token, options={"verify_signature": False})
+    assert claims["cnf"]["jkt"] == jwk_thumbprint(pub_jwk), (
+        "RFC 9449 §6.1: cnf.jkt must equal the DPoP proof's JWK thumbprint"
+    )
+
+    introspect_proof, _ = make_dpop_proof(f"{ISSUER}/oauth/introspect", "POST", key)
+    introspect_resp = await client_app.post(
+        "/oauth/introspect",
+        data={"token": access_token},
+        headers={**_basic_header("client1", "s3cret"), "DPoP": introspect_proof},
+    )
+    assert introspect_resp.status_code == 200, introspect_resp.text
+    introspect_body = introspect_resp.json()
+    assert introspect_body["active"] is True
+    assert introspect_body["cnf"]["jkt"] == jwk_thumbprint(pub_jwk), (
+        "RFC 9449 §7.1: introspection must echo the bound cnf.jkt for a matching proof"
+    )
+
+
+async def test_dpop_nonce_challenge_flow(client_app):
+    """Full coverage: test_dpop_token.py::test_nonce_required_client_bootstrap."""
+    await seed_client(
+        client_app.storage,
+        client_id="rfc-dpop-nonce-client",
+        client_secret="nonce-secret",
+        dpop_nonce_required=True,
+        grant_types=json.dumps(["client_credentials"]),
+    )
+    key = generate_dpop_key()
+
+    first_proof, _ = make_dpop_proof(f"{ISSUER}/oauth/token", "POST", key)
+    first_resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials"},
+        basic_auth=("rfc-dpop-nonce-client", "nonce-secret"),
+        headers={"DPoP": first_proof},
+    )
+    assert first_resp.status_code == 400, first_resp.text
+    assert first_resp.json()["error"] == "use_dpop_nonce", (
+        "RFC 9449 §8: a client bound to nonce enforcement must be challenged "
+        "with use_dpop_nonce before a proof lacking a server-issued nonce is accepted"
+    )
+    nonce = first_resp.headers["DPoP-Nonce"]
+
+    second_proof, pub_jwk = make_dpop_proof(f"{ISSUER}/oauth/token", "POST", key, nonce)
+    second_resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials"},
+        basic_auth=("rfc-dpop-nonce-client", "nonce-secret"),
+        headers={"DPoP": second_proof},
+    )
+    assert second_resp.status_code == 200, second_resp.text
+    body = second_resp.json()
+    assert body["token_type"] == "DPoP"
+    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
+    assert claims["cnf"]["jkt"] == jwk_thumbprint(pub_jwk), (
+        "a proof embedding the challenged nonce from the SAME key must be accepted"
+    )
+
+
+async def test_rar_full_flow_with_type_validation(client_app):
+    """Full coverage: test_rar.py::test_authorize_rejects_unknown_rar_type
+    and test_full_flow_embeds_details_in_jwt_and_response."""
+    await login_session(client_app)
+
+    bad_resp = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "authorization_details": json.dumps([{"type": "payment_initiation"}]),
+        },
+    )
+    assert bad_resp.status_code == 302, bad_resp.text
+    q = _query(bad_resp.headers["location"])
+    assert q["error"] == "invalid_authorization_details", (
+        "RFC 9396 §5: an authorization_details type outside rar_types_supported "
+        "must be rejected before a code is minted"
+    )
+
+    details = [{"type": "openid", "actions": ["read"]}]
+    verifier, challenge = _pkce_pair()
+    good_resp = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "authorization_details": json.dumps(details),
+        },
+    )
+    assert good_resp.status_code == 302, good_resp.text
+    code = _query(good_resp.headers["location"])["code"]
+
+    token_resp = await client_app.post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "https://a.example/cb",
+            "client_id": "client1",
+            "code_verifier": verifier,
+        },
+        headers=_basic_header("client1", "s3cret"),
+    )
+    assert token_resp.status_code == 200, token_resp.text
+    body = token_resp.json()
+    assert body["authorization_details"] == details, (
+        "RFC 9396 §7.1: the AS must echo the validated authorization_details in the token response"
+    )
+    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
+    assert claims["authorization_details"] == details, (
+        "RFC 9396: authorization_details must also be embedded in the access token"
+    )
+
+
+async def test_token_exchange_round_trip(client_app):
+    """Full coverage: test_token_exchange.py::test_valid_subject_token_is_exchanged."""
+    exchange_urn = "urn:ietf:params:oauth:grant-type:token-exchange"
+    access_token_type_urn = "urn:ietf:params:oauth:token-type:access_token"
+
+    await seed_client(
+        client_app.storage,
+        client_id="rfc-exchange-client",
+        client_secret="exchange-secret",
+        grant_types=json.dumps([exchange_urn]),
+        scope="read profile",
+    )
+    subject_token = Token(
+        id=uuid.uuid4().hex,
+        access_token="rfc-subject-token",
+        client_id="other-client",
+        user_id="u1",
+        scope="read",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    await client_app.storage.save_token(subject_token)
+
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": exchange_urn,
+            "subject_token": "rfc-subject-token",
+            "subject_token_type": access_token_type_urn,
+        },
+        basic_auth=("rfc-exchange-client", "exchange-secret"),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["issued_token_type"] == access_token_type_urn, (
+        "RFC 8693 §2.2.1: issued_token_type must echo the URN of the issued token kind"
+    )
+    assert body["token_type"] == "Bearer"
+    assert "refresh_token" not in body, "RFC 8693: token exchange never issues a refresh token"
+
+    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
+    assert claims["sub"] == "u1", "the exchanged token must carry the SUBJECT token's user"
+    assert claims["client_id"] == "rfc-exchange-client", (
+        "the exchanged token must carry the EXCHANGING client's client_id"
+    )

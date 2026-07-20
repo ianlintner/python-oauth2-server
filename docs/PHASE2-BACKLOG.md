@@ -89,6 +89,38 @@ From Phase 3a (`docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` → "Globa
     success; this is a deliberate strengthening: one valid credential must not let an attacker reset the
     per-IP throttle mid credential-stuffing run. Task 1 (commit `e5d794d`).
 
+From Phase 3b (`docs/plans/2026-07-20-python-oauth2-port-phase-3b.md` → "Global Constraints"):
+14. The DPoP replay store (`services/dpop.py::DpopReplayStore`) is mandatory app state
+    (`app.state.dpop_replay`) — there is no silent per-request fallback store that no-ops replay
+    protection the way Rust does (it constructs a throwaway store when `app_data` is missing, so a
+    misconfigured deployment loses replay protection silently instead of failing to start).
+    Task 1 (commits `bf176d0`, `b170b15`).
+15. `authorization_details` is validated, not merely JSON-parsed: it must be a JSON array of objects,
+    each with a `type` member in the configured allowlist (`rar_types_supported`, default `["openid"]`
+    — discovery parity) → violations get 400/redirect `invalid_authorization_details` (RFC 9396 §5).
+    Rust accepts any JSON shape with no type enforcement at all (its own audit lists this as backlog
+    gap #20). Task 5 (commit `305834a`).
+16. At authorization_code redemption, the CONSENTED (auth-code-stored) `authorization_details` wins; a
+    conflicting token-request value is rejected with 400 `invalid_authorization_details` (RFC 9396
+    §6.1) rather than silently replacing the consented value. Rust lets the token request replace the
+    consented value — privilege-escalation-shaped, since the value the user consented to at
+    `/oauth/authorize` is not what ends up on the issued token. Task 5 (commit `305834a`).
+17. `authorization_details` is echoed in the token response body (RFC 9396 §7.1) and included in
+    introspection (§9.2) for active tokens that carry it — Rust does neither. Task 5 (commit
+    `305834a`).
+18. Token exchange (RFC 8693) validates `subject_token_type` (required, must be
+    `urn:ietf:params:oauth:token-type:access_token`) and `requested_token_type` (absent or the same
+    access-token URN) → 400 `invalid_request` otherwise. Rust parses both fields and then ignores them
+    (`#[allow(dead_code)]`), so an `id_token`/SAML `subject_token_type` silently behaves like an access
+    token. Task 6 (commit `1226433`).
+19. The `act` claim (`{"sub": <exchanging client_id>}`) is embedded in the issued JWT access token for
+    every token-exchange grant, in addition to the response body (RFC 8693 §4.1). Rust only ever puts
+    `act` in the response JSON — impersonation is never recorded on the token itself, so a downstream
+    resource server decoding the JWT directly (rather than trusting the token-endpoint response) has no
+    way to see it was issued via delegation. The response-body `act` member keeps Rust's conditional
+    shape (present only when `actor_token` was supplied on that request) for response-format parity.
+    Task 6 (commit `1226433`).
+
 ## Phase 3 candidates
 
 Seeded from item 12 above, the still-open minor findings in `.superpowers/sdd/progress.md`, and gaps
@@ -231,3 +263,45 @@ after 3a are called out explicitly and carried forward to 3b/3c.
   (parameters are bound, so injection-safe; cosmetic result pollution only).
   **Done (3a):** Task 5 (commits `e2a75ca`, `e91ba6d`) — `%`/`_` in `search` are escaped (`ESCAPE '\'`)
   so they match literally; strengthened with wildcard-decoy tests.
+
+### Known DPoP/RAR gaps (Rust parity, deliberate)
+
+Phase 3b (`docs/plans/2026-07-20-python-oauth2-port-phase-3b.md` → "Global Constraints", "Rust gaps
+deliberately KEPT") ports DPoP (RFC 9449), RAR (RFC 9396), and token exchange (RFC 8693) while
+deliberately KEEPING the following Rust gaps rather than fixing them — recorded here as candidates
+for a future Phase 3c/3d hardening pass, not as bugs introduced by the port:
+
+- **No `ath` claim** — the access-token-hash confirmation claim (RFC 9449 §4.3, recommended for
+  resource-server-side proof binding at protected resources other than this AS) is never computed or
+  required on any DPoP proof.
+- **No resource-side DPoP at userinfo** — `GET /oauth/userinfo` accepts a plain `Bearer` token even
+  when the underlying access token is `cnf`-bound; only `/oauth/token` (binding) and
+  `/oauth/introspect` (binding enforcement) are DPoP-aware.
+- **No `dpop_jkt` at authorize/PAR** — RFC 9449 §10 lets a client pre-declare the DPoP key it intends
+  to use via a `dpop_jkt` authorization parameter, checked against the actual proof at redemption.
+  Neither `GET /oauth/authorize` nor `POST /oauth/par` accept or store it.
+- **Device grant never cnf-bound** — a DPoP proof presented on `POST /oauth/token` with
+  `grant_type=urn:ietf:params:oauth:grant-type:device_code` is accepted and validated but its `cnf`
+  is discarded; the issued token is always a plain Bearer token. Pinned by
+  `tests/test_dpop_token.py::test_device_grant_never_binds_cnf`.
+- **Refresh grant carries the old token's `cnf` forward without a fresh proof** — `routes/token.py`'s
+  `_salvage_old_cnf` decodes the OLD access token (unverified) and copies its `cnf` onto the new one;
+  RFC 9449 doesn't mandate a fresh proof per refresh, but not requiring one means a stolen refresh
+  token alone (no DPoP key needed) is enough to keep minting DPoP-labeled tokens. Pinned by
+  `tests/test_dpop_token.py::test_refresh_carries_cnf_forward`.
+- **No `DPoP-Nonce` header on success responses** — RFC 9449 §8 allows (and many deployments use) an
+  authorization server that rotates the nonce on every response, including successful ones, so a
+  client always has a fresh nonce ready for its next request. This server only ever sends
+  `DPoP-Nonce` on the `use_dpop_nonce` 400 challenge; a client must always expect (and handle) one
+  challenge/retry round trip per proof, never a proactively-refreshed nonce on a 200.
+- **Opaque-token mode silently drops `cnf`/`authorization_details`/`act`** — `access_tokens_opaque` is
+  a Python-only mode with no equivalent in Rust; an opaque access token is a bare random string with
+  nowhere to carry any of the three claims, so `TokenService.issue` drops all of them before building
+  the `TokenResponse` — the response-body echoes (RAR §7.1) disappear along with the JWT claims, not
+  just the JWT side. Pinned by `tests/test_dpop_token.py::test_opaque_mode_drops_cnf_silently` and
+  `tests/test_rar.py::test_opaque_mode_drops_authorization_details`.
+- **Flat `act` on exchange chains** — if a token issued by one token-exchange call is itself later
+  used as the `subject_token` of a second exchange, the resulting `act` claim is overwritten with the
+  second exchanging client rather than nested per RFC 8693 §4.1's `act.act` delegation-chain shape.
+  Noted at Task 6 review (`.superpowers/sdd/progress.md` "3b Task 6" minor(open)) — no test currently
+  exercises a two-hop exchange chain.
