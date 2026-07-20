@@ -13,6 +13,8 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
+from oauth2_server.routes.admin import admin_router
+from oauth2_server.routes.admin.guard import AdminAuthError
 from oauth2_server.routes.authorize import router as authorize_router
 from oauth2_server.routes.device import router as device_router
 from oauth2_server.routes.introspect import router as introspect_router
@@ -22,6 +24,7 @@ from oauth2_server.routes.register import router as register_router
 from oauth2_server.routes.token import router as token_router
 from oauth2_server.routes.wellknown import router as wellknown_router
 from oauth2_server.security import derive_session_key
+from oauth2_server.services.events import RecentEventsStore
 from oauth2_server.storage.base import Storage
 from oauth2_server.storage.sql import SqlStorage
 
@@ -48,6 +51,15 @@ def create_app(
     app = FastAPI(default_response_class=ORJSONResponse, lifespan=lifespan)
     app.state.config = config
     app.state.storage = storage
+    app.state.events = RecentEventsStore()
+
+    # FastAPI dependencies (e.g. require_admin, see routes/admin/guard.py)
+    # can't short-circuit a request by returning a Response directly, so the
+    # guard raises AdminAuthError carrying a prebuilt Response; this handler
+    # unwraps it back into the real HTTP response.
+    @app.exception_handler(AdminAuthError)
+    async def _admin_auth_error_handler(request: Request, exc: AdminAuthError):
+        return exc.response
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -81,6 +93,7 @@ def create_app(
     app.include_router(login_router, prefix="/auth")
     app.include_router(register_router, prefix="/connect")
     app.include_router(wellknown_router)
+    app.include_router(admin_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

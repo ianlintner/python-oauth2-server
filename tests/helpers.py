@@ -67,9 +67,26 @@ async def seed_user(storage) -> User:
     return user
 
 
+async def seed_admin(storage) -> User:
+    user = User(
+        id="admin1",
+        username="admin_rfc",
+        email="admin_rfc@example.test",
+        password_hash=security.hash_password("password123"),
+        role="admin",
+    )
+    await storage.save_user(user)
+    return user
+
+
 async def login_session(client, username: str = "user_rfc", password: str = "password123"):
     """POST /auth/login and let the httpx client carry the resulting session cookie."""
     return await client.post("/auth/login", data={"username": username, "password": password})
+
+
+async def login_admin(client):
+    """POST /auth/login as the seeded admin user from `seed_admin`."""
+    return await login_session(client, username="admin_rfc", password="password123")
 
 
 async def post_token(client_app, data: dict, basic_auth: tuple[str, str] | None = None):

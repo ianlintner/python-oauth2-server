@@ -45,7 +45,7 @@ async def login(request: Request):
     # redirecting here; read it before set_login() clears the session.
     return_to = request.session.get("return_to")
     return_to_ts = request.session.get("return_to_ts")
-    set_login(request, user.id)
+    set_login(request, user)
 
     # Only honor return_to when it was stamped by a recent authorize redirect.
     # A stale (or unstamped) value from an abandoned authorization request must

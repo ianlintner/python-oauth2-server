@@ -31,12 +31,32 @@ class Config(BaseSettings):
     seed_username: str = "admin"
     seed_password: str | None = None
     seed_email: str = "admin@example.com"
+    admin_client_ids: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    admin_emails: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     @field_validator("allowed_origins", mode="before")
     @classmethod
     def _split_origins(cls, v: object) -> object:
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
+
+    @field_validator("admin_client_ids", mode="before")
+    @classmethod
+    def _split_admin_client_ids(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [client_id.strip() for client_id in v.split(",") if client_id.strip()]
+        return v
+
+    @field_validator("admin_emails", mode="before")
+    @classmethod
+    def _split_admin_emails(cls, v: object) -> object:
+        # Case-insensitive allowlist: lowercase both str (env, comma-split)
+        # and list (e.g. test config_overrides) inputs alike.
+        if isinstance(v, str):
+            v = v.split(",")
+        if isinstance(v, list):
+            return [str(email).strip().lower() for email in v if str(email).strip()]
         return v
 
     def validate_for_production(self) -> None:
