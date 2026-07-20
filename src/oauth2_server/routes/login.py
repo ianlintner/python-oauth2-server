@@ -12,7 +12,7 @@ import time
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse
 
-from oauth2_server.security import verify_password
+from oauth2_server.security import verify_password_async
 from oauth2_server.services.auth import is_safe_redirect
 from oauth2_server.sessions import set_login
 
@@ -34,7 +34,11 @@ async def login(request: Request):
 
     # Generic error for unknown username, disabled account, and bad password
     # alike, to avoid leaking account existence/state.
-    if user is None or not user.enabled or not verify_password(password, user.password_hash):
+    if (
+        user is None
+        or not user.enabled
+        or not await verify_password_async(password, user.password_hash)
+    ):
         return ORJSONResponse({"error": "invalid_credentials"}, status_code=401)
 
     # `return_to` was saved to the session by GET /oauth/authorize before

@@ -21,6 +21,7 @@ from oauth2_server.routes.logout import router as logout_router
 from oauth2_server.routes.register import router as register_router
 from oauth2_server.routes.token import router as token_router
 from oauth2_server.routes.wellknown import router as wellknown_router
+from oauth2_server.security import derive_session_key
 from oauth2_server.storage.base import Storage
 from oauth2_server.storage.sql import SqlStorage
 
@@ -66,7 +67,7 @@ def create_app(
 
     app.add_middleware(
         SessionMiddleware,
-        secret_key=config.jwt_secret,
+        secret_key=derive_session_key(config.jwt_secret),
         session_cookie="oauth2_session",
         same_site="lax",
         https_only=not config.allow_insecure_defaults,

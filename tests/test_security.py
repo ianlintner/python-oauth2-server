@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import jwt
 import pytest
 
@@ -37,3 +39,32 @@ def test_argon2_round_trip_and_rust_interop():
     assert h.startswith("$argon2")
     assert verify_password("hunter2", h) and not verify_password("wrong", h)
     assert verify_password("hunter2", RUST_GENERATED_HASH)
+
+
+def test_session_key_is_derived_not_verbatim():
+    from oauth2_server.security import derive_session_key
+
+    key = derive_session_key(SECRET)
+    assert key != SECRET
+    assert key == derive_session_key(SECRET)  # deterministic
+    assert len(bytes.fromhex(key)) == 32
+
+
+def test_id_token_rejected_as_access_token():
+    from oauth2_server.security import encode_id_token
+    from oauth2_server.models import IdTokenClaims
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    idt = encode_id_token(
+        IdTokenClaims(iss=ISS, sub="u1", aud="c1", exp=now + 600, iat=now), SECRET
+    )
+    with pytest.raises(jwt.InvalidTokenError):
+        decode_access_token(idt, SECRET, ISS)
+
+
+async def test_verify_password_async_round_trip():
+    from oauth2_server.security import hash_password_async, verify_password_async
+
+    h = await hash_password_async("hunter2")
+    assert await verify_password_async("hunter2", h)
+    assert not await verify_password_async("wrong", h)
