@@ -57,9 +57,29 @@ def _insert_stmt(table: str, cols: str) -> str:
 
 
 class SqlStorage:
-    def __init__(self, database_url: str, migrations_dir: Path):
-        self._engine: AsyncEngine = create_async_engine(database_url)
+    def __init__(
+        self,
+        database_url: str,
+        migrations_dir: Path,
+        *,
+        pool_size: int | None = None,
+    ):
+        engine_kwargs: dict = {}
+        # Pool sizing only applies to real connection-pooled backends; SQLite's
+        # async driver uses NullPool by default and rejects these kwargs.
+        if not database_url.startswith("sqlite") and pool_size is not None:
+            engine_kwargs["pool_size"] = pool_size
+            engine_kwargs["pool_pre_ping"] = True
+        self._engine: AsyncEngine = create_async_engine(database_url, **engine_kwargs)
         self._migrations_dir = migrations_dir
+
+    def _dump(self, model) -> dict:
+        # mode="json" turns datetimes into ISO strings, which SQLite's TEXT
+        # columns want — but asyncpg's Postgres driver requires native
+        # datetime objects for TIMESTAMPTZ columns and rejects strings, so on
+        # Postgres we pass Python objects through unconverted instead.
+        mode = "json" if self._engine.dialect.name == "sqlite" else "python"
+        return model.model_dump(mode=mode)
 
     async def init(self) -> None:
         await run_migrations(self._engine, self._migrations_dir)
@@ -77,9 +97,7 @@ class SqlStorage:
 
     async def save_client(self, client: Client) -> None:
         async with self._engine.begin() as conn:
-            await conn.execute(
-                text(_insert_stmt("clients", _CLIENT_COLS)), client.model_dump(mode="json")
-            )
+            await conn.execute(text(_insert_stmt("clients", _CLIENT_COLS)), self._dump(client))
 
     async def get_client(self, client_id: str) -> Client | None:
         async with self._engine.connect() as conn:
@@ -100,7 +118,7 @@ class SqlStorage:
         async with self._engine.begin() as conn:
             await conn.execute(
                 text(f"UPDATE clients SET {set_clause} WHERE client_id = :client_id"),
-                client.model_dump(mode="json"),
+                self._dump(client),
             )
 
     async def delete_client(self, client_id: str) -> None:
@@ -113,9 +131,7 @@ class SqlStorage:
 
     async def save_user(self, user: User) -> None:
         async with self._engine.begin() as conn:
-            await conn.execute(
-                text(_insert_stmt("users", _USER_COLS)), user.model_dump(mode="json")
-            )
+            await conn.execute(text(_insert_stmt("users", _USER_COLS)), self._dump(user))
 
     async def get_user_by_username(self, username: str) -> User | None:
         async with self._engine.connect() as conn:
@@ -148,9 +164,7 @@ class SqlStorage:
 
     async def save_token(self, token: Token) -> None:
         async with self._engine.begin() as conn:
-            await conn.execute(
-                text(_insert_stmt("tokens", _TOKEN_COLS)), token.model_dump(mode="json")
-            )
+            await conn.execute(text(_insert_stmt("tokens", _TOKEN_COLS)), self._dump(token))
 
     async def get_token_by_access_token(self, access_token: str) -> Token | None:
         async with self._engine.connect() as conn:
@@ -210,7 +224,7 @@ class SqlStorage:
         async with self._engine.begin() as conn:
             await conn.execute(
                 text(_insert_stmt("authorization_codes", _AUTH_CODE_COLS)),
-                code.model_dump(mode="json"),
+                self._dump(code),
             )
 
     async def get_authorization_code(self, code: str) -> AuthorizationCode | None:
@@ -241,7 +255,7 @@ class SqlStorage:
         async with self._engine.begin() as conn:
             await conn.execute(
                 text(_insert_stmt("device_authorizations", _DEVICE_AUTH_COLS)),
-                d.model_dump(mode="json"),
+                self._dump(d),
             )
 
     async def get_device_authorization_by_device_code(

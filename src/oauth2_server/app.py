@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
@@ -17,6 +19,12 @@ from oauth2_server.routes.register import router as register_router
 from oauth2_server.routes.token import router as token_router
 from oauth2_server.routes.wellknown import router as wellknown_router
 from oauth2_server.storage.base import Storage
+from oauth2_server.storage.sql import SqlStorage
+
+# Repo-root/migrations/sql, resolved relative to this package so it works
+# both from a source checkout and an installed wheel with the same layout
+# (src/oauth2_server/app.py -> parents[2] == repo root).
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations" / "sql"
 
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
@@ -68,5 +76,25 @@ def create_app(config: Config, storage: Storage) -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    return app
+
+
+def build() -> FastAPI:
+    """Factory entry point for `uvicorn --factory` / `granian --interface asgi`.
+
+    Builds `Config` from `OAUTH2_*` env vars, constructs `SqlStorage`, and runs
+    migrations on startup via a lifespan handler (required so each worker
+    process — spawned independently by uvicorn's `workers=` option — applies
+    migrations, though the runner is idempotent/backfill-only after the first).
+    """
+    config = Config()
+    config.validate_for_production()
+    storage = SqlStorage(config.database_url, MIGRATIONS_DIR, pool_size=config.max_connections)
+    app = create_app(config, storage)
+
+    @app.on_event("startup")
+    async def _init_storage() -> None:
+        await storage.init()
 
     return app
