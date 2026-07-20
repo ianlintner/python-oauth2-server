@@ -43,16 +43,29 @@ from pymongo.errors import DuplicateKeyError
 
 from oauth2_server.errors import OAuthError
 from oauth2_server.models import (
+    AuditLogEntry,
     AuthorizationCode,
     Client,
+    DenylistEntry,
     DeviceAuthorization,
     Token,
     User,
 )
+from oauth2_server.storage.paging import ListQuery, whitelist_col
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DB_NAME = "oauth2"
+
+# Sort whitelists — mirror `storage/sql.py`'s `_*_SORT_COLS` exactly (same
+# ListQuery contract, same "unknown/absent sort_by defaults to the last —
+# created_at — entry" behavior via `whitelist_col`).
+_CLIENT_SORT_COLS = ["name", "client_id", "created_at"]
+_USER_SORT_COLS = ["username", "email", "role", "created_at"]
+_TOKEN_SORT_COLS = ["client_id", "user_id", "scope", "expires_at", "created_at"]
+_DEVICE_AUTH_SORT_COLS = ["created_at"]
+_DENYLIST_SORT_COLS = ["kind", "value", "created_at"]
+_AUDIT_LOG_SORT_COLS = ["actor_id", "action", "target_kind", "created_at"]
 
 # (collection name, natural key field, datetime fields) — drives both the
 # `created_at` index list (clients/users/tokens only, per Rust's
@@ -96,6 +109,34 @@ def _from_doc(model_cls: type, doc: dict | None):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _sort_key(col: str):
+    """Sort-key accessor for the app-side `list_*_page`/`list_denylist`/
+    `list_audit_log` sorting below. Every whitelisted column is a required
+    field on its model EXCEPT `Token.user_id`, which is the only one that
+    can be `None` — substituting `""` there keeps every key in a given sort
+    homogeneously comparable (mixing `None` and `str` raises `TypeError`)."""
+
+    def key(item):
+        value = getattr(item, col)
+        return value if value is not None else ""
+
+    return key
+
+
+def _sort_and_page(items: list, q: ListQuery, sort_cols: list[str]) -> tuple[list, int]:
+    """Shared app-side sort + slice for every `list_*_page` method: parse-
+    then-sort (never string-sort raw ISO timestamps — mixed offsets don't
+    sort chronologically, per research-mongo-backend.md's gotchas), then
+    `(items[offset:offset+limit], total)` with `total` = the full filtered
+    count, matching `SqlStorage`'s `(items, total)` contract."""
+    col = whitelist_col(q.sort_by, sort_cols)
+    items.sort(key=_sort_key(col), reverse=(q.sort_dir != "asc"))
+    total = len(items)
+    offset = q.offset
+    limit = q.effective_limit()
+    return items[offset : offset + limit], total
 
 
 class MongoStorage:
@@ -209,6 +250,23 @@ class MongoStorage:
             {"$set": {"client_secret": client_secret, "updated_at": _now_iso()}},
         )
 
+    async def list_all_clients(self) -> list[Client]:
+        # Full scan (deliberate CosmosDB-compatibility choice — see
+        # research-mongo-backend.md) + app-side sort. `created_at` is parsed
+        # into a real `datetime` by `_from_doc`/`MongoDateTime`, so this
+        # sorts chronologically even with mixed ISO-string offsets — sorting
+        # the raw stored strings would not.
+        items = [_from_doc(Client, doc) async for doc in self.clients.find({})]
+        items.sort(key=lambda c: c.created_at, reverse=True)
+        return items
+
+    async def list_clients_page(self, q: ListQuery) -> tuple[list[Client], int]:
+        items = [_from_doc(Client, doc) async for doc in self.clients.find({})]
+        search = (q.search or "").lower()
+        if search:
+            items = [c for c in items if search in c.name.lower() or search in c.client_id.lower()]
+        return _sort_and_page(items, q, _CLIENT_SORT_COLS)
+
     # --- Users ---
 
     async def save_user(self, user: User) -> None:
@@ -259,6 +317,18 @@ class MongoStorage:
             {"$set": {"password_hash": password_hash, "updated_at": _now_iso()}},
         )
 
+    async def list_all_users(self) -> list[User]:
+        items = [_from_doc(User, doc) async for doc in self.users.find({})]
+        items.sort(key=lambda u: u.created_at, reverse=True)
+        return items
+
+    async def list_users_page(self, q: ListQuery) -> tuple[list[User], int]:
+        items = [_from_doc(User, doc) async for doc in self.users.find({})]
+        search = (q.search or "").lower()
+        if search:
+            items = [u for u in items if search in u.username.lower() or search in u.email.lower()]
+        return _sort_and_page(items, q, _USER_SORT_COLS)
+
     # --- Tokens ---
 
     async def save_token(self, token: Token) -> None:
@@ -301,6 +371,31 @@ class MongoStorage:
             {"client_id": client_id, "revoked": False}, {"$set": {"revoked": True}}
         )
         return result.modified_count
+
+    async def list_all_tokens(self) -> list[Token]:
+        items = [_from_doc(Token, doc) async for doc in self.tokens.find({})]
+        items.sort(key=lambda t: t.created_at, reverse=True)
+        # Match the SQLx 200-token cap (Rust parity).
+        return items[:200]
+
+    async def list_tokens_page(self, q: ListQuery) -> tuple[list[Token], int]:
+        items = [_from_doc(Token, doc) async for doc in self.tokens.find({})]
+        if q.status == "active":
+            now = datetime.now(timezone.utc)
+            items = [t for t in items if not t.revoked and t.expires_at > now]
+        elif q.status == "revoked":
+            items = [t for t in items if t.revoked]
+        elif q.status == "expired":
+            now = datetime.now(timezone.utc)
+            items = [t for t in items if not t.revoked and t.expires_at <= now]
+        search = (q.search or "").lower()
+        if search:
+            items = [
+                t
+                for t in items
+                if search in t.client_id.lower() or search in (t.user_id or "").lower()
+            ]
+        return _sort_and_page(items, q, _TOKEN_SORT_COLS)
 
     # --- Authorization codes ---
 
@@ -384,3 +479,67 @@ class MongoStorage:
         await self.device_authorizations.update_one(
             {"device_code": device_code}, {"$set": {"expires_at": now_minus_1s.isoformat()}}
         )
+
+    async def list_all_device_authorizations(self) -> list[DeviceAuthorization]:
+        items = [
+            _from_doc(DeviceAuthorization, doc) async for doc in self.device_authorizations.find({})
+        ]
+        items.sort(key=lambda d: d.created_at, reverse=True)
+        return items
+
+    async def list_device_authorizations_page(
+        self, q: ListQuery
+    ) -> tuple[list[DeviceAuthorization], int]:
+        # No status filter/search — matches the Rust trait-default shape
+        # (`SqlStorage.list_device_authorizations_page` doesn't filter
+        # either): just sort + paginate the full set.
+        items = [
+            _from_doc(DeviceAuthorization, doc) async for doc in self.device_authorizations.find({})
+        ]
+        return _sort_and_page(items, q, _DEVICE_AUTH_SORT_COLS)
+
+    # --- Denylist ---
+
+    async def add_denylist_entry(self, entry: DenylistEntry) -> None:
+        # Upsert on (kind, value) that keeps the ORIGINAL row's `id` on
+        # conflict — matches `SqlStorage`'s `ON CONFLICT(kind, value) DO
+        # UPDATE ... ` (which deliberately omits `id` from its SET clause).
+        # A plain `replace_one(..., upsert=True)` would instead let the
+        # *new* entry's `id` win, so the existing id is read back and
+        # spliced into the replacement document first.
+        existing = await self.denylist.find_one({"kind": entry.kind, "value": entry.value})
+        doc = _to_doc(entry)
+        if existing is not None:
+            doc["id"] = existing["id"]
+        await self.denylist.replace_one(
+            {"kind": entry.kind, "value": entry.value}, doc, upsert=True
+        )
+
+    async def remove_denylist_entry(self, entry_id: str) -> None:
+        await self.denylist.delete_one({"id": entry_id})
+
+    async def list_denylist(self, q: ListQuery) -> tuple[list[DenylistEntry], int]:
+        # Full scan, app-side page — expired rows are included (no active-
+        # only filter here; that's `find_denylist_entry`'s job), matching
+        # `SqlStorage.list_denylist`.
+        items = [_from_doc(DenylistEntry, doc) async for doc in self.denylist.find({})]
+        return _sort_and_page(items, q, _DENYLIST_SORT_COLS)
+
+    async def find_denylist_entry(self, kind: str, value: str) -> DenylistEntry | None:
+        doc = await self.denylist.find_one({"kind": kind, "value": value})
+        entry = _from_doc(DenylistEntry, doc)
+        if entry is None:
+            return None
+        # Expiry is evaluated in Python, not the query — expired rows stay
+        # in the collection (no sweeper) but are invisible to lookups,
+        # matching `SqlStorage.find_denylist_entry`.
+        return entry if entry.is_active() else None
+
+    # --- Audit log ---
+
+    async def write_audit_log(self, entry: AuditLogEntry) -> None:
+        await self.audit_log.insert_one(_to_doc(entry))
+
+    async def list_audit_log(self, q: ListQuery) -> tuple[list[AuditLogEntry], int]:
+        items = [_from_doc(AuditLogEntry, doc) async for doc in self.audit_log.find({})]
+        return _sort_and_page(items, q, _AUDIT_LOG_SORT_COLS)
