@@ -511,6 +511,28 @@ async def test_prompt_none_combined_with_login_is_invalid_request(app_with_sessi
     )
 
 
+async def test_prompt_none_with_fresh_session_issues_code(app_with_session):
+    await login_session(app_with_session)
+
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "prompt": "none",
+            "state": "fresh1",
+        },
+    )
+    assert resp.status_code == 302, "must redirect"
+    assert resp.headers["location"].startswith("https://a.example/cb")
+    q = _query(resp.headers["location"])
+    assert "code" in q, "prompt=none with a fresh session must issue a code"
+    assert q["state"] == "fresh1", "state must be preserved in the redirect"
+    assert q["iss"] == ISSUER, "RFC 9207: iss must be present in the redirect"
+
+
 # ---------------------------------------------------------------------------
 # Chunk 1.E — Logout with id_token_hint / cascade revocation
 # ---------------------------------------------------------------------------
