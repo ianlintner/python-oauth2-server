@@ -106,6 +106,49 @@ Phase 3a (see `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` and `docs/P
 | `OAUTH2_LOGIN_RATE_LIMIT_ATTEMPTS` | `10` | Max `POST /auth/login` attempts allowed per window, per IP and per username (either exhausted → blocked). |
 | `OAUTH2_LOGIN_RATE_LIMIT_WINDOW_SECS` | `900` | Fixed-window duration (seconds) for the login rate limiter. |
 
+## Phase 3b: DPoP, RAR, Token Exchange
+
+Phase 3b (see `docs/plans/2026-07-20-python-oauth2-port-phase-3b.md` and `docs/PHASE2-BACKLOG.md` →
+"Accepted divergences" 14–19) ports the three protocol extensions from the Rust server, fixing
+several documented Rust spec violations along the way:
+
+- **DPoP (RFC 9449)** — `POST /oauth/token` and `POST /oauth/introspect` accept an optional
+  `DPoP` proof header. A valid ES256/RS256/PS256-family proof binds the issued access token to
+  the caller's key (`cnf.jkt` claim, `token_type: "DPoP"` in the response); clients flagged
+  `dpop_nonce_required` must first complete a `use_dpop_nonce` challenge/response round trip
+  (`DPoP-Nonce` response header) before a proof is accepted. Introspection of a `cnf`-bound token
+  requires a matching proof or returns `{"active": false}` — never an error, so cross-endpoint or
+  wrong-key proofs can't be used to probe token state.
+- **Rich Authorization Requests — RAR (RFC 9396)** — `authorization_details` is accepted at
+  `GET /oauth/authorize` (and via PAR), `POST /oauth/token`, and validated against a configured
+  type allowlist (`rar_types_supported`, default `["openid"]`); violations are rejected before a
+  code is minted or a token is issued (`invalid_authorization_details`). Validated details are
+  echoed in the token response and introspection, and embedded in the JWT access token — three
+  gaps the Rust server has (see divergence 15/17 below).
+- **Token Exchange (RFC 8693)** — a new grant,
+  `urn:ietf:params:oauth:grant-type:token-exchange`, lets a confidential client exchange a
+  `subject_token` it holds for a new access token scoped to itself; `subject_token_type` and
+  `requested_token_type` are validated against the single supported access-token URN (Rust parses
+  and ignores both — divergence 18); the delegation claim `act={"sub": <exchanging client_id>}` is
+  embedded in every exchanged JWT, not just the HTTP response body (divergence 19).
+
+### New environment variables (Phase 3b)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OAUTH2_DPOP_NONCE_SECRET` | unset (random per-process) | HMAC secret for the stateless DPoP nonce issuer (`services/dpop_nonce.py`). Decoded trying base64url-no-pad → standard base64 → hex (64 chars) in that order; an unset or undecodable value falls back to a random 32-byte per-process secret with a logged warning — set this explicitly in any multi-process/multi-instance deployment so nonces issued by one worker verify on another. |
+| `OAUTH2_DPOP_NONCE_LIFETIME_SECS` | `300` | Bucket width (seconds) for nonce issuance/verification; the current and immediately-previous bucket are both accepted, clamped to `>= 1`. |
+| `OAUTH2_RAR_TYPES_SUPPORTED` | `openid` | Comma-separated `authorization_details[].type` allowlist enforced at authorize/PAR/token and advertised as `authorization_details_types_supported` in discovery. |
+
+### Single-process state caveat: DPoP replay store
+
+Same caveat as the Phase 2 stores above applies to the DPoP proof **replay store**
+(`services/dpop.py::DpopReplayStore`, `app.state.dpop_replay`): it is an in-process, in-memory
+dict of seen `jti` values with a bounded TTL, not shared across workers or instances. A proof
+replayed against a *different* worker than the one that first saw it will NOT be caught. Run
+`OAUTH2_WORKERS=1` or a sticky-session load balancer, matching the existing `ParStore`/`KeySet`/
+`RecentEventsStore` guidance, until Phase 3 adds shared persistence for all four stores.
+
 ## Running
 
 ```bash

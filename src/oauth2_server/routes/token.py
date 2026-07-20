@@ -1,4 +1,33 @@
-"""POST /oauth/token — RFC 6749 §3.2 token endpoint."""
+"""POST /oauth/token — RFC 6749 §3.2 token endpoint.
+
+RFC 9449 DPoP notes (see `.superpowers/sdd/research-dpop.md` for the Rust
+source this is ported from):
+
+- **htu is issuer-based, not Host-header-reconstructed.** The Rust handler
+  rebuilds the compared URL from `connection_info()` (scheme/host, honoring
+  `Forwarded`/`X-Forwarded-*` per actix config) + `req.path()`. This port
+  instead compares against `config.issuer.rstrip("/") + "/oauth/token"` —
+  simpler and arguably more secure (immune to a spoofed/misconfigured Host
+  header) but strictly less flexible: a deployment fronted by a proxy whose
+  externally-visible scheme/host doesn't match `OAUTH2_ISSUER` exactly would
+  reject every DPoP-bound token request that Rust would accept. Documented,
+  deliberate hardening simplification.
+- **Non-UTF-8 `DPoP` header detection.** Starlette's `request.headers.get`
+  hands back a `str` that has already been latin-1-decoded from the raw ASGI
+  bytes — latin-1 maps every byte 0-255 to a codepoint, so it can never
+  observe a decode failure the way Rust's `HeaderValue::to_str()` (which
+  requires valid UTF-8) does. To reproduce that check, `_read_dpop_header`
+  (an alias for `services.dpop.read_dpop_header`, shared with
+  `routes/introspect.py`) reads `request.headers.raw` directly and
+  UTF-8-decodes the value itself instead of going through `.get`.
+- **Client auth runs BEFORE DPoP proof validation** (Rust validates the
+  proof first). Deliberate ordering divergence: an unauthenticated caller
+  can neither burn replay-store jti entries nor farm nonces here, closing a
+  DoS surface the Rust ordering exposes. Observable consequence: a request
+  with both a bad client secret and a bad/replayed proof gets 401
+  `invalid_client` (Rust: 400 `invalid_dpop_proof`) and its jti is NOT
+  recorded.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +37,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import jwt
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
@@ -18,12 +48,27 @@ from oauth2_server.models import Client, IdTokenClaims, User
 from oauth2_server.security import encode_id_token
 from oauth2_server.services.auth import scope_is_subset
 from oauth2_server.services.clients import ClientService
+from oauth2_server.services.dpop import (
+    DpopError,
+    DpopValidated,
+    read_dpop_header as _read_dpop_header,
+    validate_dpop_proof,
+)
+from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
+from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.tokens import TokenService
 
 router = APIRouter()
 
 _MIN_VERIFIER_LEN = 43
 _MAX_VERIFIER_LEN = 128
+
+# RFC 8693 §2.1 grant identifier and the single subject/requested token type
+# this server supports exchanging (access tokens only — no id_token/SAML/JWT
+# subject types, matching the Rust server's storage-lookup-only model; see
+# `.superpowers/sdd/research-rar-token-exchange.md` token-exchange section).
+_TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
+_ACCESS_TOKEN_TYPE_URN = "urn:ietf:params:oauth:token-type:access_token"
 
 
 def _half_hash(value: str) -> str:
@@ -35,6 +80,23 @@ def _half_hash(value: str) -> str:
 def _pkce_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def _salvage_old_cnf(access_token: str) -> dict | None:
+    """Refresh-grant cnf carry-over (RFC 9449 parity gap, documented in
+    research-dpop.md `key_behaviors`: the refresh grant "does not demand or
+    verify a fresh DPoP proof on the refresh request"). Decodes the OLD
+    access token WITHOUT verifying its signature and returns its `cnf` claim
+    verbatim, so a DPoP-bound token stays bound across a refresh with no
+    fresh proof required. Returns `None` for an opaque old access token (not
+    a JWT — `jwt.decode` raises) or a JWT with no (or non-dict) `cnf` claim.
+    """
+    try:
+        old_claims = jwt.decode(access_token, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return None
+    cnf = old_claims.get("cnf")
+    return cnf if isinstance(cnf, dict) else None
 
 
 def _mint_id_token(
@@ -101,6 +163,41 @@ async def token(request: Request) -> ORJSONResponse:
     except OAuthError as exc:
         return oauth_error(exc.error, exc.description, exc.status)
 
+    # RFC 9449 DPoP: read + validate an optional proof once, before dispatching
+    # on grant_type, mirroring the Rust handler's shared pre-grant block
+    # (research-dpop.md `endpoints` POST /oauth/token entry). `cnf` below is
+    # what authorization_code/client_credentials bind onto the new token;
+    # refresh_token instead salvages the OLD token's cnf (`_salvage_old_cnf`)
+    # and device_code never binds regardless of `cnf`'s value.
+    try:
+        dpop_header = _read_dpop_header(request)
+    except DpopError as exc:
+        return oauth_error(exc.error, exc.description)
+
+    dpop_validated: DpopValidated | None = None
+    if dpop_header is not None:
+        try:
+            dpop_validated = validate_dpop_proof(
+                dpop_header,
+                "POST",
+                config.issuer.rstrip("/") + "/oauth/token",
+                request.app.state.dpop_replay,
+            )
+        except DpopError as exc:
+            return oauth_error(exc.error, exc.description)
+
+        if client.dpop_nonce_required:
+            try:
+                nonce_response = enforce_dpop_nonce(
+                    dpop_validated, request.app.state.dpop_nonce_issuer
+                )
+            except DpopError as exc:
+                return oauth_error(exc.error, exc.description)
+            if nonce_response is not None:
+                return nonce_response
+
+    cnf = {"jkt": dpop_validated.jkt} if dpop_validated is not None else None
+
     grant_type = form.get("grant_type")
 
     if grant_type == "client_credentials":
@@ -122,8 +219,27 @@ async def token(request: Request) -> ORJSONResponse:
         else:
             scope = client.scope
 
+        # RFC 9396: client_credentials has no consent step, so the form
+        # value (if any) is validated directly and embedded verbatim — no
+        # stored counterpart to reconcile against (unlike authorization_code
+        # redemption below).
+        authorization_details = None
+        raw_details = form.get("authorization_details")
+        if raw_details is not None:
+            try:
+                authorization_details = validate_authorization_details(
+                    raw_details, config.rar_types_supported
+                )
+            except RarError as exc:
+                return oauth_error(exc.error, exc.description)
+
         token_response = await TokenService(storage, config, keyset).issue(
-            client, None, scope, with_refresh=False
+            client,
+            None,
+            scope,
+            with_refresh=False,
+            cnf=cnf,
+            authorization_details=authorization_details,
         )
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
@@ -168,6 +284,34 @@ async def token(request: Request) -> ORJSONResponse:
         elif client.is_public():
             return oauth_error("invalid_grant", "public clients must use PKCE")
 
+        # RFC 9396: the details the user consented to at authorize time
+        # (stored on the auth code) win. A token-request value is only
+        # accepted when there was no stored value (validate + use); when
+        # BOTH are present and differ (string comparison — no semantic
+        # diffing), this is a validation error, NOT a replay — the code
+        # must stay usable and the token family must NOT be revoked, unlike
+        # the "already used" branch above/below.
+        stored_details = auth_code.authorization_details
+        form_details = form.get("authorization_details")
+        if (
+            stored_details is not None
+            and form_details is not None
+            and form_details != stored_details
+        ):
+            return oauth_error(
+                "invalid_authorization_details",
+                "authorization_details must not be altered at redemption",
+            )
+        raw_details = stored_details if stored_details is not None else form_details
+        authorization_details = None
+        if raw_details is not None:
+            try:
+                authorization_details = validate_authorization_details(
+                    raw_details, config.rar_types_supported
+                )
+            except RarError as exc:
+                return oauth_error(exc.error, exc.description)
+
         claimed = await storage.mark_authorization_code_used(auth_code.code)
         if claimed == 0:
             # Lost the race to a concurrent request that already claimed this code.
@@ -181,6 +325,8 @@ async def token(request: Request) -> ORJSONResponse:
             auth_code.scope,
             with_refresh=True,
             token_family=auth_code.token_family,
+            cnf=cnf,
+            authorization_details=authorization_details,
         )
 
         scope_set = set(auth_code.scope.split())
@@ -243,10 +389,25 @@ async def token(request: Request) -> ORJSONResponse:
             scope = old_token.scope
 
         family = old_token.token_family or uuid.uuid4().hex
+        # Refresh carries the OLD access token's cnf forward regardless of
+        # whether this request presented a fresh DPoP proof — `cnf` (from
+        # this request's own header, if any) is deliberately unused here;
+        # see `_salvage_old_cnf` and the module docstring.
+        refresh_cnf = _salvage_old_cnf(old_token.access_token)
         await storage.revoke_token(old_token.access_token)
 
+        # RFC 9396 details are DROPPED on refresh (Rust parity,
+        # research-rar-token-exchange.md `endpoints`: "authorization_details:
+        # None on the rotated token") — unlike `cnf` above, there is no
+        # carry-over from the old access token's JWT claim; `authorization_details`
+        # is deliberately left unset here.
         token_response = await TokenService(storage, config, keyset).issue(
-            client, old_token.user_id, scope, with_refresh=True, token_family=family
+            client,
+            old_token.user_id,
+            scope,
+            with_refresh=True,
+            token_family=family,
+            cnf=refresh_cnf,
         )
 
         scope_set = set(scope.split())
@@ -301,6 +462,14 @@ async def token(request: Request) -> ORJSONResponse:
             # Lost the race to a concurrent request that already claimed this code.
             return oauth_error("invalid_grant", "device_code has already been redeemed")
 
+        # Device grant never binds cnf, even when the client presented a
+        # valid DPoP proof on this request (Rust parity, research-dpop.md
+        # gotchas: "device_code grant hardcodes cnf: None") — `cnf` is
+        # deliberately not passed through here. RFC 9396 details are
+        # likewise dropped for this grant (Rust parity,
+        # research-rar-token-exchange.md `endpoints`: "Same for
+        # device_code grant") — DeviceAuthorization has no
+        # authorization_details field at all, so there's nothing to embed.
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             device.user_id,
@@ -326,6 +495,104 @@ async def token(request: Request) -> ORJSONResponse:
                 return oauth_error("server_error", str(exc), status=500)
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    if grant_type == _TOKEN_EXCHANGE_GRANT:
+        # RFC 8693 token exchange. Check order per
+        # `.superpowers/sdd/task-6-brief.md`: grant allow-list -> public-
+        # client rejection -> subject_token presence -> subject_token_type
+        # validation -> requested_token_type validation -> storage lookup ->
+        # validity -> scope subset -> issue. Confidential clients only, and
+        # the client must register the full URN (exact match, same
+        # `grant_type_list()` check as every other branch above) — there is
+        # no short alias, unlike device_code.
+        if grant_type not in client.grant_type_list():
+            return oauth_error(
+                "unauthorized_client", "client is not authorized for this grant type"
+            )
+
+        if client.is_public():
+            return oauth_error("invalid_client", "Public clients cannot use token-exchange")
+
+        subject_token = form.get("subject_token")
+        if not subject_token:
+            return oauth_error("invalid_request", "Missing subject_token")
+
+        # RFC 8693 §2.1 / divergence 18 (research doc): Rust parses
+        # subject_token_type/actor_token_type and then ignores them
+        # (`#[allow(dead_code)]`) — an id_token or SAML assertion type
+        # silently behaves like an access token. This port actually
+        # enforces the single type it supports (storage only ever holds
+        # access tokens), rejecting anything else including a missing value.
+        if form.get("subject_token_type") != _ACCESS_TOKEN_TYPE_URN:
+            return oauth_error(
+                "invalid_request",
+                f"unsupported subject_token_type: only '{_ACCESS_TOKEN_TYPE_URN}' is supported",
+            )
+
+        requested_token_type = form.get("requested_token_type")
+        if requested_token_type is not None and requested_token_type != _ACCESS_TOKEN_TYPE_URN:
+            return oauth_error(
+                "invalid_request",
+                f"unsupported requested_token_type: only '{_ACCESS_TOKEN_TYPE_URN}' is supported",
+            )
+
+        # subject_token is resolved by STORAGE LOOKUP, not JWT signature
+        # verification — only a token this server issued and still holds
+        # can be exchanged (Rust parity, research doc `key_behaviors`).
+        subject_row = await storage.get_token_by_access_token(subject_token)
+        if subject_row is None:
+            return oauth_error("invalid_grant", "subject_token not found or expired")
+
+        if subject_row.revoked or subject_row.expires_at <= datetime.now(timezone.utc):
+            return oauth_error("invalid_grant", "subject_token is expired or revoked")
+
+        requested_scope = form.get("scope")
+        if requested_scope:
+            if not scope_is_subset(requested_scope, subject_row.scope):
+                return oauth_error("invalid_scope", "requested scope exceeds client permissions")
+            scope = requested_scope
+        else:
+            scope = subject_row.scope
+
+        # RFC 8693 §4.1 delegation: `act` is ALWAYS embedded in the issued
+        # JWT for an exchanged token — this is impersonation happening
+        # regardless of whether the caller declared an `actor_token` — a
+        # fixed gap vs Rust, which never puts `act` in the JWT at all (see
+        # models.Claims.act's docstring). The response-body `act` member
+        # below stays Rust-conditional: present only when `actor_token` was
+        # supplied on this request (`actor_token`'s VALUE is never
+        # validated, matching Rust — its mere presence triggers the
+        # response member).
+        act = {"sub": client.client_id}
+        actor_token_present = form.get("actor_token") is not None
+
+        # Impersonation model (Rust parity): issued token carries the
+        # SUBJECT token's user_id but the EXCHANGING client's client_id.
+        # Never a refresh token (`with_refresh=False`, no `token_family`).
+        # `cnf` binds THIS request's own DPoP proof (the shared pre-grant
+        # block above), not the subject token's binding.
+        token_response = await TokenService(storage, config, keyset).issue(
+            client,
+            subject_row.user_id,
+            scope,
+            with_refresh=False,
+            cnf=cnf,
+            act=act,
+        )
+
+        body: dict[str, object] = {
+            "access_token": token_response.access_token,
+            "issued_token_type": _ACCESS_TOKEN_TYPE_URN,
+            "token_type": token_response.token_type,
+            "expires_in": token_response.expires_in,
+            "scope": token_response.scope,
+        }
+        if actor_token_present:
+            body["act"] = act
+
+        response = ORJSONResponse(body)
         response.headers["Cache-Control"] = "no-store"
         return response
 

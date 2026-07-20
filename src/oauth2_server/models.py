@@ -142,10 +142,40 @@ class Claims(BaseModel):
     scope: str
     jti: str
     client_id: str | None = None
+    # RFC 9449 §6.1 confirmation claim: {"jkt": "<b64url thumbprint>"} when
+    # the access token is DPoP-bound, otherwise omitted entirely (never a
+    # literal `null`) via `to_payload`'s `exclude_none=True`. Set by
+    # `TokenService.issue`'s `cnf` keyword — see `services/tokens.py` and
+    # `routes/token.py` for the grant-by-grant binding rules.
+    cnf: dict | None = None
+    # RFC 9396 §7.1 / §9.2: the validated authorization_details array carried
+    # by this access token, when RAR was used — omitted entirely (never a
+    # literal `null`) when absent, same as `cnf`. See
+    # `services/rar.py::validate_authorization_details` for how this is
+    # produced, and `routes/token.py` for which grants embed it.
+    authorization_details: list[dict] | None = None
+    # RFC 8693 §4.1 delegation/impersonation claim: `{"sub": <exchanging
+    # client_id>}` on every token minted by the token-exchange grant —
+    # omitted entirely (never a literal `null`) otherwise, same pattern as
+    # `cnf`/`authorization_details`. Rust never sets this on the JWT (only
+    # ever on the HTTP response body, and only when `actor_token` was
+    # present — see research-rar-token-exchange.md gotchas); this port fixes
+    # the JWT gap while keeping the response-body member Rust-conditional
+    # (routes/token.py's token-exchange branch).
+    act: dict | None = None
 
     @classmethod
     def new(
-        cls, subject: str, client_id: str, scope: str, duration_seconds: int, issuer: str
+        cls,
+        subject: str,
+        client_id: str,
+        scope: str,
+        duration_seconds: int,
+        issuer: str,
+        *,
+        cnf: dict | None = None,
+        authorization_details: list[dict] | None = None,
+        act: dict | None = None,
     ) -> "Claims":
         iat = int(_now().timestamp())
         return cls(
@@ -157,6 +187,9 @@ class Claims(BaseModel):
             scope=scope,
             jti=uuid.uuid4().hex,
             client_id=client_id,
+            cnf=cnf,
+            authorization_details=authorization_details,
+            act=act,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -188,6 +221,10 @@ class TokenResponse(BaseModel):
     expires_in: int
     scope: str | None = None
     id_token: str | None = None
+    # RFC 9396 §7.1: the AS MUST echo the validated authorization_details in
+    # the token response when RAR was used — a gap the Rust server has (see
+    # research-rar-token-exchange.md gotchas); this port fixes it.
+    authorization_details: list[dict] | None = None
 
 
 class IntrospectionResponse(BaseModel):
@@ -203,6 +240,11 @@ class IntrospectionResponse(BaseModel):
     aud: list[str] | str | None = None
     jti: str | None = None
     iss: str | None = None
+    cnf: dict | None = None
+    # RFC 9396 §9.2 — included for active tokens that carry it; absent
+    # otherwise (opaque-mode tokens have none, Rust parity — see
+    # routes/introspect.py).
+    authorization_details: list[dict] | None = None
 
 
 class ClientRegistration(BaseModel):

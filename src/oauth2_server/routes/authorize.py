@@ -42,6 +42,7 @@ from fastapi.responses import ORJSONResponse, RedirectResponse
 
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.services.auth import AuthorizeService, scope_is_subset
+from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.sessions import current_user_id
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,18 @@ async def authorize(request: Request):
                 config.issuer,
             )
 
+    # RFC 9396 §5: validate `authorization_details` (query param, or the PAR-
+    # merged value) now that redirect_uri is trusted — violations are safe
+    # error redirects (`error=invalid_authorization_details`), never a raw
+    # 400. The raw string (not the parsed value) is what gets stored on the
+    # authorization code below; it's re-parsed at redemption time.
+    authorization_details = merged.get("authorization_details")
+    if authorization_details is not None:
+        try:
+            validate_authorization_details(authorization_details, config.rar_types_supported)
+        except RarError as exc:
+            return _error_redirect(redirect_uri, exc.error, exc.description, state, config.issuer)
+
     # --- 5. Require an authenticated session ---
     # OIDC Core §3.1.2.1: `prompt` is a space-delimited list of values.
     prompt_values = (params.get("prompt") or "").split()
@@ -284,6 +297,7 @@ async def authorize(request: Request):
         code_challenge=code_challenge,
         code_challenge_method=code_challenge_method,
         nonce=merged.get("nonce"),
+        authorization_details=authorization_details,
     )
 
     success_params = {"code": auth_code.code, "iss": config.issuer}

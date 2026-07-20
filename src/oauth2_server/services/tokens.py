@@ -27,15 +27,56 @@ class TokenService:
         *,
         with_refresh: bool,
         token_family: str | None = None,
+        cnf: dict | None = None,
+        authorization_details: list[dict] | None = None,
+        act: dict | None = None,
     ) -> TokenResponse:
+        """Issue an access (+ optional refresh) token.
+
+        `cnf` is the RFC 9449 §6.1 confirmation claim (`{"jkt": ...}`) to
+        bind onto the access token — see `routes/token.py` for which grants
+        pass a real value. **Opaque mode drops it silently**: an opaque
+        access token is a bare random string with nowhere to carry a `cnf`
+        claim, so `cnf` here only ever reaches the issued token when
+        `config.access_tokens_opaque` is False (Rust parity: the Rust server
+        has no opaque-token mode at all, so this divergence is Python-only).
+        The stored `Token` row's `token_type` always stays the model default
+        "Bearer" regardless of `cnf` — only the `TokenResponse` returned here
+        says "DPoP" (research-dpop.md `key_behaviors`: "the persisted Token
+        row keeps token_type 'Bearer'").
+
+        `authorization_details` (RFC 9396) follows the same opaque-mode
+        drop rule as `cnf` — an opaque token has nowhere to carry it as a
+        JWT claim, so it is silently omitted from both the issued token and
+        the returned `TokenResponse` (parity with the Rust server, which has
+        no opaque mode but likewise drops `authorization_details` on every
+        path except the JWT claim — see research-rar-token-exchange.md).
+        Callers pass `None` here for grants that drop RAR details entirely
+        (refresh_token, device_code — Rust parity).
+
+        `act` (RFC 8693 §4.1 delegation claim) follows the same opaque-mode
+        drop rule as `cnf`/`authorization_details` — see routes/token.py's
+        token-exchange branch for the only caller that passes a value and
+        `models.Claims.act`'s docstring for the JWT-vs-response-body split.
+        """
         config = self._config
         subject = user_id or client.client_id
+        bound_cnf = cnf if not config.access_tokens_opaque else None
+        bound_details = authorization_details if not config.access_tokens_opaque else None
+        bound_act = act if not config.access_tokens_opaque else None
 
         if config.access_tokens_opaque:
             access_token = secrets.token_urlsafe(32)
         else:
             claims = Claims.new(
-                subject, client.client_id, scope, config.access_token_ttl_secs, config.issuer
+                subject,
+                client.client_id,
+                scope,
+                config.access_token_ttl_secs,
+                config.issuer,
+                cnf=bound_cnf,
+                authorization_details=bound_details,
+                act=bound_act,
             )
             # Prefer the current RS256 key so access+refresh tokens follow
             # RS256 rotation automatically whenever one is configured; fall
@@ -70,6 +111,8 @@ class TokenService:
         return TokenResponse(
             access_token=access_token,
             refresh_token=refresh_token,
+            token_type="DPoP" if bound_cnf is not None else "Bearer",
             expires_in=config.access_token_ttl_secs,
             scope=scope,
+            authorization_details=bound_details,
         )
