@@ -207,6 +207,37 @@ class ClientRegistration(BaseModel):
     jwks_uri: str | None = None
 
 
+class DenylistEntry(BaseModel):
+    """Subject denylist row — keyed on (kind, value), kind is one of
+    'ip' | 'user_id' | 'username' | 'email' | 'client_id'."""
+
+    id: str
+    kind: str
+    value: str
+    reason: str = ""
+    created_by: str = ""
+    created_at: datetime
+    expires_at: datetime | None = None
+
+    def is_active(self) -> bool:
+        return self.expires_at is None or self.expires_at > _now()
+
+
+class AuditLogEntry(BaseModel):
+    """Admin mutation audit trail row."""
+
+    id: str
+    actor_id: str = ""
+    actor_email: str = ""
+    action: str
+    target_kind: str = ""
+    target_id: str = ""
+    ip: str = ""
+    user_agent: str = ""
+    metadata: str = ""
+    created_at: datetime
+
+
 class ClientRegistrationResponse(BaseModel):
     client_id: str
     client_secret: str | None = None

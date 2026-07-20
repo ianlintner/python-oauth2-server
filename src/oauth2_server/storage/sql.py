@@ -6,19 +6,43 @@ SQLAlchemy's `text()` uses named `:param` placeholders for both dialects, so
 query string works for both backends here.
 """
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from oauth2_server.models import AuthorizationCode, Client, DeviceAuthorization, Token, User
+from oauth2_server.models import (
+    AuditLogEntry,
+    AuthorizationCode,
+    Client,
+    DenylistEntry,
+    DeviceAuthorization,
+    Token,
+    User,
+)
 from oauth2_server.storage.migrations import run_migrations
+from oauth2_server.storage.paging import ListQuery, whitelist_col
 
 _CLIENT_COLS = ", ".join(Client.model_fields.keys())
 _USER_COLS = ", ".join(User.model_fields.keys())
 _TOKEN_COLS = ", ".join(Token.model_fields.keys())
 _AUTH_CODE_COLS = ", ".join(AuthorizationCode.model_fields.keys())
 _DEVICE_AUTH_COLS = ", ".join(DeviceAuthorization.model_fields.keys())
+_DENYLIST_COLS = ", ".join(DenylistEntry.model_fields.keys())
+_AUDIT_LOG_COLS = ", ".join(AuditLogEntry.model_fields.keys())
+
+# Sort whitelists — every dynamic ORDER BY column must pass through
+# whitelist_col(...) against one of these; never interpolate user input.
+_CLIENT_SORT_COLS = ["name", "client_id", "created_at"]
+_USER_SORT_COLS = ["username", "email", "role", "created_at"]
+_TOKEN_SORT_COLS = ["client_id", "user_id", "scope", "expires_at", "created_at"]
+_DEVICE_AUTH_SORT_COLS = ["created_at"]
+_DENYLIST_SORT_COLS = ["kind", "value", "created_at"]
+_AUDIT_LOG_SORT_COLS = ["actor_id", "action", "target_kind", "created_at"]
+
+# Columns update_user is allowed to change.
+_USER_UPDATE_COLS = ["username", "email", "enabled", "role", "password_hash", "updated_at"]
 
 # Columns update_client is allowed to change — mirrors the Rust UPDATE query,
 # which deliberately excludes id/client_id/created_at/require_state.
@@ -81,6 +105,18 @@ class SqlStorage:
         mode = "json" if self._engine.dialect.name == "sqlite" else "python"
         return model.model_dump(mode=mode)
 
+    def _dt(self, value: datetime):
+        # Same dialect-aware conversion as `_dump`, for a raw datetime that
+        # isn't part of a model being persisted (e.g. a bound "now" filter or
+        # the `expire_device_authorization` sentinel).
+        if self._engine.dialect.name == "sqlite":
+            return value.isoformat()
+        return value
+
+    @staticmethod
+    def _order(sort_dir: str) -> str:
+        return "ASC" if sort_dir == "asc" else "DESC"
+
     async def init(self) -> None:
         await run_migrations(self._engine, self._migrations_dir)
 
@@ -127,6 +163,63 @@ class SqlStorage:
                 text("DELETE FROM clients WHERE client_id = :cid"), {"cid": client_id}
             )
 
+    async def set_client_enabled(self, client_id: str, enabled: bool) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE clients SET enabled = :e WHERE client_id = :cid"),
+                {"e": enabled, "cid": client_id},
+            )
+
+    async def set_client_secret(self, client_id: str, client_secret: str) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE clients SET client_secret = :s WHERE client_id = :cid"),
+                {"s": client_secret, "cid": client_id},
+            )
+
+    async def list_all_clients(self) -> list[Client]:
+        async with self._engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_CLIENT_COLS} FROM clients ORDER BY created_at DESC LIMIT 200"
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [Client(**r) for r in rows]
+
+    async def list_clients_page(self, q: ListQuery) -> tuple[list[Client], int]:
+        col = whitelist_col(q.sort_by, _CLIENT_SORT_COLS)
+        order = self._order(q.sort_dir)
+        where = "WHERE LOWER(name) LIKE :pattern OR LOWER(client_id) LIKE :pattern"
+        params = {
+            "pattern": f"%{(q.search or '').lower()}%",
+            "limit": q.effective_limit(),
+            "offset": q.offset,
+        }
+        async with self._engine.connect() as conn:
+            total = (
+                await conn.execute(text(f"SELECT COUNT(*) FROM clients {where}"), params)
+            ).scalar_one()
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_CLIENT_COLS} FROM clients {where} "
+                            f"ORDER BY {col} {order} LIMIT :limit OFFSET :offset"
+                        ),
+                        params,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [Client(**r) for r in rows], total
+
     # --- Users ---
 
     async def save_user(self, user: User) -> None:
@@ -159,6 +252,85 @@ class SqlStorage:
                 .first()
             )
         return User(**row) if row else None
+
+    async def update_user(self, user: User) -> None:
+        set_clause = ", ".join(f"{c} = :{c}" for c in _USER_UPDATE_COLS)
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text(f"UPDATE users SET {set_clause} WHERE id = :id"),
+                self._dump(user),
+            )
+
+    async def delete_user(self, user_id: str) -> None:
+        async with self._engine.begin() as conn:
+            # Unlink + revoke the user's tokens before deleting the row (FK).
+            await conn.execute(
+                text("UPDATE tokens SET revoked = :r, user_id = NULL WHERE user_id = :uid"),
+                {"r": True, "uid": user_id},
+            )
+            await conn.execute(text("DELETE FROM users WHERE id = :uid"), {"uid": user_id})
+
+    async def set_user_enabled(self, user_id: str, enabled: bool) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE users SET enabled = :e WHERE id = :uid"),
+                {"e": enabled, "uid": user_id},
+            )
+
+    async def set_user_role(self, user_id: str, role: str) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE users SET role = :r WHERE id = :uid"),
+                {"r": role, "uid": user_id},
+            )
+
+    async def set_user_password_hash(self, user_id: str, password_hash: str) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE users SET password_hash = :p WHERE id = :uid"),
+                {"p": password_hash, "uid": user_id},
+            )
+
+    async def list_all_users(self) -> list[User]:
+        async with self._engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(f"SELECT {_USER_COLS} FROM users ORDER BY created_at DESC LIMIT 200")
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [User(**r) for r in rows]
+
+    async def list_users_page(self, q: ListQuery) -> tuple[list[User], int]:
+        col = whitelist_col(q.sort_by, _USER_SORT_COLS)
+        order = self._order(q.sort_dir)
+        where = "WHERE LOWER(username) LIKE :pattern OR LOWER(email) LIKE :pattern"
+        params = {
+            "pattern": f"%{(q.search or '').lower()}%",
+            "limit": q.effective_limit(),
+            "offset": q.offset,
+        }
+        async with self._engine.connect() as conn:
+            total = (
+                await conn.execute(text(f"SELECT COUNT(*) FROM users {where}"), params)
+            ).scalar_one()
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_USER_COLS} FROM users {where} "
+                            f"ORDER BY {col} {order} LIMIT :limit OFFSET :offset"
+                        ),
+                        params,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [User(**r) for r in rows], total
 
     # --- Tokens ---
 
@@ -203,13 +375,6 @@ class SqlStorage:
                 {"r": True, "t": token},
             )
 
-    async def set_token_family(self, access_token: str, family: str) -> None:
-        async with self._engine.begin() as conn:
-            await conn.execute(
-                text("UPDATE tokens SET token_family = :f WHERE access_token = :t"),
-                {"f": family, "t": access_token},
-            )
-
     async def revoke_token_family(self, family: str) -> int:
         async with self._engine.begin() as conn:
             result = await conn.execute(
@@ -217,6 +382,75 @@ class SqlStorage:
                 {"r": True, "f": family},
             )
         return result.rowcount
+
+    async def revoke_tokens_by_user_id(self, user_id: str) -> int:
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                text("UPDATE tokens SET revoked = :r WHERE user_id = :uid AND revoked = :f"),
+                {"r": True, "uid": user_id, "f": False},
+            )
+        return result.rowcount
+
+    async def revoke_tokens_by_client_id(self, client_id: str) -> int:
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                text("UPDATE tokens SET revoked = :r WHERE client_id = :cid AND revoked = :f"),
+                {"r": True, "cid": client_id, "f": False},
+            )
+        return result.rowcount
+
+    async def list_all_tokens(self) -> list[Token]:
+        async with self._engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(f"SELECT {_TOKEN_COLS} FROM tokens ORDER BY created_at DESC LIMIT 200")
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [Token(**r) for r in rows]
+
+    async def list_tokens_page(self, q: ListQuery) -> tuple[list[Token], int]:
+        col = whitelist_col(q.sort_by, _TOKEN_SORT_COLS)
+        order = self._order(q.sort_dir)
+        params: dict = {
+            "pattern": f"%{(q.search or '').lower()}%",
+            "limit": q.effective_limit(),
+            "offset": q.offset,
+        }
+        clauses = ["(LOWER(client_id) LIKE :pattern OR LOWER(COALESCE(user_id, '')) LIKE :pattern)"]
+        if q.status == "active":
+            clauses.append("revoked = :revoked_is AND expires_at > :now")
+            params["revoked_is"] = False
+            params["now"] = self._dt(datetime.now(timezone.utc))
+        elif q.status == "revoked":
+            clauses.append("revoked = :revoked_is")
+            params["revoked_is"] = True
+        elif q.status == "expired":
+            clauses.append("revoked = :revoked_is AND expires_at <= :now")
+            params["revoked_is"] = False
+            params["now"] = self._dt(datetime.now(timezone.utc))
+        where = "WHERE " + " AND ".join(clauses)
+        async with self._engine.connect() as conn:
+            total = (
+                await conn.execute(text(f"SELECT COUNT(*) FROM tokens {where}"), params)
+            ).scalar_one()
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_TOKEN_COLS} FROM tokens {where} "
+                            f"ORDER BY {col} {order} LIMIT :limit OFFSET :offset"
+                        ),
+                        params,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [Token(**r) for r in rows], total
 
     # --- Authorization codes ---
 
@@ -328,8 +562,136 @@ class SqlStorage:
         return result.rowcount
 
     async def expire_device_authorization(self, device_code: str) -> None:
+        now_minus_1s = datetime.now(timezone.utc) - timedelta(seconds=1)
         async with self._engine.begin() as conn:
             await conn.execute(
                 text("UPDATE device_authorizations SET expires_at = :e WHERE device_code = :dc"),
-                {"e": "1970-01-01T00:00:00+00:00", "dc": device_code},
+                {"e": self._dt(now_minus_1s), "dc": device_code},
             )
+
+    async def list_all_device_authorizations(self) -> list[DeviceAuthorization]:
+        async with self._engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_DEVICE_AUTH_COLS} FROM device_authorizations "
+                            "ORDER BY created_at DESC LIMIT 500"
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [DeviceAuthorization(**r) for r in rows]
+
+    async def list_device_authorizations_page(
+        self, q: ListQuery
+    ) -> tuple[list[DeviceAuthorization], int]:
+        col = whitelist_col(q.sort_by, _DEVICE_AUTH_SORT_COLS)
+        order = self._order(q.sort_dir)
+        params = {"limit": q.effective_limit(), "offset": q.offset}
+        async with self._engine.connect() as conn:
+            total = (
+                await conn.execute(text("SELECT COUNT(*) FROM device_authorizations"))
+            ).scalar_one()
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_DEVICE_AUTH_COLS} FROM device_authorizations "
+                            f"ORDER BY {col} {order} LIMIT :limit OFFSET :offset"
+                        ),
+                        params,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [DeviceAuthorization(**r) for r in rows], total
+
+    # --- Denylist ---
+
+    async def add_denylist_entry(self, entry: DenylistEntry) -> None:
+        # ON CONFLICT deliberately omits `id` from the SET clause — the
+        # original row id survives an upsert (Rust parity).
+        stmt = (
+            _insert_stmt("denylist", _DENYLIST_COLS) + " ON CONFLICT(kind, value) DO UPDATE SET "
+            "reason = excluded.reason, created_by = excluded.created_by, "
+            "expires_at = excluded.expires_at"
+        )
+        async with self._engine.begin() as conn:
+            await conn.execute(text(stmt), self._dump(entry))
+
+    async def remove_denylist_entry(self, entry_id: str) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(text("DELETE FROM denylist WHERE id = :id"), {"id": entry_id})
+
+    async def list_denylist(self, q: ListQuery) -> tuple[list[DenylistEntry], int]:
+        col = whitelist_col(q.sort_by, _DENYLIST_SORT_COLS)
+        order = self._order(q.sort_dir)
+        params = {"limit": q.effective_limit(), "offset": q.offset}
+        async with self._engine.connect() as conn:
+            total = (await conn.execute(text("SELECT COUNT(*) FROM denylist"))).scalar_one()
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_DENYLIST_COLS} FROM denylist "
+                            f"ORDER BY {col} {order} LIMIT :limit OFFSET :offset"
+                        ),
+                        params,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [DenylistEntry(**r) for r in rows], total
+
+    async def find_denylist_entry(self, kind: str, value: str) -> DenylistEntry | None:
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_DENYLIST_COLS} FROM denylist WHERE kind = :k AND value = :v"
+                        ),
+                        {"k": kind, "v": value},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return None
+        entry = DenylistEntry(**row)
+        # Expiry is evaluated in Python, not SQL — expired rows stay in the
+        # table (no sweeper) but are invisible to lookups (Rust parity).
+        return entry if entry.is_active() else None
+
+    # --- Audit log ---
+
+    async def write_audit_log(self, entry: AuditLogEntry) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(text(_insert_stmt("audit_log", _AUDIT_LOG_COLS)), self._dump(entry))
+
+    async def list_audit_log(self, q: ListQuery) -> tuple[list[AuditLogEntry], int]:
+        col = whitelist_col(q.sort_by, _AUDIT_LOG_SORT_COLS)
+        order = self._order(q.sort_dir)
+        params = {"limit": q.effective_limit(), "offset": q.offset}
+        async with self._engine.connect() as conn:
+            total = (await conn.execute(text("SELECT COUNT(*) FROM audit_log"))).scalar_one()
+            rows = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_AUDIT_LOG_COLS} FROM audit_log "
+                            f"ORDER BY {col} {order} LIMIT :limit OFFSET :offset"
+                        ),
+                        params,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [AuditLogEntry(**r) for r in rows], total

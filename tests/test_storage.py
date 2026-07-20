@@ -104,6 +104,24 @@ async def test_mark_device_authorization_used_is_single_claim(storage):
     assert await storage.mark_device_authorization_used("dc-race") == 0
 
 
+async def test_expire_device_authorization_expires_row(storage):
+    await storage.save_client(_client())
+    d = DeviceAuthorization(
+        id=uuid.uuid4().hex,
+        device_code="dc-expire",
+        user_code="UC-EXPIRE",
+        client_id="client1",
+        scope="read",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    await storage.save_device_authorization(d)
+
+    await storage.expire_device_authorization("dc-expire")
+
+    got = await storage.get_device_authorization_by_device_code("dc-expire")
+    assert got.expires_at < datetime.now(timezone.utc)
+
+
 async def test_seed_admin_user_creates_admin_once():
     from oauth2_server.bootstrap import seed_admin_user
 
