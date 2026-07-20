@@ -32,6 +32,13 @@ def _discovery_document(issuer: str) -> dict:
         "jwks_uri": f"{base}/.well-known/jwks.json",
         "registration_endpoint": f"{base}/connect/register",
         "device_authorization_endpoint": f"{base}/oauth/device_authorization",
+        "pushed_authorization_request_endpoint": f"{base}/oauth/par",
+        "require_pushed_authorization_requests": False,
+        "request_uri_parameter_supported": True,
+        # Divergence: JAR (`request=`/`request_uri=` JWT-encoded authorization
+        # requests, RFC 9101) was not ported — only PAR's own `request_uri`
+        # value is supported.
+        "request_parameter_supported": False,
         "end_session_endpoint": f"{base}/oauth/logout",
         "check_session_iframe": f"{base}/oauth/check_session",
         "backchannel_logout_supported": True,
