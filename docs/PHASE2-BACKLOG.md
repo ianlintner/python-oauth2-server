@@ -129,3 +129,26 @@ noted during Phase 2 implementation:
   resolves via `list_all_tokens` (`LIMIT 200`) — rows older than the newest 200 silently no-op (and
   `GET /tokens/{id}` 404s for them while the paged list can show them); needs a `get_token_by_id`
   storage method.
+- **Back-channel logout is awaited inline** — each registered RP's logout_token POST is awaited
+  sequentially with a 10s timeout (`routes/logout.py`); N unreachable RPs stall the caller's logout up
+  to 10s each. Move dispatch to a background task or bounded gather.
+- **Seed-admin password has no strength floor** — `OAUTH2_SEED_PASSWORD` accepts any length in
+  `bootstrap.py` while the admin API enforces 8+ characters for user passwords; align the policy.
+- **Admin PUT handlers skip type validation and the disable cascade** — `PUT /admin/api/users/{id}` and
+  `PUT /admin/api/clients/{id}` feed raw JSON into `model_copy(update=...)` (e.g. `{"enabled":"yes"}`
+  persists a string, which asyncpg would reject with a 500), and PUT `enabled:false` does not revoke
+  tokens while `POST .../enabled` does. Add Pydantic body models and unify the cascade.
+- **Admin client create with a duplicate caller-supplied `client_id`** hits the unique constraint and
+  returns a 500; users-create returns a clean 409 — align to 409.
+- **Negative `limit`/`offset` unvalidated on admin list endpoints** — `limit=-1` becomes `LIMIT -1`
+  (unbounded, cap bypass) on SQLite and a 500 on Postgres; add `ge=0` bounds to the query params.
+- **Audit coverage non-uniform** — admin single-token revoke (`POST /tokens/{id}/revoke`), device
+  expire, and key rotation write no audit entries while bulk revokes and CRUD do (Rust parity, but
+  worth unifying).
+- **Unknown-kid JWT fallback pins HS256 trust to `jwt_secret` forever** — `decode_access_token` falls
+  back to the static secret rather than trying active keyset HS256 keys, so HS256 rotation is a no-op
+  for stateless decode (impact negligible today — the DB row is authoritative everywhere).
+- **No Cache-Control headers on `/admin/api/*` responses** — the security-headers middleware only
+  covers `/oauth*`; session-authenticated admin GETs are heuristically cacheable.
+- **LIKE search wildcards unescaped in admin search** — `%`/`_` in the search term act as wildcards
+  (parameters are bound, so injection-safe; cosmetic result pollution only).
