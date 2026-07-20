@@ -249,6 +249,34 @@ async def test_set_user_enabled_toggles_flag_and_revokes_on_disable():
         assert reloaded_user.enabled is True
 
 
+async def test_set_user_enabled_rejects_missing_enabled_field():
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        token = Token(
+            id=uuid.uuid4().hex,
+            access_token=uuid.uuid4().hex,
+            client_id="client1",
+            user_id="u1",
+            expires_at=_future(),
+        )
+        await storage.save_token(token)
+        original = await storage.get_user_by_id("u1")
+        assert original.enabled is True
+
+        resp = await client.post("/admin/api/users/u1/enabled", json={})
+        assert resp.status_code == 400
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "enabled must be a boolean",
+        }
+
+        reloaded_user = await storage.get_user_by_id("u1")
+        assert reloaded_user.enabled is True
+        reloaded_token = await storage.get_token_by_access_token(token.access_token)
+        assert reloaded_token.revoked is False
+
+
 # --- Role ---
 
 

@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.models import Client
+from oauth2_server.routes.admin._util import _json_body
 from oauth2_server.routes.admin.guard import AdminActor, require_admin
 from oauth2_server.services.audit import build_audit, record_audit
 from oauth2_server.storage.paging import ListQuery, page_envelope
@@ -48,14 +49,6 @@ async def _resolve_client(storage, client_uuid: str) -> Client | None:
         if client.id == client_uuid:
             return client
     return None
-
-
-async def _json_body(request: Request) -> dict:
-    try:
-        body = await request.json()
-    except ValueError:
-        return {}
-    return body if isinstance(body, dict) else {}
 
 
 def _client_info(client: Client) -> dict:
@@ -280,7 +273,12 @@ async def set_client_enabled(
         return _client_not_found()
 
     body = await _json_body(request)
-    enabled = bool(body.get("enabled", False))
+    if not isinstance(body.get("enabled"), bool):
+        return ORJSONResponse(
+            {"error": "invalid_request", "error_description": "enabled must be a boolean"},
+            status_code=400,
+        )
+    enabled = body["enabled"]
 
     await storage.set_client_enabled(client.client_id, enabled)
     if not enabled:

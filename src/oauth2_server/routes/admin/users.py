@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.models import User
+from oauth2_server.routes.admin._util import _json_body
 from oauth2_server.routes.admin.guard import AdminActor, require_admin
 from oauth2_server.security import hash_password_async
 from oauth2_server.services.audit import build_audit, record_audit
@@ -38,14 +39,6 @@ _VALID_ROLES = {"admin", "user"}
 
 def _user_not_found() -> ORJSONResponse:
     return ORJSONResponse({"error": "user not found"}, status_code=404)
-
-
-async def _json_body(request: Request) -> dict:
-    try:
-        body = await request.json()
-    except ValueError:
-        return {}
-    return body if isinstance(body, dict) else {}
 
 
 def _user_info(user: User) -> dict:
@@ -211,7 +204,12 @@ async def set_user_enabled(
     storage = request.app.state.storage
     events = request.app.state.events
     body = await _json_body(request)
-    enabled = bool(body.get("enabled", False))
+    if not isinstance(body.get("enabled"), bool):
+        return ORJSONResponse(
+            {"error": "invalid_request", "error_description": "enabled must be a boolean"},
+            status_code=400,
+        )
+    enabled = body["enabled"]
 
     await storage.set_user_enabled(user_id, enabled)
     if not enabled:

@@ -267,6 +267,33 @@ async def test_set_client_enabled_toggles_and_revokes_tokens_on_disable():
         assert reloaded_client.enabled is True
 
 
+async def test_set_client_enabled_rejects_missing_enabled_field():
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        seeded = await storage.get_client("client1")
+        token = Token(
+            id=uuid.uuid4().hex,
+            access_token=uuid.uuid4().hex,
+            client_id="client1",
+            expires_at=_future(),
+        )
+        await storage.save_token(token)
+        assert seeded.enabled is True
+
+        resp = await client.post(f"/admin/api/clients/{seeded.id}/enabled", json={})
+        assert resp.status_code == 400
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "enabled must be a boolean",
+        }
+
+        reloaded_client = await storage.get_client("client1")
+        assert reloaded_client.enabled is True
+        reloaded_token = await storage.get_token_by_access_token(token.access_token)
+        assert reloaded_token.revoked is False
+
+
 # --- Regenerate secret ---
 
 
