@@ -297,6 +297,28 @@ async def test_ingest_correct_bearer_accepted():
         assert resp.json()["status"] == "accepted"
 
 
+async def test_ingest_non_ascii_bearer_returns_401():
+    # RFC 7230 §3.2.6 obs-text permits a raw, non-UTF-8-safe byte in a
+    # header value, and a raw HTTP client can send one directly (httpx's
+    # own str-header validation would reject it client-side, so the raw
+    # ASGI byte-tuple form is used here to reach the server as a real
+    # client on the wire could). `hmac.compare_digest` raises TypeError
+    # when either `str` operand contains a non-ASCII character instead of
+    # returning False, which used to surface as an unhandled 500 instead
+    # of the documented 401 invalid_token.
+    async with build_client_app({"events_ingest_bearer_token": "s3cr3t-token"}) as client:
+        resp = await client.post(
+            "/events/ingest",
+            json=_envelope_body(),
+            headers=[(b"authorization", b"Bearer \xc3\xb6token")],
+        )
+        assert resp.status_code == 401
+        assert resp.json() == {
+            "error": "invalid_token",
+            "error_description": "Missing or invalid bearer token",
+        }
+
+
 async def test_ingest_public_can_be_enabled():
     async with build_client_app({"events_public_ingest": True}) as client:
         resp = await client.post("/events/ingest", json=_envelope_body())

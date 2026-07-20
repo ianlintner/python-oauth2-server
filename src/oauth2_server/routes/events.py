@@ -38,6 +38,24 @@ def _unauthorized() -> ORJSONResponse:
     )
 
 
+def _bearer_matches(presented: str, expected: str) -> bool:
+    """Constant-time compare, safe for a non-ASCII bearer token.
+
+    ``hmac.compare_digest`` raises ``TypeError`` ("comparing strings with
+    non-ASCII characters is not supported") when either ``str`` operand
+    contains a non-ASCII character, instead of returning ``False``. A raw
+    HTTP client can legally send obs-text (RFC 7230 §3.2.6) in the
+    Authorization header, and Starlette's ``Headers.get`` hands it back as
+    a ``str`` already latin-1-decoded from the raw ASGI bytes (see
+    ``starlette.datastructures.Headers``) — so ``presented.encode("latin-1")``
+    round-trips losslessly back to the exact bytes the client sent. Compare
+    on those bytes instead, which ``compare_digest`` fully supports, so a
+    non-ASCII bearer token falls through to the normal 401 ``invalid_token``
+    path rather than an unhandled 500.
+    """
+    return hmac.compare_digest(presented.encode("latin-1"), expected.encode("utf-8"))
+
+
 @router.post("/ingest")
 async def ingest(request: Request) -> ORJSONResponse:
     config = request.app.state.config
@@ -52,7 +70,7 @@ async def ingest(request: Request) -> ORJSONResponse:
         if not expected:
             return ORJSONResponse({"error": "event_ingest_auth_not_configured"}, status_code=503)
         presented = _extract_bearer(request.headers.get("authorization"))
-        if presented is None or not hmac.compare_digest(presented, expected):
+        if presented is None or not _bearer_matches(presented, expected):
             return _unauthorized()
 
     event_bus = request.app.state.event_bus

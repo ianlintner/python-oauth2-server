@@ -19,6 +19,22 @@ logger = logging.getLogger(__name__)
 _UNKNOWN_OR_DISABLED_CLIENT_MESSAGE = "unknown or disabled client"
 
 
+def _secrets_equal(a: str, b: str) -> bool:
+    """Constant-time compare, safe for non-ASCII client secrets.
+
+    ``secrets.compare_digest``/``hmac.compare_digest`` raise ``TypeError``
+    when either ``str`` operand contains a non-ASCII character instead of
+    returning ``False``. Both operands here can legitimately contain
+    non-ASCII text — the Basic-auth password is UTF-8-decoded in
+    ``_parse_basic_auth`` below with no ASCII restriction, and form bodies
+    decode the same way — so a client sending a non-ASCII secret would
+    otherwise turn a routine credential mismatch into an unhandled 500
+    instead of the documented ``invalid_client`` error. Compare on the
+    UTF-8 byte representation instead, which has no such restriction.
+    """
+    return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 class ClientService:
     def __init__(self, storage: Storage, event_bus: EventBus | None = None):
         self._storage = storage
@@ -47,7 +63,7 @@ class ClientService:
             # matching duplicates.
             if form_client_id and form_client_id != client_id:
                 raise OAuthError("invalid_request", "client_id mismatch", 400)
-            if form_client_secret and not secrets.compare_digest(form_client_secret, client_secret):
+            if form_client_secret and not _secrets_equal(form_client_secret, client_secret):
                 raise OAuthError("invalid_client", "client_secret mismatch")
         else:
             client_id = form_client_id
@@ -80,7 +96,7 @@ class ClientService:
             self._emit_client_validated(client.client_id, success=True)
             return client
 
-        if not client_secret or not secrets.compare_digest(client_secret, client.client_secret):
+        if not client_secret or not _secrets_equal(client_secret, client.client_secret):
             self._emit_client_validated(client.client_id, success=False)
             raise OAuthError("invalid_client", "invalid client secret")
         self._emit_client_validated(client.client_id, success=True)

@@ -148,6 +148,24 @@ def _pkce_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
+def _pkce_matches(computed_challenge: str, stored_challenge: str) -> bool:
+    """Constant-time compare, safe for a non-ASCII stored code_challenge.
+
+    ``secrets.compare_digest`` raises ``TypeError`` when either ``str``
+    operand contains a non-ASCII character instead of returning ``False``.
+    `/oauth/authorize` (and PAR) only length-check ``code_challenge`` —
+    RFC 7636's base64url charset is never enforced — so a client can store
+    a non-ASCII ``code_challenge`` on the authorization code and turn the
+    verifier check below into an unhandled 500 instead of the documented
+    ``invalid_grant``. Compare on the UTF-8 byte representation instead,
+    which has no such restriction; ``computed_challenge`` is always
+    base64url/ASCII, so this only changes behavior for the malicious case.
+    """
+    return secrets.compare_digest(
+        computed_challenge.encode("utf-8"), stored_challenge.encode("utf-8")
+    )
+
+
 def _salvage_old_cnf(access_token: str) -> dict | None:
     """Refresh-grant cnf carry-over (RFC 9449 parity gap, documented in
     research-dpop.md `key_behaviors`: the refresh grant "does not demand or
@@ -371,7 +389,7 @@ async def token(request: Request) -> ORJSONResponse:
                 return oauth_error(
                     "invalid_request", "code_verifier must be between 43 and 128 characters"
                 )
-            if not secrets.compare_digest(_pkce_challenge(verifier), auth_code.code_challenge):
+            if not _pkce_matches(_pkce_challenge(verifier), auth_code.code_challenge):
                 return oauth_error("invalid_grant", "code_verifier does not match code_challenge")
         elif client.is_public():
             return oauth_error("invalid_grant", "public clients must use PKCE")
