@@ -142,10 +142,23 @@ class Claims(BaseModel):
     scope: str
     jti: str
     client_id: str | None = None
+    # RFC 9449 §6.1 confirmation claim: {"jkt": "<b64url thumbprint>"} when
+    # the access token is DPoP-bound, otherwise omitted entirely (never a
+    # literal `null`) via `to_payload`'s `exclude_none=True`. Set by
+    # `TokenService.issue`'s `cnf` keyword — see `services/tokens.py` and
+    # `routes/token.py` for the grant-by-grant binding rules.
+    cnf: dict | None = None
 
     @classmethod
     def new(
-        cls, subject: str, client_id: str, scope: str, duration_seconds: int, issuer: str
+        cls,
+        subject: str,
+        client_id: str,
+        scope: str,
+        duration_seconds: int,
+        issuer: str,
+        *,
+        cnf: dict | None = None,
     ) -> "Claims":
         iat = int(_now().timestamp())
         return cls(
@@ -157,6 +170,7 @@ class Claims(BaseModel):
             scope=scope,
             jti=uuid.uuid4().hex,
             client_id=client_id,
+            cnf=cnf,
         )
 
     def to_payload(self) -> dict[str, Any]:

@@ -27,15 +27,36 @@ class TokenService:
         *,
         with_refresh: bool,
         token_family: str | None = None,
+        cnf: dict | None = None,
     ) -> TokenResponse:
+        """Issue an access (+ optional refresh) token.
+
+        `cnf` is the RFC 9449 §6.1 confirmation claim (`{"jkt": ...}`) to
+        bind onto the access token — see `routes/token.py` for which grants
+        pass a real value. **Opaque mode drops it silently**: an opaque
+        access token is a bare random string with nowhere to carry a `cnf`
+        claim, so `cnf` here only ever reaches the issued token when
+        `config.access_tokens_opaque` is False (Rust parity: the Rust server
+        has no opaque-token mode at all, so this divergence is Python-only).
+        The stored `Token` row's `token_type` always stays the model default
+        "Bearer" regardless of `cnf` — only the `TokenResponse` returned here
+        says "DPoP" (research-dpop.md `key_behaviors`: "the persisted Token
+        row keeps token_type 'Bearer'").
+        """
         config = self._config
         subject = user_id or client.client_id
+        bound_cnf = cnf if not config.access_tokens_opaque else None
 
         if config.access_tokens_opaque:
             access_token = secrets.token_urlsafe(32)
         else:
             claims = Claims.new(
-                subject, client.client_id, scope, config.access_token_ttl_secs, config.issuer
+                subject,
+                client.client_id,
+                scope,
+                config.access_token_ttl_secs,
+                config.issuer,
+                cnf=bound_cnf,
             )
             # Prefer the current RS256 key so access+refresh tokens follow
             # RS256 rotation automatically whenever one is configured; fall
@@ -70,6 +91,7 @@ class TokenService:
         return TokenResponse(
             access_token=access_token,
             refresh_token=refresh_token,
+            token_type="DPoP" if bound_cnf is not None else "Bearer",
             expires_in=config.access_token_ttl_secs,
             scope=scope,
         )

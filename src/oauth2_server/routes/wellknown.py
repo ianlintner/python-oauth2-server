@@ -69,6 +69,11 @@ def _discovery_document(issuer: str, id_token_alg: str) -> dict:
             ["RS256"] if id_token_alg == "RS256" else ["HS256"]
         ),
         "claims_supported": ["sub", "email", "preferred_username"],
+        # RFC 9449 §10: narrower than what services/dpop.py actually accepts
+        # (RS256/384/512, PS256/384/512, ES256/384) — Rust parity
+        # (research-dpop.md key_behaviors: "Discovery advertises ...
+        # narrower than the 8 algs the validator actually accepts").
+        "dpop_signing_alg_values_supported": ["ES256", "RS256"],
     }
 
 

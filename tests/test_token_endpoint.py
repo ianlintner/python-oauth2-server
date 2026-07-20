@@ -59,6 +59,7 @@ async def run_code_flow(
     nonce: str | None = None,
     code_verifier: str | None = "__use_issued__",
     extra_form: dict | None = None,
+    headers: dict | None = None,
 ):
     """Run the full authorization_code flow and POST /oauth/token; returns (resp, code)."""
     code, issued_verifier = await issue_code(
@@ -81,7 +82,7 @@ async def run_code_flow(
     if extra_form:
         data.update(extra_form)
     basic_auth = (client_id, client_secret) if client_secret is not None else None
-    resp = await post_token(client_app, data, basic_auth=basic_auth)
+    resp = await post_token(client_app, data, basic_auth=basic_auth, headers=headers)
     return resp, code
 
 

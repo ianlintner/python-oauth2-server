@@ -28,6 +28,8 @@ from oauth2_server.routes.register import router as register_router
 from oauth2_server.routes.token import router as token_router
 from oauth2_server.routes.wellknown import router as wellknown_router
 from oauth2_server.security import derive_session_key
+from oauth2_server.services.dpop import DpopReplayStore
+from oauth2_server.services.dpop_nonce import DpopNonceIssuer, decode_dpop_nonce_secret
 from oauth2_server.services.events import RecentEventsStore
 from oauth2_server.services.par import ParStore
 from oauth2_server.services.ratelimit import FixedWindowLimiter
@@ -55,6 +57,18 @@ def create_app(
         config.login_rate_limit_attempts, config.login_rate_limit_window_secs
     )
     app.state.keyset = seed_keyset(config)
+    # RFC 9449 DPoP: a single shared replay store + nonce issuer per app
+    # instance, read directly by routes/token.py (and later introspect).
+    # Unlike the Rust `Option<web::Data<...>>` handlers (research-dpop.md
+    # gotcha: silently falls back to a fresh throwaway store per request when
+    # app_data is missing, disabling replay protection with no error), this
+    # state is mandatory — there is no fallback path, so a missing
+    # `app.state.dpop_replay`/`dpop_nonce_issuer` is a hard `AttributeError`
+    # rather than a silent security downgrade (divergence 14).
+    app.state.dpop_replay = DpopReplayStore()
+    app.state.dpop_nonce_issuer = DpopNonceIssuer(
+        decode_dpop_nonce_secret(config.dpop_nonce_secret), config.dpop_nonce_lifetime_secs
+    )
     # Shared client for outbound OIDC back-channel logout POSTs
     # (routes/logout.py). Tests swap this for an `httpx.MockTransport`-backed
     # client to capture/assert the dispatched request without real network

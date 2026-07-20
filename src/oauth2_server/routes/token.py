@@ -1,4 +1,25 @@
-"""POST /oauth/token — RFC 6749 §3.2 token endpoint."""
+"""POST /oauth/token — RFC 6749 §3.2 token endpoint.
+
+RFC 9449 DPoP notes (see `.superpowers/sdd/research-dpop.md` for the Rust
+source this is ported from):
+
+- **htu is issuer-based, not Host-header-reconstructed.** The Rust handler
+  rebuilds the compared URL from `connection_info()` (scheme/host, honoring
+  `Forwarded`/`X-Forwarded-*` per actix config) + `req.path()`. This port
+  instead compares against `config.issuer.rstrip("/") + "/oauth/token"` —
+  simpler and arguably more secure (immune to a spoofed/misconfigured Host
+  header) but strictly less flexible: a deployment fronted by a proxy whose
+  externally-visible scheme/host doesn't match `OAUTH2_ISSUER` exactly would
+  reject every DPoP-bound token request that Rust would accept. Documented,
+  deliberate hardening simplification.
+- **Non-UTF-8 `DPoP` header detection.** Starlette's `request.headers.get`
+  hands back a `str` that has already been latin-1-decoded from the raw ASGI
+  bytes — latin-1 maps every byte 0-255 to a codepoint, so it can never
+  observe a decode failure the way Rust's `HeaderValue::to_str()` (which
+  requires valid UTF-8) does. To reproduce that check, `_read_dpop_header`
+  below reads `request.headers.raw` directly and UTF-8-decodes the value
+  itself instead of going through `.get`.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +29,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import jwt
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
@@ -18,6 +40,8 @@ from oauth2_server.models import Client, IdTokenClaims, User
 from oauth2_server.security import encode_id_token
 from oauth2_server.services.auth import scope_is_subset
 from oauth2_server.services.clients import ClientService
+from oauth2_server.services.dpop import DpopError, DpopValidated, validate_dpop_proof
+from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
 from oauth2_server.services.tokens import TokenService
 
 router = APIRouter()
@@ -35,6 +59,40 @@ def _half_hash(value: str) -> str:
 def _pkce_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def _read_dpop_header(request: Request) -> str | None:
+    """Extract the raw `DPoP` request header, UTF-8-decoded from the raw ASGI
+    bytes (see module docstring for why `request.headers.get` can't detect a
+    non-UTF-8 value). Returns `None` when the header is absent. Raises
+    `DpopError("invalid_request", "DPoP header is not valid UTF-8")` when
+    present but undecodable — the caller turns that into the RFC 6749 §5.2
+    400 response, matching the Rust handler's `to_str()` failure path.
+    """
+    for name, value in request.headers.raw:
+        if name.lower() == b"dpop":
+            try:
+                return value.decode("utf-8")
+            except UnicodeDecodeError:
+                raise DpopError("invalid_request", "DPoP header is not valid UTF-8") from None
+    return None
+
+
+def _salvage_old_cnf(access_token: str) -> dict | None:
+    """Refresh-grant cnf carry-over (RFC 9449 parity gap, documented in
+    research-dpop.md `key_behaviors`: the refresh grant "does not demand or
+    verify a fresh DPoP proof on the refresh request"). Decodes the OLD
+    access token WITHOUT verifying its signature and returns its `cnf` claim
+    verbatim, so a DPoP-bound token stays bound across a refresh with no
+    fresh proof required. Returns `None` for an opaque old access token (not
+    a JWT — `jwt.decode` raises) or a JWT with no (or non-dict) `cnf` claim.
+    """
+    try:
+        old_claims = jwt.decode(access_token, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return None
+    cnf = old_claims.get("cnf")
+    return cnf if isinstance(cnf, dict) else None
 
 
 def _mint_id_token(
@@ -101,6 +159,41 @@ async def token(request: Request) -> ORJSONResponse:
     except OAuthError as exc:
         return oauth_error(exc.error, exc.description, exc.status)
 
+    # RFC 9449 DPoP: read + validate an optional proof once, before dispatching
+    # on grant_type, mirroring the Rust handler's shared pre-grant block
+    # (research-dpop.md `endpoints` POST /oauth/token entry). `cnf` below is
+    # what authorization_code/client_credentials bind onto the new token;
+    # refresh_token instead salvages the OLD token's cnf (`_salvage_old_cnf`)
+    # and device_code never binds regardless of `cnf`'s value.
+    try:
+        dpop_header = _read_dpop_header(request)
+    except DpopError as exc:
+        return oauth_error(exc.error, exc.description)
+
+    dpop_validated: DpopValidated | None = None
+    if dpop_header is not None:
+        try:
+            dpop_validated = validate_dpop_proof(
+                dpop_header,
+                "POST",
+                config.issuer.rstrip("/") + "/oauth/token",
+                request.app.state.dpop_replay,
+            )
+        except DpopError as exc:
+            return oauth_error(exc.error, exc.description)
+
+        if client.dpop_nonce_required:
+            try:
+                nonce_response = enforce_dpop_nonce(
+                    dpop_validated, request.app.state.dpop_nonce_issuer
+                )
+            except DpopError as exc:
+                return oauth_error(exc.error, exc.description)
+            if nonce_response is not None:
+                return nonce_response
+
+    cnf = {"jkt": dpop_validated.jkt} if dpop_validated is not None else None
+
     grant_type = form.get("grant_type")
 
     if grant_type == "client_credentials":
@@ -123,7 +216,7 @@ async def token(request: Request) -> ORJSONResponse:
             scope = client.scope
 
         token_response = await TokenService(storage, config, keyset).issue(
-            client, None, scope, with_refresh=False
+            client, None, scope, with_refresh=False, cnf=cnf
         )
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
@@ -181,6 +274,7 @@ async def token(request: Request) -> ORJSONResponse:
             auth_code.scope,
             with_refresh=True,
             token_family=auth_code.token_family,
+            cnf=cnf,
         )
 
         scope_set = set(auth_code.scope.split())
@@ -243,10 +337,20 @@ async def token(request: Request) -> ORJSONResponse:
             scope = old_token.scope
 
         family = old_token.token_family or uuid.uuid4().hex
+        # Refresh carries the OLD access token's cnf forward regardless of
+        # whether this request presented a fresh DPoP proof — `cnf` (from
+        # this request's own header, if any) is deliberately unused here;
+        # see `_salvage_old_cnf` and the module docstring.
+        refresh_cnf = _salvage_old_cnf(old_token.access_token)
         await storage.revoke_token(old_token.access_token)
 
         token_response = await TokenService(storage, config, keyset).issue(
-            client, old_token.user_id, scope, with_refresh=True, token_family=family
+            client,
+            old_token.user_id,
+            scope,
+            with_refresh=True,
+            token_family=family,
+            cnf=refresh_cnf,
         )
 
         scope_set = set(scope.split())
@@ -301,6 +405,10 @@ async def token(request: Request) -> ORJSONResponse:
             # Lost the race to a concurrent request that already claimed this code.
             return oauth_error("invalid_grant", "device_code has already been redeemed")
 
+        # Device grant never binds cnf, even when the client presented a
+        # valid DPoP proof on this request (Rust parity, research-dpop.md
+        # gotchas: "device_code grant hardcodes cnf: None") — `cnf` is
+        # deliberately not passed through here.
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             device.user_id,

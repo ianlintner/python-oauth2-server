@@ -1,8 +1,13 @@
 import base64
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+import jwt
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from oauth2_server import security
 from oauth2_server.models import Client, User
@@ -89,9 +94,77 @@ async def login_admin(client):
     return await login_session(client, username="admin_rfc", password="password123")
 
 
-async def post_token(client_app, data: dict, basic_auth: tuple[str, str] | None = None):
-    headers = {}
+async def post_token(
+    client_app, data: dict, basic_auth: tuple[str, str] | None = None, headers: dict | None = None
+):
+    request_headers = dict(headers or {})
     if basic_auth is not None:
         raw = f"{basic_auth[0]}:{basic_auth[1]}".encode()
-        headers["Authorization"] = "Basic " + base64.b64encode(raw).decode()
-    return await client_app.post("/oauth/token", data=data, headers=headers)
+        request_headers["Authorization"] = "Basic " + base64.b64encode(raw).decode()
+    return await client_app.post("/oauth/token", data=data, headers=request_headers)
+
+
+def _b64u_fixed(value: int, length: int) -> str:
+    return base64.urlsafe_b64encode(value.to_bytes(length, "big")).rstrip(b"=").decode()
+
+
+def generate_dpop_key() -> tuple[bytes, dict]:
+    """Generate an ES256 (P-256) keypair for DPoP proof tests.
+
+    Returns `(private_key_pem, public_jwk)` — factored out of the
+    ES256-keypair generation duplicated in `tests/test_dpop.py`'s
+    `_generate_ec_keypair` so `make_dpop_proof` below (and any test that
+    needs the SAME key across multiple proofs, e.g. a nonce bootstrap
+    round-trip) can share one implementation.
+    """
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    numbers = private_key.public_key().public_numbers()
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    jwk = {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": _b64u_fixed(numbers.x, 32),
+        "y": _b64u_fixed(numbers.y, 32),
+    }
+    return pem, jwk
+
+
+def make_dpop_proof(
+    url: str,
+    method: str,
+    key: tuple[bytes, dict] | None = None,
+    nonce: str | None = None,
+    *,
+    jti: str | None = None,
+    iat: float | None = None,
+) -> tuple[str, dict]:
+    """Build a real, signed ES256 DPoP proof JWT for `method` + `url`.
+
+    `key` is an optional pre-generated `(private_key_pem, public_jwk)` pair
+    from `generate_dpop_key` — pass the same key across two calls to reuse
+    one DPoP key for a nonce-bootstrap round trip (first proof rejected for
+    a missing nonce, second proof from the SAME key embeds the fresh
+    nonce). When omitted, a fresh key is generated per call. Returns
+    `(proof, public_jwk)` so callers can independently compute the expected
+    `jkt` thumbprint (`oauth2_server.services.dpop.jwk_thumbprint`) without
+    threading the key back out separately.
+    """
+    if key is None:
+        key = generate_dpop_key()
+    private_pem, public_jwk = key
+    claims = {
+        "htm": method,
+        "htu": url,
+        "iat": int(iat if iat is not None else time.time()),
+        "jti": jti or uuid.uuid4().hex,
+    }
+    if nonce is not None:
+        claims["nonce"] = nonce
+    proof = jwt.encode(
+        claims, private_pem, algorithm="ES256", headers={"typ": "dpop+jwt", "jwk": public_jwk}
+    )
+    return proof, public_jwk
