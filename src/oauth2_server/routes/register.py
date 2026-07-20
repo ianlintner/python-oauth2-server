@@ -83,6 +83,11 @@ async def register_client(request: Request) -> ORJSONResponse:
         token_endpoint_auth_method=reg.token_endpoint_auth_method,
         registration_access_token=registration_access_token,
         contacts=json.dumps(reg.contacts),
+        backchannel_logout_uri=reg.backchannel_logout_uri or "",
+        backchannel_logout_session_required=reg.backchannel_logout_session_required,
+        frontchannel_logout_uri=reg.frontchannel_logout_uri or "",
+        frontchannel_logout_session_required=reg.frontchannel_logout_session_required,
+        post_logout_redirect_uris=json.dumps(reg.post_logout_redirect_uris),
         enabled=True,
     )
     await storage.save_client(client)
@@ -100,6 +105,11 @@ async def register_client(request: Request) -> ORJSONResponse:
         token_endpoint_auth_method=reg.token_endpoint_auth_method,
         client_name=reg.client_name,
         scope=reg.scope,
+        backchannel_logout_uri=reg.backchannel_logout_uri,
+        backchannel_logout_session_required=reg.backchannel_logout_session_required,
+        frontchannel_logout_uri=reg.frontchannel_logout_uri,
+        frontchannel_logout_session_required=reg.frontchannel_logout_session_required,
+        post_logout_redirect_uris=reg.post_logout_redirect_uris,
     )
     return ORJSONResponse(
         response_body.model_dump(exclude_none=True),

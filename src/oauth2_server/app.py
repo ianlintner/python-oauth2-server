@@ -6,6 +6,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
@@ -53,6 +54,12 @@ def create_app(
     app.state.config = config
     app.state.storage = storage
     app.state.events = RecentEventsStore()
+    # Shared client for outbound OIDC back-channel logout POSTs
+    # (routes/logout.py). Tests swap this for an `httpx.MockTransport`-backed
+    # client to capture/assert the dispatched request without real network
+    # I/O. Not closed here — `create_app` has no lifespan of its own in the
+    # test path, so it's `build()`'s lifespan that owns closing it.
+    app.state.http_client = httpx.AsyncClient(timeout=10)
 
     # FastAPI dependencies (e.g. require_admin, see routes/admin/guard.py)
     # can't short-circuit a request by returning a Response directly, so the
@@ -126,6 +133,7 @@ def build() -> FastAPI:
         await storage.init()
         await seed_admin_user(storage, config)
         yield
+        await app.state.http_client.aclose()
 
     app = create_app(config, storage, lifespan=lifespan)
     return app

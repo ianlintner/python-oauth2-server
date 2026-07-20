@@ -32,6 +32,12 @@ def _discovery_document(issuer: str) -> dict:
         "jwks_uri": f"{base}/.well-known/jwks.json",
         "registration_endpoint": f"{base}/connect/register",
         "device_authorization_endpoint": f"{base}/oauth/device_authorization",
+        "end_session_endpoint": f"{base}/oauth/logout",
+        "check_session_iframe": f"{base}/oauth/check_session",
+        "backchannel_logout_supported": True,
+        "backchannel_logout_session_supported": True,
+        "frontchannel_logout_supported": True,
+        "frontchannel_logout_session_supported": True,
         "grant_types_supported": [
             "authorization_code",
             "client_credentials",

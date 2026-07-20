@@ -53,6 +53,20 @@ class Client(BaseModel):
     def grant_type_list(self) -> list[str]:
         return json.loads(self.grant_types) if self.grant_types else []
 
+    def get_post_logout_redirect_uris(self) -> list[str]:
+        """Parse the `post_logout_redirect_uris` JSON-array TEXT column.
+
+        Mirrors `Client::get_post_logout_redirect_uris` (crates/oauth2-core):
+        an empty/missing column or malformed JSON yields `[]` rather than
+        raising, since this is used for an allowlist membership check.
+        """
+        if not self.post_logout_redirect_uris:
+            return []
+        try:
+            return json.loads(self.post_logout_redirect_uris)
+        except json.JSONDecodeError:
+            return []
+
 
 class User(BaseModel):
     id: str
@@ -205,6 +219,11 @@ class ClientRegistration(BaseModel):
     tos_uri: str | None = None
     jwks: dict | None = None
     jwks_uri: str | None = None
+    backchannel_logout_uri: str | None = None
+    backchannel_logout_session_required: bool = False
+    frontchannel_logout_uri: str | None = None
+    frontchannel_logout_session_required: bool = False
+    post_logout_redirect_uris: list[str] = []
 
 
 class DenylistEntry(BaseModel):
@@ -251,3 +270,8 @@ class ClientRegistrationResponse(BaseModel):
     token_endpoint_auth_method: str
     client_name: str = ""
     scope: str = ""
+    backchannel_logout_uri: str | None = None
+    backchannel_logout_session_required: bool = False
+    frontchannel_logout_uri: str | None = None
+    frontchannel_logout_session_required: bool = False
+    post_logout_redirect_uris: list[str] = []

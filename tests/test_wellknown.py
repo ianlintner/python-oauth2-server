@@ -39,6 +39,18 @@ async def test_jwks_returns_empty_keys(client_app):
     assert resp.json() == {"keys": []}
 
 
+async def test_discovery_includes_session_management_fields(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["end_session_endpoint"] == "https://auth.example.com/oauth/logout"
+    assert body["check_session_iframe"] == "https://auth.example.com/oauth/check_session"
+    assert body["backchannel_logout_supported"] is True
+    assert body["backchannel_logout_session_supported"] is True
+    assert body["frontchannel_logout_supported"] is True
+    assert body["frontchannel_logout_session_supported"] is True
+
+
 async def _get_userinfo(client_app, access_token: str | None, *, in_query: bool = False):
     if in_query:
         return await client_app.get("/oauth/userinfo", params={"access_token": access_token})
