@@ -15,10 +15,20 @@ and its `request.session.clear()` closes a Rust gap for free: Rust never
 clears `csrf_token`/`pkce_verifier`/`provider` after a successful callback
 (research doc gotchas), leaving the state value replayable within the same
 cookie session; here they're gone the moment login succeeds.
+
+SECURITY NOTE: `OAUTH2_ADMIN_EMAILS` (see `routes/admin/guard.py`) grants
+admin by provider-asserted `session["email"]` alone. Do not combine it with
+self-service social login unless the provider's asserted email is actually
+verified — `services/social.py` now enforces this for Google
+(`verified_email`) and GitHub (`/user/emails` primary+verified), but
+Microsoft/Azure's `userPrincipalName` carries no verification flag from
+Graph and is only ever the AAD account identity, not a proven external
+mailbox.
 """
 
 from __future__ import annotations
 
+import hmac
 import logging
 import secrets
 import uuid
@@ -50,6 +60,24 @@ router = APIRouter()
 
 def _error(error: str, description: str, status: int) -> ORJSONResponse:
     return ORJSONResponse({"error": error, "error_description": description}, status_code=status)
+
+
+def _state_matches(presented: str, expected: str) -> bool:
+    """Constant-time compare for the callback's `state` CSRF token.
+
+    Same non-ASCII trap as `routes/events.py::_bearer_matches` and
+    `routes/token.py::_pkce_matches` (Task 3c-3): `hmac.compare_digest`
+    raises `TypeError` instead of returning `False` when either `str`
+    operand contains a non-ASCII character, and `state` is an
+    attacker-controlled query parameter. Encode both operands to bytes
+    (which `compare_digest` compares with no ASCII restriction) rather than
+    comparing `str` directly. Query-string values are latin-1-decoded from
+    the header line by Starlette's low-level query parsing before being
+    re-decoded as UTF-8 text (mirroring form bodies / Basic-auth, per the
+    Task 3c-3 report) — `.encode("utf-8")` is therefore the lossless
+    round-trip here, unlike the raw-header case which uses latin-1.
+    """
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
 
 @router.get("/login/{provider}")
@@ -98,7 +126,7 @@ async def social_callback(provider: str, request: Request):
         return _error("access_denied", "CSRF state parameter is required", 403)
 
     session_csrf = request.session.get("csrf_token")
-    if session_csrf is None or state != session_csrf:
+    if session_csrf is None or not _state_matches(state, session_csrf):
         return _error("access_denied", "CSRF token mismatch", 403)
 
     session_provider = request.session.get("provider")

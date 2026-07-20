@@ -286,6 +286,14 @@ async def _fetch_google_userinfo(
     email = data.get("email") if isinstance(data, dict) else None
     if not user_id or not email:
         raise ProviderError("Google userinfo response missing id or email")
+    # `session["email"]` (set from this SocialUserInfo via set_login) can
+    # grant admin through OAUTH2_ADMIN_EMAILS (routes/admin/guard.py) — an
+    # unverified email would let an attacker who merely CLAIMS an
+    # allowlisted address to Google self-provision an admin session. The
+    # userinfo v2 endpoint reliably includes `verified_email`; require it
+    # true (missing/false both fail closed).
+    if data.get("verified_email") is not True:
+        raise ProviderError("Google email not verified")
     return SocialUserInfo(
         provider="google",
         provider_user_id=str(user_id),
@@ -305,7 +313,11 @@ async def _fetch_microsoft_userinfo(
     # Microsoft Graph's `/me` has no `email` field guaranteed populated —
     # `userPrincipalName` is what the Rust server (and this port) treats as
     # the account's email (research doc key_behaviors: "may be a UPN, not a
-    # real mailbox address").
+    # real mailbox address"). UPN is the AAD *account identity*, not a
+    # verified external mailbox, and Graph's `/me` exposes no verification
+    # flag to check it against — left as-is, but note that
+    # OAUTH2_ADMIN_EMAILS combined with self-service social login is a
+    # documented escalation surface here (see routes/social.py docstring).
     email = data.get("userPrincipalName") if isinstance(data, dict) else None
     if not user_id or not email:
         raise ProviderError(
@@ -329,26 +341,34 @@ async def _fetch_github_userinfo(
     if user_id is None:
         raise ProviderError("GitHub userinfo response missing id")
 
-    email = data.get("email") if isinstance(data, dict) else None
-    if not email:
-        # GitHub omits `email` from /user when the user hasn't made one
-        # public; fall back to the authenticated /user/emails list and pick
-        # the entry flagged primary (research doc key_behaviors).
-        emails = await _get_json(http_client, _GITHUB_EMAILS_URL, headers)
-        primary = None
-        if isinstance(emails, list):
-            primary = next(
-                (e.get("email") for e in emails if isinstance(e, dict) and e.get("primary")),
-                None,
-            )
-        if not primary:
-            raise ProviderError("No email found")
-        email = primary
+    # `session["email"]` (set from this SocialUserInfo via set_login) can
+    # grant admin through OAUTH2_ADMIN_EMAILS (routes/admin/guard.py), so the
+    # provisioned email must be one GitHub has actually verified. The
+    # top-level `/user` `email` field is whatever the user has chosen to
+    # make public and is NOT guaranteed verified by GitHub's API contract,
+    # so it is never used directly. Always resolve the email via the
+    # authenticated `/user/emails` list instead and require an entry that is
+    # both `primary` AND `verified` — a user with only an unverified primary
+    # (or no primary at all) cannot provision (falls through to the
+    # existing "No email found" 400).
+    emails = await _get_json(http_client, _GITHUB_EMAILS_URL, headers)
+    primary = None
+    if isinstance(emails, list):
+        primary = next(
+            (
+                e.get("email")
+                for e in emails
+                if isinstance(e, dict) and e.get("primary") and e.get("verified")
+            ),
+            None,
+        )
+    if not primary:
+        raise ProviderError("No email found")
 
     return SocialUserInfo(
         provider="github",
         provider_user_id=str(user_id),
-        email=email,
+        email=primary,
         name=data.get("name"),
         picture=data.get("avatar_url"),
     )

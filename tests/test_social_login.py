@@ -132,6 +132,27 @@ async def test_callback_state_mismatch_403():
         }
 
 
+async def test_callback_non_ascii_state_mismatch_403_not_500():
+    """`_state_matches` compares byte-encoded operands (constant-time,
+    Task 3c-4 fix) instead of `state != session_csrf` directly — a
+    non-ASCII, attacker-controlled `state` value must still fall through to
+    the normal 403 CSRF-mismatch path rather than an unhandled 500."""
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as client:
+        await client.get("/auth/login/google", follow_redirects=False)
+        resp = await client.get(
+            "/auth/callback/google",
+            params={"state": "wrong-stäte-é中", "code": "abc"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+        assert resp.json() == {
+            "error": "access_denied",
+            "error_description": "CSRF token mismatch",
+        }
+
+
 async def test_callback_provider_mismatch_400():
     async with build_client_app(
         {"google_client_id": "g-id", "google_client_secret": "g-secret"}
@@ -172,6 +193,7 @@ async def test_google_full_flow_provisions_user():
                     json={
                         "id": "1234567890",
                         "email": "alice@example.com",
+                        "verified_email": True,
                         "name": "Alice",
                         "picture": "https://example.com/pic.png",
                     },
@@ -275,6 +297,132 @@ async def test_github_no_primary_email_provider_error():
         assert resp.json() == {"error": "provider_error", "error_description": "No email found"}
 
 
+async def test_github_unverified_primary_email_provider_error():
+    """A `primary: true` entry that GitHub has not verified must NOT be
+    provisioned — `session["email"]` can grant admin via
+    `OAUTH2_ADMIN_EMAILS` (routes/admin/guard.py), so an unverified email
+    is treated the same as no email at all (falls through to the existing
+    "No email found" 400), rather than trusting the provider's `primary`
+    flag alone."""
+    async with build_client_app(
+        {"github_client_id": "gh-id", "github_client_secret": "gh-secret"}
+    ) as client:
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "github.com":
+                return httpx.Response(200, json={"access_token": "gh-access-token"})
+            if request.url.path == "/user":
+                return httpx.Response(200, json={"id": 888, "email": None})
+            if request.url.path == "/user/emails":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {"email": "unverified@example.com", "primary": True, "verified": False},
+                        {"email": "other@example.com", "primary": False, "verified": True},
+                    ],
+                )
+            return httpx.Response(404)
+
+        client.app.state.http_client = _mock_transport(handler)
+
+        login_resp = await client.get("/auth/login/github", follow_redirects=False)
+        state = _state_from_location(login_resp.headers["location"])
+
+        resp = await client.get(
+            "/auth/callback/github",
+            params={"state": state, "code": "xyz"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {"error": "provider_error", "error_description": "No email found"}
+
+        user = await client.storage.get_user_by_username("github:888")
+        assert user is None
+
+
+async def test_github_direct_user_email_ignored_still_resolves_via_emails_endpoint():
+    """Even when GitHub's `/user` response includes a top-level `email`
+    field directly (a public email, not guaranteed verified by the API
+    contract), the port must still resolve the provisioned address via the
+    authenticated `/user/emails` verified-primary lookup rather than
+    trusting `/user`'s `email` field as-is."""
+    async with build_client_app(
+        {"github_client_id": "gh-id", "github_client_secret": "gh-secret"}
+    ) as client:
+        seen_paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_paths.append(request.url.path)
+            if request.url.host == "github.com":
+                return httpx.Response(200, json={"access_token": "gh-access-token"})
+            if request.url.path == "/user":
+                return httpx.Response(
+                    200, json={"id": 999, "email": "public@example.com", "name": "Erin"}
+                )
+            if request.url.path == "/user/emails":
+                return httpx.Response(
+                    200,
+                    json=[{"email": "erin@example.com", "primary": True, "verified": True}],
+                )
+            return httpx.Response(404)
+
+        client.app.state.http_client = _mock_transport(handler)
+
+        login_resp = await client.get("/auth/login/github", follow_redirects=False)
+        state = _state_from_location(login_resp.headers["location"])
+
+        resp = await client.get(
+            "/auth/callback/github",
+            params={"state": state, "code": "xyz"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 302, resp.text
+        assert "/user/emails" in seen_paths
+
+        user = await client.storage.get_user_by_username("github:999")
+        assert user is not None
+        assert user.email == "erin@example.com"
+
+
+async def test_google_unverified_email_provider_error():
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as client:
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "oauth2.googleapis.com":
+                return httpx.Response(200, json={"access_token": "tok"})
+            if request.url.host == "www.googleapis.com":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "666",
+                        "email": "unverified@example.com",
+                        "verified_email": False,
+                    },
+                )
+            return httpx.Response(404)
+
+        client.app.state.http_client = _mock_transport(handler)
+
+        login_resp = await client.get("/auth/login/google", follow_redirects=False)
+        state = _state_from_location(login_resp.headers["location"])
+
+        resp = await client.get(
+            "/auth/callback/google",
+            params={"state": state, "code": "c"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 400
+        assert resp.json() == {
+            "error": "provider_error",
+            "error_description": "Google email not verified",
+        }
+
+        user = await client.storage.get_user_by_username("google:666")
+        assert user is None
+
+
 async def test_existing_social_user_not_duplicated():
     async with build_client_app(
         {"google_client_id": "g-id", "google_client_secret": "g-secret"}
@@ -284,7 +432,10 @@ async def test_existing_social_user_not_duplicated():
             if request.url.host == "oauth2.googleapis.com":
                 return httpx.Response(200, json={"access_token": "tok"})
             if request.url.host == "www.googleapis.com":
-                return httpx.Response(200, json={"id": "999", "email": "carol@example.com"})
+                return httpx.Response(
+                    200,
+                    json={"id": "999", "email": "carol@example.com", "verified_email": True},
+                )
             return httpx.Response(404)
 
         client.app.state.http_client = _mock_transport(handler)
@@ -358,7 +509,10 @@ async def test_callback_safe_return_to_redirect():
             if request.url.host == "oauth2.googleapis.com":
                 return httpx.Response(200, json={"access_token": "tok"})
             if request.url.host == "www.googleapis.com":
-                return httpx.Response(200, json={"id": "42", "email": "dave@example.com"})
+                return httpx.Response(
+                    200,
+                    json={"id": "42", "email": "dave@example.com", "verified_email": True},
+                )
             return httpx.Response(404)
 
         client.app.state.http_client = _mock_transport(handler)
