@@ -5,9 +5,11 @@ Ported from `crates/oauth2-actix/src/handlers/login.rs::LoginRateLimiter`
 (10 attempts / 15 minutes, keyed `login:ip:{ip}` and `login:user:{username}`,
 blocked -> 303 `/auth/login?error=too_many_attempts` + `Retry-After` header).
 The Rust limiter is a token bucket with no reset-on-success; this port uses a
-simpler fixed window and *does* reset both keys on a successful login (see
-`services/ratelimit.py` module docstring and `routes/login.py` for the
-rationale) — a deliberate, documented deviation from strict Rust parity.
+simpler fixed window and resets only the per-username key on a successful
+login — the per-IP key deliberately survives success so one valid credential
+can't be used to keep clearing the IP throttle while stuffing other accounts
+(see `services/ratelimit.py` module docstring and `routes/login.py`) — a
+deliberate, documented deviation from strict Rust parity.
 """
 
 from __future__ import annotations
@@ -69,6 +71,23 @@ def test_limiter_keys_are_independent():
     assert limiter.check("a") is not None
 
 
+def test_expired_windows_are_swept(monkeypatch):
+    """Keys touched once must not leak: any later check() sweeps them out."""
+    import oauth2_server.services.ratelimit as ratelimit_module
+
+    real_monotonic = ratelimit_module.time.monotonic
+    limiter = FixedWindowLimiter(max_attempts=10, window_secs=900)
+    for i in range(50):
+        assert limiter.check(f"probe-{i}") is None
+    assert len(limiter._windows) == 50
+
+    monkeypatch.setattr(ratelimit_module.time, "monotonic", lambda: real_monotonic() + 901)
+
+    # One check on a fresh key prunes every expired window dict-wide.
+    assert limiter.check("live") is None
+    assert set(limiter._windows) == {"live"}
+
+
 # ---------------------------------------------------------------------------
 # POST /auth/login integration
 # ---------------------------------------------------------------------------
@@ -101,26 +120,74 @@ async def test_login_blocked_after_repeated_failures(client_app, monkeypatch):
     assert len(calls) == 10
 
 
-async def test_login_success_resets_limiter(client_app):
-    for _ in range(9):
-        resp = await client_app.post(
+async def test_login_success_resets_user_key():
+    """Success clears the per-username window (proven from a fresh IP, so the
+    surviving per-IP window can't confound the assertion)."""
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+    )
+    storage = await make_storage()
+    await seed_client(storage)
+    await seed_user(storage)
+    app = create_app(config, storage)
+
+    async with _build_client_from_ip(app, "10.1.0.1") as client_a:
+        # 9 failures + 1 success = 10 user-key checks; without the reset the
+        # next user_rfc attempt (the 11th) would be blocked.
+        for _ in range(9):
+            resp = await client_a.post(
+                "/auth/login", data={"username": "user_rfc", "password": "wrong-password"}
+            )
+            assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+        good = await client_a.post(
+            "/auth/login", data={"username": "user_rfc", "password": "password123"}
+        )
+        assert good.status_code == 303
+        assert good.headers["location"] == "/"
+
+    async with _build_client_from_ip(app, "10.1.0.2") as client_b:
+        resp = await client_b.post(
             "/auth/login", data={"username": "user_rfc", "password": "wrong-password"}
         )
-        assert resp.status_code == 303
         assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
 
-    good = await client_app.post(
-        "/auth/login", data={"username": "user_rfc", "password": "password123"}
-    )
-    assert good.status_code == 303
-    assert good.headers["location"] == "/"
 
-    # Limiter reset on success -> a subsequent failure is not blocked.
-    resp = await client_app.post(
-        "/auth/login", data={"username": "user_rfc", "password": "wrong-password"}
+async def test_success_does_not_reset_ip_counter():
+    """An attacker with one valid credential must not be able to clear the
+    per-IP throttle by logging into their own account between stuffing runs."""
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
     )
-    assert resp.status_code == 303
-    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+    storage = await make_storage()
+    await seed_client(storage)
+    await seed_user(storage)
+    await seed_admin(storage)
+    app = create_app(config, storage)
+
+    async with _build_client_from_ip(app, "10.2.0.1") as client:
+        # 9 failed probes against one account, then a successful login to the
+        # attacker's own account from the same IP (10th IP-key check).
+        for _ in range(9):
+            resp = await client.post(
+                "/auth/login", data={"username": "admin_rfc", "password": "wrong-password"}
+            )
+            assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+        good = await client.post(
+            "/auth/login", data={"username": "user_rfc", "password": "password123"}
+        )
+        assert good.status_code == 303
+        assert good.headers["location"] == "/"
+
+        # The IP window survived the success: the 11th attempt from this IP is
+        # blocked even though it targets a different username.
+        blocked = await client.post(
+            "/auth/login", data={"username": "someone_else", "password": "x"}
+        )
+        assert blocked.status_code == 303
+        assert blocked.headers["location"] == "/auth/login?error=too_many_attempts"
+        assert int(blocked.headers["retry-after"]) > 0
 
 
 @asynccontextmanager

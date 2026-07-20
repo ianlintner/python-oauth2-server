@@ -134,8 +134,11 @@ async def login(request: Request):
     ):
         return RedirectResponse("/auth/login?error=invalid_credentials", status_code=303)
 
-    # Successful login — clear both rate-limit keys (see module docstring).
-    limiter.reset(ip_key)
+    # Successful login — clear only the per-username key. The user proved
+    # themselves for their own account, so their earlier typos shouldn't keep
+    # throttling them; the per-IP window must expire naturally, or an attacker
+    # holding one valid credential could reset the IP throttle at will and
+    # keep stuffing other usernames from the same address.
     limiter.reset(user_key)
 
     # `return_to` was saved to the session by GET /oauth/authorize (or
