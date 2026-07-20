@@ -466,6 +466,51 @@ async def test_max_age_zero_forces_reauthentication(client_app):
     assert resp.headers["location"] == "/auth/login", "max_age=0 must force re-authentication"
 
 
+async def test_prompt_none_with_expired_max_age_returns_login_required(app_with_session):
+    await login_session(app_with_session)
+
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "prompt": "none",
+            "max_age": "0",
+            "state": "s1",
+        },
+    )
+    assert resp.status_code == 302, "must redirect"
+    q = _query(resp.headers["location"])
+    assert q["error"] == "login_required", (
+        "OIDC: prompt=none with an expired max_age must return login_required, "
+        "not fall through to the interactive login UI"
+    )
+    assert q["state"] == "s1", "state must be preserved in error redirect"
+    assert resp.headers["location"].startswith("https://a.example/cb")
+
+
+async def test_prompt_none_combined_with_login_is_invalid_request(app_with_session):
+    await login_session(app_with_session)
+
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "prompt": "none login",
+        },
+    )
+    assert resp.status_code == 302, "must redirect"
+    q = _query(resp.headers["location"])
+    assert q["error"] == "invalid_request", (
+        "OIDC: prompt=none combined with any other prompt value is invalid_request"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Chunk 1.E — Logout with id_token_hint / cascade revocation
 # ---------------------------------------------------------------------------

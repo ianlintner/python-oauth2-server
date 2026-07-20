@@ -155,18 +155,18 @@ async def authorize(request: Request):
     prompt_values = (params.get("prompt") or "").split()
     force_login = "login" in prompt_values or "select_account" in prompt_values
 
-    user_id = current_user_id(request)
-
-    # prompt=none: the AS must not display any UI. Without a session, this is
-    # an error delivered via the redirect channel (OIDC Core §3.1.2.6).
-    if "none" in prompt_values and user_id is None:
+    # prompt=none is mutually exclusive with every other prompt value (OIDC
+    # Core §3.1.2.1): "none" MUST NOT be used with any other value.
+    if "none" in prompt_values and len(prompt_values) > 1:
         return _error_redirect(
             redirect_uri,
-            "login_required",
-            "User is not authenticated and prompt=none was requested",
+            "invalid_request",
+            "prompt=none cannot be combined with other values",
             state,
             config.issuer,
         )
+
+    user_id = current_user_id(request)
 
     # max_age: if the session's auth_time is older than max_age seconds (or
     # missing entirely), the user must re-authenticate.
@@ -180,6 +180,19 @@ async def authorize(request: Request):
         if max_age_secs is not None:
             auth_time = request.session.get("auth_time")
             auth_expired = auth_time is None or (time.time() - auth_time) >= max_age_secs
+
+    # prompt=none: the AS must not display any UI. If the caller isn't
+    # authenticated, re-authentication would be forced, or the existing
+    # session's max_age has expired, that's an error delivered via the
+    # redirect channel (OIDC Core §3.1.2.6) — never the interactive login UI.
+    if "none" in prompt_values and (user_id is None or force_login or auth_expired):
+        return _error_redirect(
+            redirect_uri,
+            "login_required",
+            "User is not authenticated and prompt=none was requested",
+            state,
+            config.issuer,
+        )
 
     if user_id is None or force_login or auth_expired:
         original = request.url.path
