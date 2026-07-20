@@ -297,6 +297,20 @@ async def test_introspect_with_wrong_key_proof_inactive(client_app):
     assert resp.json() == {"active": False}
 
 
+async def test_introspect_rejects_proof_minted_for_token_endpoint(client_app):
+    """Cross-endpoint proof confusion (classic DPoP pitfall): a proof whose
+    htu targets /oauth/token must NOT satisfy introspection's binding check —
+    same key, same client, wrong htu → {"active": false}."""
+    key = generate_dpop_key()
+    access_token, _pub_jwk = await _issue_dpop_bound_access_token(client_app, key)
+
+    token_endpoint_proof, _ = make_dpop_proof(TOKEN_URL, "POST", key)
+    resp = await _post_introspect(client_app, access_token, headers={"DPoP": token_endpoint_proof})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"active": False}
+
+
 async def test_introspect_unbound_token_unaffected(client_app):
     resp = await post_token(
         client_app, {"grant_type": "client_credentials"}, basic_auth=("client1", "s3cret")

@@ -85,6 +85,11 @@ async def introspect(request: Request) -> ORJSONResponse:
     # unaffected. `token_type` still reports the stored "Bearer" below even
     # on a successful DPoP-bound introspection (documented Rust quirk, kept
     # for parity) — only `cnf` is echoed back.
+    # Deliberately decodes the PRESENTED value (like the jti extraction
+    # below), not row.access_token: a DPoP-bound token introspected via its
+    # opaque refresh-token value skips the binding check. Accepted parity —
+    # a refresh-token holder can already mint a fresh bound access token via
+    # the refresh grant without a proof (research-dpop.md, documented gap).
     try:
         unverified_claims = jwt.decode(token_value, options={"verify_signature": False})
     except jwt.PyJWTError:
