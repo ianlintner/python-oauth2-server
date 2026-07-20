@@ -46,6 +46,22 @@ class Config(BaseSettings):
     # 10 attempts / 15 minutes (900s).
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_secs: int = 900
+    # Stateless DPoP nonce issuer (services/dpop_nonce.py::DpopNonceIssuer).
+    # Secret decoding order (base64url-no-pad -> std base64 -> hex-when-64-
+    # chars, else a random per-process fallback) lives in
+    # `decode_dpop_nonce_secret`, not here — this field just carries the raw
+    # env string through.
+    dpop_nonce_secret: str | None = None
+    dpop_nonce_lifetime_secs: int = 300
+
+    @field_validator("dpop_nonce_lifetime_secs")
+    @classmethod
+    def _clamp_dpop_nonce_lifetime(cls, v: int) -> int:
+        # Rust parity (dpop_nonce.rs): a non-positive lifetime would make
+        # every nonce bucket-id computation divide-by-zero or produce a
+        # degenerate always-current window, so it's clamped to >= 1 rather
+        # than rejected outright.
+        return max(1, v)
 
     @field_validator("allowed_origins", mode="before")
     @classmethod
