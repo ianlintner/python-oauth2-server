@@ -61,6 +61,13 @@ def _rs256_hint_verify_materials(config, keyset: KeySet | None, kid: str | None)
             materials.append(found.key_material)
         else:
             materials.extend(key.key_material for key in keyset.active_keys_for_alg("RS256"))
+    # Invariant: this branch is only reachable when the keyset holds zero
+    # active RS256 keys. Once RS256 is in use, `seed_keyset` always adds one
+    # and `KeySet.rotate` always adds a fresh `is_current=True` key before
+    # any pruning happens -- so a live keyset never has zero active RS256
+    # keys. Do not widen this fallback (e.g. to "kid not found"): an expired,
+    # pruned key's hint would otherwise verify against the static PEM and be
+    # silently resurrected. See test_logout_rejects_hint_signed_by_pruned_key_after_grace.
     if not materials and config.id_token_private_key_pem:
         materials.append(config.id_token_private_key_pem.encode())
     return materials

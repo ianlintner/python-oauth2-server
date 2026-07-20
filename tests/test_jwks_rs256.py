@@ -10,6 +10,7 @@ by every test below.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timedelta, timezone
 
 import jwt
 import pytest
@@ -374,6 +375,58 @@ async def test_logout_accepts_hint_signed_by_rotated_out_key_during_grace(rsa_pe
         # so a hint it signed pre-rotation must still verify -- not a 400.
         logout_resp = await client.get("/oauth/logout", params={"id_token_hint": id_token_hint})
         assert logout_resp.status_code == 200, logout_resp.text
+
+
+async def test_logout_rejects_hint_signed_by_pruned_key_after_grace(rsa_pem):
+    """Once the old key's grace period has elapsed and it's been physically
+    pruned from the keyset, a hint it signed must be rejected outright --
+    not resurrected via the static `config.id_token_private_key_pem`
+    fallback (which happens to equal the original signing key here, since
+    `_rs256_app` seeds the keyset from that same PEM). See the invariant
+    comment on `_rs256_hint_verify_materials` in routes/logout.py: that
+    fallback is only for a keyset with *zero* active RS256 keys, which
+    never happens here because rotation always leaves a current key."""
+    async with _rs256_app(rsa_pem) as client:
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        id_token_hint = resp.json()["id_token"]
+        old_kid = jwt.get_unverified_header(id_token_hint)["kid"]
+        assert old_kid == "test-rs256-key"
+
+        await seed_admin(client.storage)
+        await login_admin(client)
+
+        rotate_resp = await client.post(
+            "/admin/api/keys/rotate",
+            json={"algorithm": "RS256", "grace_period_hours": 0},
+        )
+        assert rotate_resp.status_code == 200, rotate_resp.text
+        assert rotate_resp.json()["kid"] != old_kid
+
+        # `grace_period_hours=0` sets `expires_at = now` at rotation time, so
+        # the old key is *usually* already pruned by the `prune_expired()`
+        # call inside the rotate handler above -- but `is_active()` compares
+        # with a strict `<`, so that's a timing race, not a guarantee. Force
+        # the old key's expiry into the definite past directly on the
+        # keyset so the second rotate's prune below is deterministic
+        # regardless of how fast this test happens to run.
+        keyset = client.app.state.keyset
+        for key in keyset._keys:
+            if key.kid == old_kid:
+                key.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+        # Rotate again -- `prune_expired()` runs inside `rotate_key` and
+        # physically removes the now-expired old key from the keyset.
+        rotate_resp2 = await client.post("/admin/api/keys/rotate", json={"algorithm": "RS256"})
+        assert rotate_resp2.status_code == 200, rotate_resp2.text
+        assert keyset.find(old_kid) is None
+
+        logout_resp = await client.get("/oauth/logout", params={"id_token_hint": id_token_hint})
+        assert logout_resp.status_code == 400, logout_resp.text
+        assert logout_resp.json() == {
+            "error": "invalid_request",
+            "error_description": "invalid id_token_hint",
+        }
 
 
 async def test_hs256_rotation_decodes_with_active_keys(client_app):
