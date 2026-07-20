@@ -46,6 +46,8 @@ from tests.helpers import (
     seed_client,
     seed_user,
 )
+from tests.test_metrics import _metric_value
+from tests.test_social_login import _mock_transport, _state_from_location
 from tests.test_token_endpoint import run_code_flow
 
 ISSUER = "https://auth.example.com"
@@ -1204,3 +1206,131 @@ async def test_token_exchange_round_trip(client_app):
     assert claims["client_id"] == "rfc-exchange-client", (
         "the exchanged token must carry the EXCHANGING client's client_id"
     )
+
+
+# --- Phase 3c compliance pins (Task 5) --------------------------------------
+#
+# Each test below is a thin wrapper pinning one Phase 3c behavior that already
+# has full coverage in its own dedicated module (named in each docstring).
+
+
+async def test_metrics_endpoint_exposes_wired_counters(client_app):
+    """Full coverage: test_metrics.py::test_required_metrics_are_registered,
+    test_token_issued_counter, test_login_failures_increment_failed_authentications."""
+    body = (await client_app.get("/metrics")).text
+    assert "# TYPE oauth2_server_http_requests_total " in body
+    assert "# TYPE oauth2_server_app_info " in body
+
+    before_issued = _metric_value(body, "oauth2_server_oauth_token_issued_total")
+    before_failed = _metric_value(body, "oauth2_server_oauth_failed_authentications")
+
+    token_resp = await post_token(
+        client_app, {"grant_type": "client_credentials"}, basic_auth=("client1", "s3cret")
+    )
+    assert token_resp.status_code == 200, token_resp.text
+
+    login_resp = await client_app.post(
+        "/auth/login", data={"username": "user_rfc", "password": "wrong-password"}
+    )
+    assert login_resp.status_code == 303
+
+    after = (await client_app.get("/metrics")).text
+    assert _metric_value(after, "oauth2_server_oauth_token_issued_total") >= before_issued + 1, (
+        "a successful client_credentials grant must increment oauth_token_issued_total"
+    )
+    assert (
+        _metric_value(after, "oauth2_server_oauth_failed_authentications") >= before_failed + 1
+    ), "a failed login must increment oauth_failed_authentications"
+
+
+async def test_invalid_client_penalty_returns_429():
+    """Full coverage:
+    test_ratelimit_global.py::test_invalid_client_returns_429_after_budget_exhausted."""
+    async with build_client_app({"rate_limit_invalid_client_max_requests": 3}) as app:
+        for _ in range(3):
+            resp = await post_token(
+                app, {"grant_type": "client_credentials"}, basic_auth=("client1", "WRONG")
+            )
+            assert resp.status_code == 401
+            assert resp.json()["error"] == "invalid_client"
+
+        resp = await post_token(
+            app, {"grant_type": "client_credentials"}, basic_auth=("client1", "WRONG")
+        )
+        assert resp.status_code == 429, (
+            "the invalid_client penalty bucket must trip 429 once its budget is exhausted"
+        )
+        body = resp.json()
+        assert body["error"] == "too_many_requests"
+        assert "Too many failed authentication attempts" in body["error_description"]
+        assert "retry-after" not in resp.headers, (
+            "Rust parity: the invalid_client penalty response omits a Retry-After header"
+        )
+
+
+async def test_event_ingest_bearer_enforced():
+    """Full coverage: test_events_bus.py::test_ingest_requires_bearer_by_default,
+    test_ingest_wrong_bearer_401, test_ingest_correct_bearer_accepted."""
+    async with build_client_app({"events_ingest_bearer_token": "pin-bearer-token"}) as app:
+        envelope = {"event": {"event_type": "widget.created", "metadata": {}}}
+
+        no_bearer = await app.post("/events/ingest", json=envelope)
+        assert no_bearer.status_code == 401
+        assert no_bearer.headers["www-authenticate"] == "Bearer"
+        assert no_bearer.json()["error"] == "invalid_token"
+
+        wrong_bearer = await app.post(
+            "/events/ingest", json=envelope, headers={"Authorization": "Bearer nope"}
+        )
+        assert wrong_bearer.status_code == 401
+        assert wrong_bearer.json()["error"] == "invalid_token"
+
+        ok = await app.post(
+            "/events/ingest",
+            json=envelope,
+            headers={"Authorization": "Bearer pin-bearer-token"},
+        )
+        assert ok.status_code == 202, ok.text
+        assert ok.json()["status"] == "accepted"
+
+
+async def test_social_login_google_round_trip():
+    """Full coverage: test_social_login.py::test_google_full_flow_provisions_user."""
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as app:
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "oauth2.googleapis.com":
+                return httpx.Response(200, json={"access_token": "google-access-token"})
+            if request.url.host == "www.googleapis.com":
+                assert request.headers.get("authorization") == "Bearer google-access-token"
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "pin-42",
+                        "email": "pin@example.com",
+                        "verified_email": True,
+                        "name": "Pin User",
+                    },
+                )
+            return httpx.Response(404)
+
+        app.app.state.http_client = _mock_transport(handler)
+
+        login_resp = await app.get("/auth/login/google", follow_redirects=False)
+        assert login_resp.status_code == 302
+        state = _state_from_location(login_resp.headers["location"])
+
+        callback_resp = await app.get(
+            "/auth/callback/google",
+            params={"state": state, "code": "abc123"},
+            follow_redirects=False,
+        )
+        assert callback_resp.status_code == 302, callback_resp.text
+        assert callback_resp.headers["location"] == "/profile"
+
+        user = await app.storage.get_user_by_username("google:pin-42")
+        assert user is not None
+        assert user.email == "pin@example.com"
+        assert user.role == "user"

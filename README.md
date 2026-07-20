@@ -6,7 +6,7 @@ Python port of [rust-oauth2-server](https://github.com/ianlintner/rust-oauth2-se
 - RFC compliance tests ported 1:1 from the Rust suite act as the spec.
 - Stack: FastAPI, uvicorn+uvloop, Pydantic v2, SQLAlchemy async (raw SQL), PyJWT, argon2-cffi, cryptography (RS256/JWKS).
 
-Plan: `docs/plans/2026-07-19-python-oauth2-port.md` (Phase 1), `docs/plans/2026-07-19-python-oauth2-port-phase-2.md` (Phase 2), `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` (Phase 3a).
+Plan: `docs/plans/2026-07-19-python-oauth2-port.md` (Phase 1), `docs/plans/2026-07-19-python-oauth2-port-phase-2.md` (Phase 2), `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` (Phase 3a), `docs/plans/2026-07-20-python-oauth2-port-phase-3b.md` (Phase 3b), `docs/plans/2026-07-20-python-oauth2-port-phase-3c.md` (Phase 3c).
 
 ## Phase 2 features
 
@@ -148,6 +148,135 @@ dict of seen `jti` values with a bounded TTL, not shared across workers or insta
 replayed against a *different* worker than the one that first saw it will NOT be caught. Run
 `OAUTH2_WORKERS=1` or a sticky-session load balancer, matching the existing `ParStore`/`KeySet`/
 `RecentEventsStore` guidance, until Phase 3 adds shared persistence for all four stores.
+
+## Phase 3c: Observability, Rate Limiting, Events, Social Login
+
+Phase 3c (see `docs/plans/2026-07-20-python-oauth2-port-phase-3c.md` and `docs/PHASE2-BACKLOG.md` →
+"Accepted divergences" 22–26) ports the operational subsystems from the Rust server:
+
+- **Prometheus metrics + health/readiness** — `GET /metrics` exposes a dedicated
+  `prometheus_client.CollectorRegistry` (`oauth2_server_*`-prefixed families, byte-for-byte name
+  parity with the Rust exposition, content-type pinned to `text/plain; version=0.0.4` with no
+  charset — divergence 22) via an ASGI timing middleware; `GET /health` returns a static liveness
+  payload; `GET /ready` runs `SqlStorage.healthcheck()` (`SELECT 1`) and returns 503 plain text on
+  failure.
+- **Rate limiting** — three independent, in-memory token-bucket mechanisms
+  (`services/limiter.py::TokenBucketLimiter`): a global per-IP `RateLimitMiddleware` (off by
+  default), an always-on `invalid_client` penalty bucket on `POST /oauth/token` (5
+  requests/window by default — replaces the 401 with a 429 once exhausted), and a resilience
+  middleware (circuit breaker + concurrency limiter, off by default) that returns 503 on
+  consecutive 5xx responses or back-pressure. All three fail **open** on a backend error.
+- **Event bus + ingest** — an in-process `EventBus` (`services/events_bus.py`) fans pydantic
+  `EventEnvelope`s out to pluggable backends (`console`/`in_memory`, always alongside the
+  existing `RecentEventsStore` bridge) from 9 real emit sites (token issue/revoke, authorization
+  code issue/validate, client auth). `POST /events/ingest` accepts external events behind a
+  bearer token (fails **closed** with 503 if unconfigured) with `Idempotency-Key` dedup;
+  `GET /events/health` reports per-plugin health.
+- **Social login** — `GET /auth/login/{google|microsoft|github|azure}` +
+  `GET /auth/callback/{provider}` implement the authorization-code flow against each provider
+  (Google adds PKCE S256), find-or-create a local `User` keyed `provider:<id>`, and establish a
+  session. `okta`/`auth0` stay 503 stubs (Rust parity, divergence 25). A provider is "configured"
+  iff both its `_client_id` and `_client_secret` are set.
+
+### New environment variables (Phase 3c)
+
+All are `OAUTH2_`-prefixed (see `src/oauth2_server/config.py` for the full `Config` model).
+
+**Rate limiting / resilience:**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OAUTH2_RATE_LIMIT_ENABLED` | `false` | Master switch for the global per-IP `RateLimitMiddleware`. |
+| `OAUTH2_RATE_LIMIT_MAX_REQUESTS` | `100` | Token-bucket capacity for the global limiter. |
+| `OAUTH2_RATE_LIMIT_WINDOW_SECS` | `60` | Token-bucket refill window (seconds) for the global limiter. |
+| `OAUTH2_RATE_LIMIT_INVALID_CLIENT_MAX_REQUESTS` | `5` | Capacity of the always-on `invalid_client` penalty bucket on `POST /oauth/token`, keyed per `client_id`. Set to `0` to disable it entirely. |
+| `OAUTH2_SERVER_TRUST_PROXY_HEADERS` | `false` | When `true`, the global rate limiter keys on the first `X-Forwarded-For` entry instead of the socket peer address. Note the `OAUTH2_SERVER_*` prefix (not `OAUTH2_RATE_LIMIT_*`) — Rust scopes this under `[server]`, not `[rate_limit]`. |
+| `OAUTH2_RESILIENCE_ENABLED` | `false` | Master switch for the circuit-breaker + concurrency-limiter middleware. |
+| `OAUTH2_RESILIENCE_MAX_CONCURRENT` | `1000` | In-flight request cap before the concurrency limiter starts rejecting with 503. |
+| `OAUTH2_RESILIENCE_CB_FAILURE_THRESHOLD` | `5` | Consecutive 5xx responses before the circuit breaker opens. |
+| `OAUTH2_RESILIENCE_CB_SUCCESS_THRESHOLD` | `2` | Consecutive successes in half-open state before the breaker closes again. |
+| `OAUTH2_RESILIENCE_CB_OPEN_SECS` | `30` | How long the breaker stays open before probing (half-open). |
+| `OAUTH2_RESILIENCE_CB_HALF_OPEN_MAX_PROBES` | `3` | Concurrent probe requests allowed while half-open. |
+
+**Events:**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OAUTH2_EVENTS_ENABLED` | `true` | Master switch for the event bus (`app.state.event_bus`) and the `/events/*` routes. |
+| `OAUTH2_EVENTS_PUBLIC_INGEST` | `false` | When `true`, `POST /events/ingest` skips the bearer check entirely. |
+| `OAUTH2_EVENTS_INGEST_BEARER_TOKEN` | unset | Bearer token required on `POST /events/ingest` (compared with `hmac.compare_digest`). Unset + public ingest off → the endpoint fails **closed** with 503 `event_ingest_auth_not_configured`, never silently open. |
+| `OAUTH2_EVENTS_BACKEND` | `in_memory` | `console`, `in_memory`, or `both`. Only these two backends are ported — Redis Streams/Kafka/RabbitMQ are out of scope (see `docs/PHASE2-BACKLOG.md`). An unrecognized value falls back to `in_memory` with a logged warning. |
+| `OAUTH2_EVENTS_FILTER_MODE` | `allow_all` | `allow_all`, `include_only`, or `exclude`, paired with `OAUTH2_EVENTS_TYPES`. |
+| `OAUTH2_EVENTS_TYPES` | unset (empty) | Comma-separated event-type list consulted when `OAUTH2_EVENTS_FILTER_MODE` is `include_only`/`exclude`. |
+
+**Social login** (one block per provider; a provider is "configured" iff both `_CLIENT_ID` and
+`_CLIENT_SECRET` are set — the Rust config-file `enabled` flag has no analogue here):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OAUTH2_GOOGLE_CLIENT_ID` / `OAUTH2_GOOGLE_CLIENT_SECRET` / `OAUTH2_GOOGLE_REDIRECT_URI` | unset | Google OAuth app credentials. PKCE S256 is always used. Redirect defaults to an issuer-based URL when unset. |
+| `OAUTH2_MICROSOFT_CLIENT_ID` / `OAUTH2_MICROSOFT_CLIENT_SECRET` / `OAUTH2_MICROSOFT_REDIRECT_URI` | unset | Microsoft (Entra ID / Graph) app credentials. |
+| `OAUTH2_MICROSOFT_TENANT_ID` | `common` | Tenant segment in the Microsoft authorize/token URLs. |
+| `OAUTH2_GITHUB_CLIENT_ID` / `OAUTH2_GITHUB_CLIENT_SECRET` / `OAUTH2_GITHUB_REDIRECT_URI` | unset | GitHub OAuth App credentials. Email resolves via the verified-primary entry in `/user/emails`, never the `/user` response's own `email` field. |
+| `OAUTH2_AZURE_CLIENT_ID` / `OAUTH2_AZURE_CLIENT_SECRET` / `OAUTH2_AZURE_REDIRECT_URI` | unset | Optional, independent Azure app credentials; when any is unset, Azure falls back **whole-hog** to the Microsoft credentials above (Rust parity: `config.azure.or(config.microsoft)`) — but always uses its own `OAUTH2_AZURE_TENANT_ID`. |
+| `OAUTH2_AZURE_TENANT_ID` | `common` | Tenant segment used for the Azure login/callback flow, independent of the Microsoft tenant. |
+| `OAUTH2_OKTA_CLIENT_ID` / `OAUTH2_OKTA_CLIENT_SECRET` / `OAUTH2_OKTA_REDIRECT_URI` | unset | Accepted for forward-compat only — `GET /auth/login/okta` always 503s ("Okta login not yet implemented", Rust parity stub). |
+| `OAUTH2_AUTH0_CLIENT_ID` / `OAUTH2_AUTH0_CLIENT_SECRET` / `OAUTH2_AUTH0_REDIRECT_URI` | unset | Accepted for forward-compat only — `GET /auth/login/auth0` always 503s ("Auth0 login not yet implemented", Rust parity stub). |
+
+### Single-process state caveats (Phase 3c additions)
+
+Same caveat pattern as the Phase 2/3b stores above: each of the following lives on `app.state`
+as an in-process, in-memory singleton, **not** shared across worker processes or server
+instances — run `OAUTH2_WORKERS=1` or a sticky-session load balancer until these gain shared
+persistence:
+
+- **`TokenBucketLimiter`** (`services/limiter.py`, `app.state.rate_limiter` +
+  `app.state.invalid_client_limiter`) — the global per-IP bucket and the `invalid_client` penalty
+  bucket are both per-process dicts of buckets; a client hitting different workers effectively
+  gets `N ×` the configured budget.
+- **`IdempotencyStore`** (`services/events_bus.py`, `app.state.event_idempotency`) — TTL-pruned
+  dedup dict for `POST /events/ingest`'s `Idempotency-Key`; a duplicate submitted to a different
+  worker than the one that saw the original is not caught.
+- **`RecentEventsStore`** (`services/events.py`, `app.state.events`) — unchanged from Phase 2; now
+  also fed by the event bus's `RecentEventsPlugin`, still per-worker.
+- **Per-provider `CircuitBreaker`** (`services/social.py`, `app.state.social_breakers`) — one
+  breaker instance per social provider, guarding only the userinfo fetch; state (open/closed/
+  half-open) does not propagate across workers.
+- **`DpopReplayStore`** (`services/dpop.py`, `app.state.dpop_replay`) — carried over from Phase 3b,
+  listed again here for completeness; see the Phase 3b section above.
+
+### Metrics registered but not wired (parity-only)
+
+Matching the Rust server, this port registers a superset of metric families it never actually
+increments in most code paths (dashboard/scrape parity only). The following 12 families are
+registered and bootstrap-seeded — a cold `/metrics` scrape carries their `# HELP`/`# TYPE` lines
+and a zero-valued series — but no request path increments them: `oauth2_server_db_queries_total`,
+`oauth2_server_db_query_duration_seconds`, `oauth2_server_oauth_clients_total`,
+`oauth2_server_oauth_active_tokens`, `oauth2_server_errors_total`,
+`oauth2_server_http_client_requests_total`, `oauth2_server_http_client_request_duration_seconds`,
+`oauth2_server_events_published_total`, `oauth2_server_events_publish_duration_seconds`,
+`oauth2_server_redis_client_operations_total`,
+`oauth2_server_redis_client_operation_duration_seconds`, `oauth2_server_bulkhead_rejected_total`
+(bulkheads themselves are config-file-only in Rust and were not ported at all — see
+`docs/PHASE2-BACKLOG.md`). By contrast, `oauth2_server_rate_limit_rejected_total` /
+`oauth2_server_rate_limit_remaining` (divergence 24 exception) and
+`oauth2_server_circuit_breaker_state` / `oauth2_server_circuit_breaker_trips_total` /
+`oauth2_server_back_pressure_rejected_total` / `oauth2_server_concurrent_requests_in_flight` ARE
+wired, by the rate-limit and resilience middleware respectively.
+
+### Security note: admin-by-email and social login
+
+`OAUTH2_ADMIN_EMAILS` grants admin-API access to any session whose `email` matches the
+allowlist, case-insensitively — **including sessions established via social login**. Because of
+this, self-service social login only provisions a session when the provider has asserted (and,
+for GitHub, verified) an email address: Google requires `verified_email: true` in the userinfo
+response, GitHub requires a `primary: true, verified: true` entry from `/user/emails` (an
+unverified or absent primary email is treated as "no email found" and the callback 400s rather
+than provisioning a session), and Microsoft/Azure trust Graph's `userPrincipalName` as-is (Graph
+does not expose a verification flag for it). Operators who list any address in
+`OAUTH2_ADMIN_EMAILS` that a user could plausibly self-assert through an identity provider should
+confirm that provider actually verifies email ownership before granting the OAuth app access to
+production.
 
 ## Running
 

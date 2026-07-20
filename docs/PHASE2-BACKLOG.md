@@ -338,3 +338,76 @@ for a future Phase 3c/3d hardening pass, not as bugs introduced by the port:
   protected-resource metadata endpoint at all. Relatedly, token exchange (`routes/token.py`) never reads
   or validates a `resource` request parameter — RFC 8707 (Resource Indicators) is entirely absent
   server-wide, not just from token exchange.
+
+### Known Phase 3c gaps (deliberate)
+
+Phase 3c (`docs/plans/2026-07-20-python-oauth2-port-phase-3c.md` → "Global Constraints", "Rust
+gaps deliberately KEPT" and "Kept-out-of-scope") ports Prometheus metrics, rate
+limiting/resilience, the event bus, and social login while deliberately KEEPING the following
+gaps rather than fixing/porting them — recorded here as candidates for a future hardening pass,
+not as bugs introduced by the port:
+
+- **Redis Streams / Kafka / RabbitMQ event backends not ported** — Rust's `oauth2-events` crate
+  feature-gates additional publish backends beyond `console`/`in_memory`; only those two (plus
+  the always-appended `RecentEventsPlugin` bridge) are implemented here.
+  `OAUTH2_EVENTS_BACKEND` accepts only `console`/`in_memory`/`both`; anything else falls back to
+  `in_memory` with a logged warning rather than erroring.
+- **Bulkheads not ported** — Rust's per-resource bulkhead limiter (`bulkhead_rejected_total`
+  metric family) is configured entirely from a config file with no env-var surface in the Rust
+  server either; it was out of scope for this env-var-only Python port from the start and stays
+  registered-but-unwired (see divergence 24 above).
+- **OTel span export not ported** — the Rust server's OpenTelemetry tracing/span-export
+  integration has no Python equivalent; structured logging with trace ids would be the natural
+  next step but is a large separate effort, noted as a Phase 3d/later candidate rather than
+  attempted here.
+- **Most parity-only metric families stay unwired** — see divergence 24 and the README "Metrics
+  registered but not wired" table for the full 12-family list (`db_*`, `oauth_clients_total`,
+  `oauth_active_tokens`, `errors_total`, `http_client_*`, `events_published_*`, `redis_client_*`,
+  `bulkhead_rejected_total`).
+- **RFC 8628 `slow_down` not implemented** — the device authorization grant's polling endpoint
+  (`grant_type=urn:ietf:params:oauth:grant-type:device_code`) never returns `slow_down`; a
+  client polling faster than `interval` only ever sees `authorization_pending`, never the
+  `slow_down` escalation §3.5 describes for repeated over-fast polling — matching a gap already
+  present in the Rust server (not introduced or fixed by Phase 3c).
+- **No social account-linking by email** — a social login always provisions/matches on
+  `username = "{provider}:{provider_user_id}"`; there is no lookup-or-merge against an existing
+  local (password-based) account that happens to share the same verified email address. Logging
+  in with Google and then with GitHub using the same email address creates two independent
+  `User` rows.
+- **No `id_token`/nonce validation for social providers** — identity is established purely via
+  each provider's authenticated userinfo REST endpoint (Google `/oauth2/v2/userinfo`, Microsoft/
+  Azure Graph `/me`, GitHub `/user` + `/user/emails`), never by validating a provider-issued
+  OIDC `id_token`'s signature/`nonce`/`aud` — matching Rust, which takes the same
+  REST-userinfo-only approach.
+- **`http_client_requests_total`/`http_client_request_duration_seconds` unwired for social
+  outbound calls** — the social login provider HTTP calls (token exchange, userinfo fetch) do
+  not increment the parity-only `http_client_*` metric families listed above, even though those
+  families exist specifically to describe outbound HTTP client traffic; they remain
+  registered-and-seeded only (see divergence 24).
+
+From Phase 3c (`docs/plans/2026-07-20-python-oauth2-port-phase-3c.md` → "Global Constraints"):
+22. `/metrics` content-type is pinned to the literal `text/plain; version=0.0.4`, with the
+    `charset=utf-8` suffix `prometheus_client`'s own `CONTENT_TYPE_LATEST` normally appends
+    stripped off — exact byte-parity with the Rust exposition's content-type header.
+    Task 1 (commits `4e724c8`, `c50dec8`).
+23. Login rate limiting (`OAUTH2_LOGIN_RATE_LIMIT_*`, Phase 3a) is already env-tunable, where
+    Rust's equivalent is hardcoded. Kept as-is; no code change in Phase 3c.
+24. The parity-only metric families (`db_*`, `oauth_clients_total`, `oauth_active_tokens`,
+    `errors_total`, `http_client_*`, `events_published_*`, `redis_client_*`,
+    `bulkhead_rejected_total`) are registered and bootstrap-seeded but not wired at any request
+    site — matching Rust's actual behavior (register-for-scrape-parity; see README "Metrics
+    registered but not wired"). **Exception:** `rate_limit_rejected_total` /
+    `rate_limit_remaining` (limiter middleware) AND `circuit_breaker_state` /
+    `circuit_breaker_trips_total` / `back_pressure_rejected_total` /
+    `concurrent_requests_in_flight` (resilience middleware) ARE wired in this port — a small
+    behavioral improvement over Rust's dashboard-only intent, since both middlewares were built
+    fresh in Task 2. Task 1 (commits `4e724c8`, `c50dec8`); Task 2 (commit `712d906`).
+25. Okta/Auth0 remain 503 stubs with the same body text as Rust ("Okta login not yet
+    implemented" / "Auth0 login not yet implemented"); Azure remains a Microsoft-config alias
+    (`config.azure.or(config.microsoft)`, own tenant id). Task 4 (commits `0c3aa20`, `ddfe1b6`).
+26. The social callback SETS `auth_time` in the session (Rust omits it for social sessions,
+    which breaks OIDC `max_age` re-authentication checks for any user who logged in via a
+    social provider) — a correctness fix over Rust, not a parity gap. The callback also clears
+    `csrf_token`/`pkce_verifier`/`provider` from the session after a successful exchange (Rust
+    leaves them, reusing the same session keys PKCE/CSRF state occupies) — a second, related
+    improvement. Task 4 (commits `0c3aa20`, `ddfe1b6`).
