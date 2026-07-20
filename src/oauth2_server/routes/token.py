@@ -32,10 +32,13 @@ source this is ported from):
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
+import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote_plus
 
 import jwt
 from fastapi import APIRouter, Request
@@ -58,6 +61,8 @@ from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.tokens import TokenService
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 _MIN_VERIFIER_LEN = 43
@@ -69,6 +74,66 @@ _MAX_VERIFIER_LEN = 128
 # `.superpowers/sdd/research-rar-token-exchange.md` token-exchange section).
 _TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 _ACCESS_TOKEN_TYPE_URN = "urn:ietf:params:oauth:token-type:access_token"
+
+
+def _extract_client_id_for_penalty(form: dict, authorization_header: str | None) -> str | None:
+    """Best-effort recovery of the client_id an `invalid_client` outcome
+    should be penalized against (RFC 9700 §2.5), mirroring `ClientService.
+    authenticate`'s own precedence (`services/clients.py`: Basic header wins
+    over the form) WITHOUT re-raising on a malformed header — this only
+    needs a bucket key, not a validated credential, so a decode failure
+    just means "no key, skip the penalty" rather than another error path.
+    """
+    if authorization_header and authorization_header.lower().startswith("basic "):
+        encoded = authorization_header[len("Basic ") :].strip()
+        try:
+            decoded = base64.b64decode(encoded).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            decoded = None
+        if decoded and ":" in decoded:
+            raw_client_id, _, _ = decoded.partition(":")
+            return unquote_plus(raw_client_id) or None
+    client_id = form.get("client_id")
+    return client_id or None
+
+
+def _invalid_client_response(
+    request: Request, client_id: str | None, description: str
+) -> ORJSONResponse:
+    """Build the `401 invalid_client` response for `client_id`, first
+    consuming a token from the invalid_client penalty bucket (RFC 9700
+    §2.5, `app.state.invalid_client_limiter` — built in `create_app` only
+    when `config.rate_limit_invalid_client_max_requests > 0`, ON by default;
+    Rust parity). When the bucket is exhausted, the 401 is replaced by a 429
+    whose body is EXACTLY `{"error":"too_many_requests","error_description":
+    "Too many failed authentication attempts. Retry after {N}s.",
+    "error_uri":null}` — note `error_uri` is present-and-null (unlike
+    `oauth_error()`'s normal shape, which omits absent fields entirely) and
+    there is deliberately NO `Retry-After` HEADER on this response (the
+    retry-seconds value only appears inside `error_description`'s text —
+    Rust parity, research doc gotchas). Successes and non-invalid_client
+    errors never call this function, so they never consume the bucket.
+    Fails OPEN: a limiter backend error, or no recoverable `client_id`
+    (e.g. `authenticate()` never got far enough to see one), just returns
+    the plain 401.
+    """
+    limiter = request.app.state.invalid_client_limiter
+    if limiter is not None and client_id:
+        try:
+            result = limiter.check(client_id)
+        except Exception:
+            logger.warning("invalid_client rate limiter backend error; failing open", exc_info=True)
+            result = None
+        if result is not None and not result.allowed:
+            body = {
+                "error": "too_many_requests",
+                "error_description": (
+                    f"Too many failed authentication attempts. Retry after {result.retry_after}s."
+                ),
+                "error_uri": None,
+            }
+            return ORJSONResponse(body, status_code=429, headers={"Cache-Control": "no-store"})
+    return oauth_error("invalid_client", description)
 
 
 def _half_hash(value: str) -> str:
@@ -164,6 +229,12 @@ async def token(request: Request) -> ORJSONResponse:
         # Rust parity site (oauth.rs bad-client-auth): every client-auth
         # failure at the token endpoint counts as a failed authentication.
         request.app.state.metrics.oauth_failed_authentications.inc()
+        if exc.error == "invalid_client":
+            # RFC 9700 §2.5 penalty bucket: client_id must be recovered
+            # independently here since `authenticate()` raised before ever
+            # returning a `Client` — see `_extract_client_id_for_penalty`.
+            client_id = _extract_client_id_for_penalty(form, request.headers.get("authorization"))
+            return _invalid_client_response(request, client_id, exc.description)
         return oauth_error(exc.error, exc.description, exc.status)
 
     # RFC 9449 DPoP: read + validate an optional proof once, before dispatching
@@ -205,8 +276,10 @@ async def token(request: Request) -> ORJSONResponse:
 
     if grant_type == "client_credentials":
         if client.is_public():
-            return oauth_error(
-                "invalid_client", "Public clients cannot use the client_credentials grant"
+            return _invalid_client_response(
+                request,
+                client.client_id,
+                "Public clients cannot use the client_credentials grant",
             )
 
         if "client_credentials" not in client.grant_type_list():
@@ -523,7 +596,9 @@ async def token(request: Request) -> ORJSONResponse:
             )
 
         if client.is_public():
-            return oauth_error("invalid_client", "Public clients cannot use token-exchange")
+            return _invalid_client_response(
+                request, client.client_id, "Public clients cannot use token-exchange"
+            )
 
         subject_token = form.get("subject_token")
         if not subject_token:

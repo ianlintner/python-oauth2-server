@@ -16,6 +16,7 @@ from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
 from oauth2_server.keys import seed_keyset
 from oauth2_server.middleware import _SECURITY_HEADERS, DenylistGuard, MetricsMiddleware
+from oauth2_server.middleware_ratelimit import RateLimitMiddleware, ResilienceMiddleware
 from oauth2_server.routes.admin import admin_router
 from oauth2_server.routes.admin.guard import AdminAuthError
 from oauth2_server.routes.authorize import router as authorize_router
@@ -32,9 +33,11 @@ from oauth2_server.security import derive_session_key
 from oauth2_server.services.dpop import DpopReplayStore
 from oauth2_server.services.dpop_nonce import DpopNonceIssuer, decode_dpop_nonce_secret
 from oauth2_server.services.events import RecentEventsStore
+from oauth2_server.services.limiter import TokenBucketLimiter
 from oauth2_server.services.metrics import Metrics
 from oauth2_server.services.par import ParStore
 from oauth2_server.services.ratelimit import FixedWindowLimiter
+from oauth2_server.services.resilience import CircuitBreaker, ConcurrencyLimiter
 from oauth2_server.storage.base import Storage
 from oauth2_server.storage.sql import SqlStorage
 
@@ -66,6 +69,34 @@ def create_app(
     app.state.login_limiter = FixedWindowLimiter(
         config.login_rate_limit_attempts, config.login_rate_limit_window_secs
     )
+    # Rate limiting (services/limiter.py) + resilience (services/
+    # resilience.py) state — always constructed (cheap, no background
+    # tasks/threads) even when the corresponding middleware below isn't
+    # mounted, so e.g. tests can manipulate `app.state.circuit_breaker`
+    # directly without needing `resilience_enabled=True`. The global per-IP
+    # limiter and the two resilience objects are read by
+    # `middleware_ratelimit.py`'s `RateLimitMiddleware`/
+    # `ResilienceMiddleware`; `invalid_client_limiter` is read directly by
+    # `routes/token.py` (RFC 9700 §2.5 penalty bucket, independent of
+    # `rate_limit_enabled` — active by default, `None` only when explicitly
+    # disabled via `rate_limit_invalid_client_max_requests=0`).
+    app.state.rate_limiter = TokenBucketLimiter(
+        config.rate_limit_max_requests, config.rate_limit_window_secs
+    )
+    app.state.invalid_client_limiter = (
+        TokenBucketLimiter(
+            config.rate_limit_invalid_client_max_requests, config.rate_limit_window_secs
+        )
+        if config.rate_limit_invalid_client_max_requests > 0
+        else None
+    )
+    app.state.circuit_breaker = CircuitBreaker(
+        config.resilience_cb_failure_threshold,
+        config.resilience_cb_success_threshold,
+        config.resilience_cb_open_secs,
+        config.resilience_cb_half_open_max_probes,
+    )
+    app.state.concurrency_limiter = ConcurrencyLimiter(config.resilience_max_concurrent)
     app.state.keyset = seed_keyset(config)
     # RFC 9449 DPoP: a single shared replay store + nonce issuer per app
     # instance, read directly by routes/token.py (and later introspect).
@@ -119,19 +150,39 @@ def create_app(
         https_only=not config.allow_insecure_defaults,
     )
 
-    # Registered after security_headers/CORS/Session so it becomes the
-    # outermost of those three (Starlette runs the most-recently-
+    # Registered after Session (so it wraps it), and BEFORE DenylistGuard
+    # below (so DenylistGuard wraps IT) — only when enabled. This makes
+    # DenylistGuard the outer layer relative to rate limiting, matching
+    # Rust's `... -> DenylistGuard -> RateLimit -> Session -> ...` order: a
+    # denylisted IP's request is rejected by DenylistGuard before it ever
+    # reaches RateLimitMiddleware, so denylisted callers never consume
+    # rate-limit quota. See middleware_ratelimit.py's module docstring for
+    # the full ordering rationale (including where ResilienceMiddleware and
+    # the pre-existing MetricsMiddleware fit).
+    if config.rate_limit_enabled:
+        app.add_middleware(RateLimitMiddleware)
+
+    # Registered after security_headers/CORS/Session/RateLimit so it becomes
+    # the outermost of those (Starlette runs the most-recently-
     # `add_middleware`d layer first) — every HTTP request, for every route
     # below, passes through DenylistGuard before session/CORS/security-header
-    # handling or routing. See middleware.py for behavior.
+    # handling, rate limiting, or routing. See middleware.py for behavior.
     app.add_middleware(DenylistGuard)
 
+    # Registered after DenylistGuard (so it wraps it) but before
+    # MetricsMiddleware below — only when enabled. Matches Rust's
+    # `... -> Resilience -> DenylistGuard -> ...` order: resilience's 503
+    # fast-fail (circuit open / at capacity) is the cheapest possible path,
+    # firing even for requests that would otherwise be denylisted.
+    if config.resilience_enabled:
+        app.add_middleware(ResilienceMiddleware)
+
     # Registered LAST of all — becomes the true outermost layer, wrapping
-    # even DenylistGuard, so it counts every request/response that reaches
-    # this ASGI app, including ones DenylistGuard short-circuits and scrapes
-    # of /metrics itself (Rust MetricsMiddleware parity; see
-    # middleware.py's MetricsMiddleware docstring for the full ordering
-    # rationale).
+    # even DenylistGuard/RateLimit/Resilience, so it counts every
+    # request/response that reaches this ASGI app, including ones
+    # DenylistGuard short-circuits and scrapes of /metrics itself (Rust
+    # MetricsMiddleware parity; see middleware.py's MetricsMiddleware
+    # docstring for the full ordering rationale).
     app.add_middleware(MetricsMiddleware)
 
     app.include_router(token_router, prefix="/oauth")

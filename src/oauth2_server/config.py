@@ -59,6 +59,32 @@ class Config(BaseSettings):
     # actually enforces it (research-rar-token-exchange.md gotchas, backlog
     # gap #20) — the Python port makes this config-driven and enforced.
     rar_types_supported: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["openid"])
+    # Rate limiting (services/limiter.py::TokenBucketLimiter) +
+    # resilience (services/resilience.py, middleware_ratelimit.py) — ported
+    # from `oauth2-ratelimit`/`oauth2-resilience` (research doc
+    # research-ratelimit-resilience.md `config_keys`). Both master switches
+    # default to False (Rust parity: `rate_limit.enabled`/`resilience.
+    # enabled` are both off out of the box); `rate_limit_invalid_client_max_
+    # requests` is independent of `rate_limit_enabled` and defaults ON (5),
+    # matching Rust's always-active invalid_client penalty bucket.
+    rate_limit_enabled: bool = False
+    rate_limit_max_requests: int = 100
+    rate_limit_window_secs: int = 60
+    rate_limit_invalid_client_max_requests: int = 5
+    # Shared by the global rate-limit middleware's IP-extraction (honor
+    # `X-Forwarded-For` only when set) — env name matches Rust's
+    # `server.trust_proxy_headers` (`OAUTH2_SERVER_TRUST_PROXY_HEADERS`),
+    # not the `OAUTH2_RATE_LIMIT_*`-prefixed sibling fields above, since
+    # Rust scopes this under `[server]`, not `[rate_limit]`.
+    trust_proxy_headers: Annotated[
+        bool, Field(validation_alias="OAUTH2_SERVER_TRUST_PROXY_HEADERS")
+    ] = False
+    resilience_enabled: bool = False
+    resilience_max_concurrent: int = 1000
+    resilience_cb_failure_threshold: int = 5
+    resilience_cb_success_threshold: int = 2
+    resilience_cb_open_secs: int = 30
+    resilience_cb_half_open_max_probes: int = 3
 
     @field_validator("dpop_nonce_lifetime_secs")
     @classmethod
