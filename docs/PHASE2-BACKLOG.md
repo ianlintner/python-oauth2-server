@@ -432,3 +432,76 @@ From Phase 3c (`docs/plans/2026-07-20-python-oauth2-port-phase-3c.md` → "Globa
     400 instead — a deliberate hardening (an attacker-controlled unverified email would let
     someone provision/claim an account for an address they don't actually own), not a bug.
     Task 4 (commit `ddfe1b6`).
+
+From Phase 3d (`docs/plans/2026-07-20-python-oauth2-port-phase-3d.md` → "Global Constraints") —
+adds a second `Storage` backend, `MongoStorage` (`storage/mongo.py`, motor), selected by a
+`mongodb://`/`mongodb+srv://` scheme on `OAUTH2_DATABASE_URL` via `storage/factory.py::
+create_storage`. See the README "Phase 3d: MongoDB Backend" section for the full user-facing
+writeup (install, backend selection, caveats).
+
+28. `revoke_token_family` and `revoke_tokens_by_user_id` ARE implemented on `MongoStorage`
+    (`update_many` on `token_family`/`user_id`, returning `modified_count`) — Rust's Mongo
+    backend leaves both as no-op trait defaults, silently breaking RFC 9700 §4.13.2
+    refresh-token-replay cascade revocation and OIDC-logout revocation whenever Mongo is the
+    backend. This port does not copy that gap: proven end-to-end (not just at the storage-unit
+    level) by `tests/test_mongo_e2e.py::test_mongo_e2e_auth_code_refresh_and_family_cascade`,
+    which drives a real authorization_code → refresh → refresh-replay sequence over HTTP against
+    `MongoStorage` and asserts a sibling (rotated-in) access token goes inactive on introspection
+    after the replay. Task 3 (commit `32faec8`); e2e proof Task 5.
+29. Denylist (`denylist` collection) and audit-log (`audit_log` collection) storage methods ARE
+    implemented on `MongoStorage`. The `/admin/api/capabilities` endpoint reports
+    denylist/audit_log as available on both backends (hardcoded `True`, see
+    `routes/admin/dashboard.py`), and the Mongo backend actually implements the denylist/audit
+    storage methods — unlike Rust, whose Mongo backend stubs both as no-op trait defaults, silently
+    disabling the admin denylist/audit features whenever Mongo is the backend. Kept working here; proven
+    end-to-end (real `DenylistGuard` 403, not just a storage-layer lookup) by
+    `tests/test_mongo_e2e.py::test_mongo_e2e_denylist_blocks_request`. Task 4 (commits `1801e38`,
+    `635599b`); e2e proof Task 5.
+30. Single-claim atomicity: `mark_authorization_code_used`/`mark_device_authorization_used` use
+    `find_one_and_update({..., used: false}, {$set: {used: true}})` (atomic, returning 1 if
+    claimed / 0 if already used) — Rust's Mongo backend does a bare, non-atomic `update_one` with
+    no `used: false` predicate anywhere in that code path, leaving a check-then-act double-spend
+    race. This matches the SQL backend's existing atomic single-claim guard. Task 3 (commit
+    `32faec8`).
+31. `mongodb+srv://` (DNS-SRV discovery, e.g. MongoDB Atlas) IS supported and selects
+    `MongoStorage` — Rust hard-rejects it (a hickory-proto DNS-resolver security advisory that
+    doesn't apply to this driver/motor stack). Task 1 (commit `c08c550`).
+
+### Known Phase 3d gaps (deliberate/parity, MongoDB backend)
+
+- **App-side full-collection scans for every list/page method.** `list_all_*`/`list_*_page`/
+  `list_denylist`/`list_audit_log` all `find({})` the whole collection, then sort/filter/page in
+  Python — no server-side `$sort`/`$skip`/`$limit` aggregation pipeline. O(collection size) per
+  call; matches the Rust Mongo backend's own choice (Azure Cosmos DB for MongoDB compatibility —
+  Cosmos's aggregation-pipeline support is more limited than real MongoDB's).
+- **No TTL indexes.** Expired tokens/authorization codes/device authorizations/denylist entries
+  are never automatically purged — they accumulate until an operator prunes them manually (or a
+  future migration adds `expireAfterSeconds` indexes). The SQL backend has the same gap (no
+  scheduled cleanup job either); MongoDB TTL indexes are the idiomatic fix and aren't wired up.
+- **`token_family` has no index** — `revoke_token_family`'s `update_many({token_family: ...})`
+  is a full collection scan on `tokens` (Rust parity: the Rust Mongo backend's index list doesn't
+  cover `token_family` either).
+- **Duplicate-key error shape diverges from SQL.** `MongoStorage` catches
+  `pymongo.errors.DuplicateKeyError` and raises `invalid_request` "duplicate key" (an
+  `OAuthError`, handled cleanly by routes); `SqlStorage`'s equivalent violation surfaces as an
+  unhandled `IntegrityError` → 500. In practice this SQL-side 500 path is unreachable through
+  normal request flow because every write site pre-checks uniqueness before insert — noted as an
+  existing (not newly introduced) asymmetry between the two backends, not a regression.
+- **Denylist upsert is non-atomic.** `add_denylist_entry`'s "keep the original row's `id` on a
+  `(kind, value)` conflict" is a `find_one` then `replace_one(upsert=True)` — two round trips,
+  not one atomic operation. A benign race under concurrent admin writes to the same
+  `(kind, value)` pair (admin-only, low-traffic surface). Rust's own Mongo backend has the same
+  non-atomicity.
+- **No in-memory Mongo fake** — `mongomock-motor` was evaluated as a dev-convenience fast path but
+  deliberately NOT adopted (and removed from the dev deps), because it diverges from real MongoDB
+  on the two behaviors `MongoStorage` depends on: the unique-index `E11000` error shape
+  (duplicate-key detection) and the `$type` query operator (`_normalize_legacy_timestamps`'s
+  BSON-date healer). The contract suite (`tests/test_mongo_storage.py`, `tests/test_mongo_admin.py`,
+  `tests/test_mongo_e2e.py`) therefore ALWAYS runs against a real `mongo:7.0` via `testcontainers`
+  (gated on `RUN_TESTCONTAINERS=1`, run in the CI `db-tests` job); the default `gate` job stays
+  SQLite-only and Docker-free.
+- **No Postgres-equivalent cross-server parity smoke automated in CI** — `scripts/
+  mongo_parity_smoke.sh` (documentation-grade, manually run) proves client_credentials +
+  introspect + revoke over real HTTP against a real mongod; it is intentionally NOT wired into
+  `scripts/gate.sh` or the CI `db-tests` job (mirrors the existing Postgres cross-server smoke in
+  the README, which is also manual-only).

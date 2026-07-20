@@ -11,10 +11,12 @@ backend silently reports all-zeros with 200. This port does not swallow
 storage errors — a failure here propagates like any other unhandled
 exception (500), rather than lying about the counts.
 
-`GET /capabilities` is static in this port: the SQL storage backend (the
-only backend this server ships) truly supports every listed capability, so
-there's no `supports_denylist()`/`supports_audit_log()` backend query to
-proxy (unlike Rust, which reports `false` for a hypothetical Mongo backend).
+`GET /capabilities` is static in this port: both storage backends this
+server ships (`SqlStorage` and `MongoStorage`, see
+`storage/factory.py`) truly support every listed capability, so there's no
+backend query to proxy (unlike Rust, which reports `false` for denylist/
+audit_log on its Mongo backend because those methods are no-op stubs
+there — this port's `MongoStorage` actually implements them).
 """
 
 from __future__ import annotations

@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import jwt
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient
@@ -35,6 +37,7 @@ from oauth2_server.models import DenylistEntry, Token
 from oauth2_server.services.dpop import jwk_thumbprint
 from tests.conftest import build_client_app
 from tests.helpers import (
+    build_mongo_client_app,
     generate_dpop_key,
     login_admin,
     login_session,
@@ -49,6 +52,27 @@ from tests.helpers import (
 from tests.test_metrics import _metric_value
 from tests.test_social_login import _mock_transport, _state_from_location
 from tests.test_token_endpoint import run_code_flow
+
+# --- Mongo backend contract pin (Phase 3d) -----------------------------
+#
+# The rest of this file is Rust-diffable and backend-agnostic (it only ever
+# builds SqlStorage via `build_client_app`/`make_storage`). This block is the
+# one deliberate exception: `test_mongo_backend_storage_contract` below is a
+# thin, RUN_TESTCONTAINERS=1-gated pin that the SAME compliance suite passes
+# unmodified when `Storage` is `MongoStorage` — see
+# `tests/test_mongo_e2e.py` for the fuller end-to-end proof (family-cascade
+# revocation, denylist 403). Only this one test is skipped/gated; every other
+# test in this file always runs.
+_RUN_TESTCONTAINERS = os.environ.get("RUN_TESTCONTAINERS") == "1"
+
+try:
+    import motor.motor_asyncio  # noqa: F401
+    from testcontainers.mongodb import MongoDbContainer
+
+    _MONGO_DEPS_ERROR: Exception | None = None
+except ImportError as e:  # pragma: no cover - exercised when deps missing
+    MongoDbContainer = None  # type: ignore[assignment,misc]
+    _MONGO_DEPS_ERROR = e
 
 ISSUER = "https://auth.example.com"
 JWT_SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
@@ -1334,3 +1358,55 @@ async def test_social_login_google_round_trip():
         assert user is not None
         assert user.email == "pin@example.com"
         assert user.role == "user"
+
+
+@pytest.fixture(scope="module")
+def _mongo_container():
+    with MongoDbContainer("mongo:7.0") as mongo:
+        yield mongo
+
+
+@pytest.mark.skipif(
+    not _RUN_TESTCONTAINERS or _MONGO_DEPS_ERROR is not None,
+    reason=(
+        "set RUN_TESTCONTAINERS=1 (with motor + testcontainers installed) to run "
+        "the Mongo backend storage-contract compliance pin against a real mongod"
+    ),
+)
+async def test_mongo_backend_storage_contract(_mongo_container):
+    """Diffable pin: `create_app(config, MongoStorage(url))` runs one full
+    authorization_code -> token exchange -> refresh flow end to end over
+    HTTP, exactly like the SQL-backed compliance tests above, proving the
+    `Storage` protocol is genuinely backend-agnostic at the app layer (not
+    just at the storage-unit-test layer covered by
+    `tests/test_mongo_storage.py`). The fuller family-cascade-revocation and
+    denylist-403 proofs live in `tests/test_mongo_e2e.py`; this test is
+    deliberately thin — its only job is to be a line in THIS file that a
+    diff against the SQL compliance suite makes obvious.
+    """
+    host = _mongo_container.get_container_host_ip()
+    port = _mongo_container.get_exposed_port(_mongo_container.port)
+    db_name = f"oauth2_rfc_mongo_{uuid.uuid4().hex[:10]}"
+    uri = (
+        f"mongodb://{_mongo_container.username}:{_mongo_container.password}"
+        f"@{host}:{port}/{db_name}?authSource=admin"
+    )
+    async with build_mongo_client_app(uri) as app:
+        resp, code = await run_code_flow(app)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["access_token"]
+        refresh_token = body["refresh_token"]
+        assert refresh_token
+
+        refreshed = await post_token(
+            app,
+            {"grant_type": "refresh_token", "refresh_token": refresh_token},
+            basic_auth=("client1", "s3cret"),
+        )
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["access_token"]
+        assert refreshed.json()["refresh_token"] != refresh_token
+
+        await app.storage._client.drop_database(db_name)
+        app.storage._client.close()
