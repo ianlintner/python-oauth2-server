@@ -96,6 +96,12 @@ async def introspect(request: Request) -> ORJSONResponse:
         unverified_claims = {}
     claim_cnf = unverified_claims.get("cnf")
     jkt = claim_cnf.get("jkt") if isinstance(claim_cnf, dict) else None
+    # RFC 9396 §9.2: echo authorization_details for active tokens, read from
+    # the same unverified-claims decode as `cnf` above. Opaque access tokens
+    # (or any non-JWT token value) decode to no claims, so this is naturally
+    # `None` for them — the documented opaque-mode drop (parity with
+    # services/tokens.py's `bound_details`).
+    claim_authorization_details = unverified_claims.get("authorization_details")
 
     cnf: dict | None = None
     if jkt:
@@ -151,6 +157,7 @@ async def introspect(request: Request) -> ORJSONResponse:
         jti=jti,
         iss=config.issuer,
         cnf=cnf,
+        authorization_details=claim_authorization_details,
     )
     response = ORJSONResponse(body.model_dump(exclude_none=True))
     response.headers["Cache-Control"] = "no-store"

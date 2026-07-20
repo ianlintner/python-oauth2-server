@@ -28,6 +28,7 @@ class TokenService:
         with_refresh: bool,
         token_family: str | None = None,
         cnf: dict | None = None,
+        authorization_details: list[dict] | None = None,
     ) -> TokenResponse:
         """Issue an access (+ optional refresh) token.
 
@@ -42,10 +43,20 @@ class TokenService:
         "Bearer" regardless of `cnf` — only the `TokenResponse` returned here
         says "DPoP" (research-dpop.md `key_behaviors`: "the persisted Token
         row keeps token_type 'Bearer'").
+
+        `authorization_details` (RFC 9396) follows the same opaque-mode
+        drop rule as `cnf` — an opaque token has nowhere to carry it as a
+        JWT claim, so it is silently omitted from both the issued token and
+        the returned `TokenResponse` (parity with the Rust server, which has
+        no opaque mode but likewise drops `authorization_details` on every
+        path except the JWT claim — see research-rar-token-exchange.md).
+        Callers pass `None` here for grants that drop RAR details entirely
+        (refresh_token, device_code — Rust parity).
         """
         config = self._config
         subject = user_id or client.client_id
         bound_cnf = cnf if not config.access_tokens_opaque else None
+        bound_details = authorization_details if not config.access_tokens_opaque else None
 
         if config.access_tokens_opaque:
             access_token = secrets.token_urlsafe(32)
@@ -57,6 +68,7 @@ class TokenService:
                 config.access_token_ttl_secs,
                 config.issuer,
                 cnf=bound_cnf,
+                authorization_details=bound_details,
             )
             # Prefer the current RS256 key so access+refresh tokens follow
             # RS256 rotation automatically whenever one is configured; fall
@@ -94,4 +106,5 @@ class TokenService:
             token_type="DPoP" if bound_cnf is not None else "Bearer",
             expires_in=config.access_token_ttl_secs,
             scope=scope,
+            authorization_details=bound_details,
         )

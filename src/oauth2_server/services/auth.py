@@ -48,6 +48,7 @@ class AuthorizeService:
         code_challenge: str | None,
         code_challenge_method: str | None,
         nonce: str | None,
+        authorization_details: str | None = None,
     ) -> AuthorizationCode:
         now = datetime.now(timezone.utc)
         auth_code = AuthorizationCode(
@@ -61,6 +62,7 @@ class AuthorizeService:
             code_challenge=code_challenge,
             code_challenge_method=code_challenge_method,
             nonce=nonce,
+            authorization_details=authorization_details,
             token_family=uuid.uuid4().hex,
         )
         await self._storage.save_authorization_code(auth_code)

@@ -23,7 +23,7 @@ from oauth2_server.security import decode_access_token
 router = APIRouter()
 
 
-def _discovery_document(issuer: str, id_token_alg: str) -> dict:
+def _discovery_document(issuer: str, id_token_alg: str, rar_types_supported: list[str]) -> dict:
     base = issuer.rstrip("/")
     return {
         "issuer": base,
@@ -74,6 +74,11 @@ def _discovery_document(issuer: str, id_token_alg: str) -> dict:
         # (research-dpop.md key_behaviors: "Discovery advertises ...
         # narrower than the 8 algs the validator actually accepts").
         "dpop_signing_alg_values_supported": ["ES256", "RS256"],
+        # RFC 9396 §18.2 — config-driven (`config.rar_types_supported`) and
+        # actually enforced by `services/rar.py`, unlike the Rust server's
+        # hardcoded, unenforced ["openid"] (research-rar-token-exchange.md
+        # gotchas).
+        "authorization_details_types_supported": rar_types_supported,
     }
 
 
@@ -81,7 +86,9 @@ def _discovery_document(issuer: str, id_token_alg: str) -> dict:
 @router.get("/.well-known/oauth-authorization-server")
 async def openid_configuration(request: Request) -> ORJSONResponse:
     config = request.app.state.config
-    return ORJSONResponse(_discovery_document(config.issuer, config.id_token_alg))
+    return ORJSONResponse(
+        _discovery_document(config.issuer, config.id_token_alg, config.rar_types_supported)
+    )
 
 
 @router.get("/.well-known/jwks.json")

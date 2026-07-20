@@ -148,6 +148,12 @@ class Claims(BaseModel):
     # `TokenService.issue`'s `cnf` keyword — see `services/tokens.py` and
     # `routes/token.py` for the grant-by-grant binding rules.
     cnf: dict | None = None
+    # RFC 9396 §7.1 / §9.2: the validated authorization_details array carried
+    # by this access token, when RAR was used — omitted entirely (never a
+    # literal `null`) when absent, same as `cnf`. See
+    # `services/rar.py::validate_authorization_details` for how this is
+    # produced, and `routes/token.py` for which grants embed it.
+    authorization_details: list[dict] | None = None
 
     @classmethod
     def new(
@@ -159,6 +165,7 @@ class Claims(BaseModel):
         issuer: str,
         *,
         cnf: dict | None = None,
+        authorization_details: list[dict] | None = None,
     ) -> "Claims":
         iat = int(_now().timestamp())
         return cls(
@@ -171,6 +178,7 @@ class Claims(BaseModel):
             jti=uuid.uuid4().hex,
             client_id=client_id,
             cnf=cnf,
+            authorization_details=authorization_details,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -202,6 +210,10 @@ class TokenResponse(BaseModel):
     expires_in: int
     scope: str | None = None
     id_token: str | None = None
+    # RFC 9396 §7.1: the AS MUST echo the validated authorization_details in
+    # the token response when RAR was used — a gap the Rust server has (see
+    # research-rar-token-exchange.md gotchas); this port fixes it.
+    authorization_details: list[dict] | None = None
 
 
 class IntrospectionResponse(BaseModel):
@@ -218,6 +230,10 @@ class IntrospectionResponse(BaseModel):
     jti: str | None = None
     iss: str | None = None
     cnf: dict | None = None
+    # RFC 9396 §9.2 — included for active tokens that carry it; absent
+    # otherwise (opaque-mode tokens have none, Rust parity — see
+    # routes/introspect.py).
+    authorization_details: list[dict] | None = None
 
 
 class ClientRegistration(BaseModel):

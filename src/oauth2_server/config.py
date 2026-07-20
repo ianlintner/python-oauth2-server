@@ -53,6 +53,12 @@ class Config(BaseSettings):
     # env string through.
     dpop_nonce_secret: str | None = None
     dpop_nonce_lifetime_secs: int = 300
+    # RFC 9396 §18.2 `authorization_details_types_supported` discovery value,
+    # and the allowlist `services/rar.py::validate_authorization_details`
+    # enforces. The Rust server advertises a hardcoded `["openid"]` but never
+    # actually enforces it (research-rar-token-exchange.md gotchas, backlog
+    # gap #20) — the Python port makes this config-driven and enforced.
+    rar_types_supported: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["openid"])
 
     @field_validator("dpop_nonce_lifetime_secs")
     @classmethod
@@ -68,6 +74,13 @@ class Config(BaseSettings):
     def _split_origins(cls, v: object) -> object:
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
+
+    @field_validator("rar_types_supported", mode="before")
+    @classmethod
+    def _split_rar_types(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [t.strip() for t in v.split(",") if t.strip()]
         return v
 
     @field_validator("admin_client_ids", mode="before")

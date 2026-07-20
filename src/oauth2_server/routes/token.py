@@ -55,6 +55,7 @@ from oauth2_server.services.dpop import (
     validate_dpop_proof,
 )
 from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
+from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.tokens import TokenService
 
 router = APIRouter()
@@ -211,8 +212,27 @@ async def token(request: Request) -> ORJSONResponse:
         else:
             scope = client.scope
 
+        # RFC 9396: client_credentials has no consent step, so the form
+        # value (if any) is validated directly and embedded verbatim — no
+        # stored counterpart to reconcile against (unlike authorization_code
+        # redemption below).
+        authorization_details = None
+        raw_details = form.get("authorization_details")
+        if raw_details is not None:
+            try:
+                authorization_details = validate_authorization_details(
+                    raw_details, config.rar_types_supported
+                )
+            except RarError as exc:
+                return oauth_error(exc.error, exc.description)
+
         token_response = await TokenService(storage, config, keyset).issue(
-            client, None, scope, with_refresh=False, cnf=cnf
+            client,
+            None,
+            scope,
+            with_refresh=False,
+            cnf=cnf,
+            authorization_details=authorization_details,
         )
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
@@ -257,6 +277,34 @@ async def token(request: Request) -> ORJSONResponse:
         elif client.is_public():
             return oauth_error("invalid_grant", "public clients must use PKCE")
 
+        # RFC 9396: the details the user consented to at authorize time
+        # (stored on the auth code) win. A token-request value is only
+        # accepted when there was no stored value (validate + use); when
+        # BOTH are present and differ (string comparison — no semantic
+        # diffing), this is a validation error, NOT a replay — the code
+        # must stay usable and the token family must NOT be revoked, unlike
+        # the "already used" branch above/below.
+        stored_details = auth_code.authorization_details
+        form_details = form.get("authorization_details")
+        if (
+            stored_details is not None
+            and form_details is not None
+            and form_details != stored_details
+        ):
+            return oauth_error(
+                "invalid_authorization_details",
+                "authorization_details must not be altered at redemption",
+            )
+        raw_details = stored_details if stored_details is not None else form_details
+        authorization_details = None
+        if raw_details is not None:
+            try:
+                authorization_details = validate_authorization_details(
+                    raw_details, config.rar_types_supported
+                )
+            except RarError as exc:
+                return oauth_error(exc.error, exc.description)
+
         claimed = await storage.mark_authorization_code_used(auth_code.code)
         if claimed == 0:
             # Lost the race to a concurrent request that already claimed this code.
@@ -271,6 +319,7 @@ async def token(request: Request) -> ORJSONResponse:
             with_refresh=True,
             token_family=auth_code.token_family,
             cnf=cnf,
+            authorization_details=authorization_details,
         )
 
         scope_set = set(auth_code.scope.split())
@@ -340,6 +389,11 @@ async def token(request: Request) -> ORJSONResponse:
         refresh_cnf = _salvage_old_cnf(old_token.access_token)
         await storage.revoke_token(old_token.access_token)
 
+        # RFC 9396 details are DROPPED on refresh (Rust parity,
+        # research-rar-token-exchange.md `endpoints`: "authorization_details:
+        # None on the rotated token") — unlike `cnf` above, there is no
+        # carry-over from the old access token's JWT claim; `authorization_details`
+        # is deliberately left unset here.
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             old_token.user_id,
@@ -404,7 +458,11 @@ async def token(request: Request) -> ORJSONResponse:
         # Device grant never binds cnf, even when the client presented a
         # valid DPoP proof on this request (Rust parity, research-dpop.md
         # gotchas: "device_code grant hardcodes cnf: None") — `cnf` is
-        # deliberately not passed through here.
+        # deliberately not passed through here. RFC 9396 details are
+        # likewise dropped for this grant (Rust parity,
+        # research-rar-token-exchange.md `endpoints`: "Same for
+        # device_code grant") — DeviceAuthorization has no
+        # authorization_details field at all, so there's nothing to embed.
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             device.user_id,
