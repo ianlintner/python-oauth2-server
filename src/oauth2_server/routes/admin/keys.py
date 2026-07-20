@@ -24,6 +24,12 @@ from oauth2_server.routes.admin._util import _json_body
 router = APIRouter()
 
 _VALID_ALGORITHMS = ("HS256", "RS256")
+# Rust parity: guards `grace_period_hours * 3600` from overflowing when
+# building the rotated key's expiry (`timedelta(seconds=...)` raises
+# `OverflowError` well before this — datetime's max range is ~2.7e5 years —
+# so this bound is chosen generously above any legitimate grace period while
+# still being nowhere near datetime's actual ceiling).
+_MAX_GRACE_PERIOD_HOURS = 1_000_000
 
 _WARNING = (
     "Key rotation is in-memory only. Rotated keys will be lost on restart. "
@@ -56,6 +62,11 @@ async def rotate_key(request: Request) -> ORJSONResponse:
         grace_period_hours = int(grace_period_hours)
     except (TypeError, ValueError):
         return _invalid_request("grace_period_hours must be an integer")
+
+    if grace_period_hours < 0:
+        return _invalid_request("grace_period_hours must be non-negative")
+    if grace_period_hours > _MAX_GRACE_PERIOD_HOURS:
+        return _invalid_request("grace_period_hours is too large")
 
     kid = f"{algorithm.lower()}-{int(time.time())}"
     new_key = generate_signing_key(algorithm, kid)

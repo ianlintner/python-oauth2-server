@@ -189,6 +189,32 @@ async def test_rotate_rejects_unknown_algorithm(rsa_pem):
         }
 
 
+async def test_rotate_rejects_oversized_grace_period(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+
+        resp = await client.post("/admin/api/keys/rotate", json={"grace_period_hours": 10**18})
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "grace_period_hours is too large",
+        }
+
+
+async def test_rotate_rejects_negative_grace_period(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+
+        resp = await client.post("/admin/api/keys/rotate", json={"grace_period_hours": -1})
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "grace_period_hours must be non-negative",
+        }
+
+
 async def test_admin_keys_list_hides_material(rsa_pem):
     async with _rs256_app(rsa_pem) as client:
         await seed_admin(client.storage)

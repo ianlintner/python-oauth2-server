@@ -296,6 +296,17 @@ async def token(request: Request) -> ORJSONResponse:
             with_refresh=True,
             token_family=uuid.uuid4().hex,
         )
+
+        scope_set = set(device.scope.split())
+        if "openid" in scope_set and device.user_id:
+            user = await storage.get_user_by_id(device.user_id)
+            try:
+                token_response.id_token = _mint_id_token(
+                    config, client, device.user_id, user, device.scope, token_response.access_token
+                )
+            except ValueError as exc:
+                return oauth_error("server_error", str(exc), status=500)
+
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
         return response

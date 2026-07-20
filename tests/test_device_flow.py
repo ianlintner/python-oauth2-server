@@ -1,17 +1,20 @@
 import re
 
+import jwt
+
 from tests.helpers import login_session, post_token, reseed_client, seed_client
 
 _USER_CODE_RE = re.compile(r"^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$")
 
 
-async def start_device_flow(client_app, *, client_id="client1", client_secret="s3cret"):
+async def start_device_flow(client_app, *, client_id="client1", client_secret="s3cret", scope=None):
     import base64
 
     basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    data = {"scope": scope} if scope else {}
     return await client_app.post(
         "/oauth/device_authorization",
-        data={},
+        data=data,
         headers={"Authorization": f"Basic {basic}"},
     )
 
@@ -144,3 +147,53 @@ async def test_device_authorization_requires_allowlist(client_app):
     resp = await start_device_flow(client_app)
     assert resp.status_code == 400
     assert resp.json()["error"] == "unauthorized_client"
+
+
+async def test_device_flow_mints_id_token_for_openid_scope(client_app):
+    """Parity with the Rust device-grant issuance site (oauth.rs:1830):
+    when the granted scope includes "openid" and the device authorization
+    has an approving user_id, the token response carries an id_token built
+    the same way as the refresh-token branch (no nonce, no c_hash, at_hash
+    over the newly-issued access token)."""
+    resp = await start_device_flow(client_app, scope="openid email")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    device_code = body["device_code"]
+    user_code = body["user_code"]
+
+    login_resp = await login_session(client_app)
+    assert login_resp.status_code == 302
+
+    verify_resp = await client_app.post(
+        "/oauth/device/verify", data={"user_code": user_code, "action": "approve"}
+    )
+    assert verify_resp.status_code == 200, verify_resp.text
+
+    success = await poll_device_token(client_app, device_code)
+    assert success.status_code == 200, success.text
+    token_body = success.json()
+    assert token_body.get("id_token")
+
+    claims = jwt.decode(token_body["id_token"], options={"verify_signature": False})
+    assert claims["sub"] == "u1"
+    assert claims["aud"] == "client1"
+    assert claims["email"] == "user_rfc@example.test"
+    assert "nonce" not in claims
+    assert "c_hash" not in claims
+    assert claims["at_hash"]
+
+
+async def test_device_flow_without_openid_scope_has_no_id_token(client_app):
+    resp = await start_device_flow(client_app, scope="read")
+    body = resp.json()
+    device_code = body["device_code"]
+    user_code = body["user_code"]
+
+    await login_session(client_app)
+    await client_app.post(
+        "/oauth/device/verify", data={"user_code": user_code, "action": "approve"}
+    )
+
+    success = await poll_device_token(client_app, device_code)
+    assert success.status_code == 200, success.text
+    assert success.json().get("id_token") is None
