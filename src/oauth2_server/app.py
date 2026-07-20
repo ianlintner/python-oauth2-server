@@ -81,7 +81,8 @@ def create_app(
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith("/oauth"):
+        path = request.url.path
+        if path.startswith("/oauth") or path.startswith("/admin/api"):
             response.headers.update(_SECURITY_HEADERS)
         return response
 

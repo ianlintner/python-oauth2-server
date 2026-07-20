@@ -14,7 +14,10 @@ that still returns 200. This port resolves the row by `id` first (via
 `list_all_tokens` newest-200 scan used by `list`, which would silently miss
 older rows) and revokes the actual `access_token` value, so the endpoint
 actually works. An unknown `id` is still a no-op that returns 200, matching
-the "no 404" contract.
+the "no 404" contract — and, since nothing resolved, no `token.revoke`
+audit entry is written either (divergence 12: single-target revoke is now
+audited uniformly with the other single-target mutations, but only when the
+row actually existed).
 """
 
 from __future__ import annotations
@@ -80,11 +83,19 @@ async def get_token(token_id: str, request: Request) -> ORJSONResponse:
 
 
 @router.post("/tokens/{token_id}/revoke")
-async def revoke_token_by_id(token_id: str, request: Request) -> ORJSONResponse:
+async def revoke_token_by_id(
+    token_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+) -> ORJSONResponse:
     storage = request.app.state.storage
+    events = request.app.state.events
     token = await storage.get_token_by_id(token_id)
     if token is not None:
         await storage.revoke_token(token.access_token)
+        await record_audit(
+            storage,
+            events,
+            build_audit(request, actor, "token.revoke", "token", token.id, {}),
+        )
     return ORJSONResponse({"message": "Token revoked"})
 
 

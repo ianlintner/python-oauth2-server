@@ -102,6 +102,23 @@ async def test_list_clients_empty_when_none_exist():
         assert body["total"] == 0
 
 
+async def test_search_percent_matches_literally():
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        await storage.delete_client("client1")
+        await _seed_extra_client(storage, "100%")
+        await _seed_extra_client(storage, "other-client")
+
+        resp = await client.get("/admin/api/clients", params={"search": "0%"})
+        names = [item["name"] for item in resp.json()["items"]]
+        assert "100%" in names
+
+        resp = await client.get("/admin/api/clients", params={"search": "0x"})
+        names = [item["name"] for item in resp.json()["items"]]
+        assert "100%" not in names
+
+
 async def test_list_clients_returns_raw_string_list_fields():
     # Client identity duality gotcha: list/detail expose grant_types/
     # redirect_uris as the raw JSON-encoded strings stored in the DB, not
@@ -185,6 +202,19 @@ async def test_create_client_rejects_empty_name():
         assert resp.json()["error"] == "invalid_request"
 
 
+async def test_create_client_duplicate_client_id_409():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients", json={"name": "Dup Client", "client_id": "client1"}
+        )
+        assert resp.status_code == 409
+        assert resp.json() == {
+            "error": "already_exists",
+            "error_description": "client_id already registered",
+        }
+
+
 # --- Update ---
 
 
@@ -213,6 +243,29 @@ async def test_update_client_404_for_missing():
         await _login(client)
         resp = await client.put("/admin/api/clients/does-not-exist", json={"name": "x"})
         assert resp.status_code == 404
+
+
+async def test_put_client_enabled_false_revokes_tokens():
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        seeded = await storage.get_client("client1")
+        token = Token(
+            id=uuid.uuid4().hex,
+            access_token=uuid.uuid4().hex,
+            client_id="client1",
+            expires_at=_future(),
+        )
+        await storage.save_token(token)
+
+        resp = await client.put(f"/admin/api/clients/{seeded.id}", json={"enabled": False})
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is False
+
+        reloaded_client = await storage.get_client("client1")
+        assert reloaded_client.enabled is False
+        reloaded_token = await storage.get_token_by_access_token(token.access_token)
+        assert reloaded_token.revoked is True
 
 
 # --- Delete ---

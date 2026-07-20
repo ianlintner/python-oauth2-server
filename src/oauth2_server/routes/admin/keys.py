@@ -5,21 +5,24 @@ to `admin_router` (see `routes/admin/__init__.py`), which already carries
 `Depends(require_admin)` as a router-level dependency, so both handlers below
 are guarded without redeclaring it.
 
-Unlike the other Task 8-10 admin mutation endpoints, rotation is not written
-to the audit log — the Rust handler this was ported from doesn't write one
-either (see `.superpowers/sdd/research-keys-rs256.md`); the response's own
-`warning` field is the only record that a rotation happened.
+The Rust handler this was ported from didn't write an audit entry for
+rotation (see `.superpowers/sdd/research-keys-rs256.md`) — divergence 12
+closes that gap: a successful rotation now writes a `key.rotate` audit entry
+(metadata `{"kid", "algorithm"}`) alongside the response's own `warning`
+field, matching every other single-target admin mutation.
 """
 
 from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.keys import generate_signing_key
 from oauth2_server.routes.admin._util import _json_body
+from oauth2_server.routes.admin.guard import AdminActor, require_admin
+from oauth2_server.services.audit import build_audit, record_audit
 
 router = APIRouter()
 
@@ -44,10 +47,14 @@ def _invalid_request(message: str) -> ORJSONResponse:
 
 
 @router.post("/keys/rotate")
-async def rotate_key(request: Request) -> ORJSONResponse:
+async def rotate_key(
+    request: Request, actor: AdminActor = Depends(require_admin)
+) -> ORJSONResponse:
     body = await _json_body(request)
     config = request.app.state.config
     keyset = request.app.state.keyset
+    storage = request.app.state.storage
+    events = request.app.state.events
 
     raw_algorithm = body.get("algorithm")
     # Rust parity: omitting `algorithm` defaults to RS256 regardless of the
@@ -72,6 +79,19 @@ async def rotate_key(request: Request) -> ORJSONResponse:
     new_key = generate_signing_key(algorithm, kid)
     keyset.rotate(new_key, grace_period_hours * 3600)
     keyset.prune_expired()
+
+    await record_audit(
+        storage,
+        events,
+        build_audit(
+            request,
+            actor,
+            "key.rotate",
+            "key",
+            new_key.kid,
+            {"kid": new_key.kid, "algorithm": new_key.algorithm},
+        ),
+    )
 
     return ORJSONResponse(
         {

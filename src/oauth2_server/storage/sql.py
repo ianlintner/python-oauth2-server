@@ -80,6 +80,16 @@ def _insert_stmt(table: str, cols: str) -> str:
     return f"INSERT INTO {table} ({cols}) VALUES ({params})"
 
 
+def _escape_like(value: str) -> str:
+    """Escapes `\\`, `%`, and `_` (backslash first, so it doesn't double-
+    escape the escape characters it just inserted) so a caller-supplied
+    `search` term is matched literally inside the `%...%` wrapper below,
+    rather than `%`/`_` being interpreted as SQL LIKE wildcards. Paired with
+    `ESCAPE '\\'` on every LIKE clause that uses it; works identically on
+    SQLite and Postgres."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class SqlStorage:
     def __init__(
         self,
@@ -193,9 +203,12 @@ class SqlStorage:
     async def list_clients_page(self, q: ListQuery) -> tuple[list[Client], int]:
         col = whitelist_col(q.sort_by, _CLIENT_SORT_COLS)
         order = self._order(q.sort_dir)
-        where = "WHERE LOWER(name) LIKE :pattern OR LOWER(client_id) LIKE :pattern"
+        where = (
+            "WHERE LOWER(name) LIKE :pattern ESCAPE '\\' "
+            "OR LOWER(client_id) LIKE :pattern ESCAPE '\\'"
+        )
         params = {
-            "pattern": f"%{(q.search or '').lower()}%",
+            "pattern": f"%{_escape_like((q.search or '').lower())}%",
             "limit": q.effective_limit(),
             "offset": q.offset,
         }
@@ -305,9 +318,12 @@ class SqlStorage:
     async def list_users_page(self, q: ListQuery) -> tuple[list[User], int]:
         col = whitelist_col(q.sort_by, _USER_SORT_COLS)
         order = self._order(q.sort_dir)
-        where = "WHERE LOWER(username) LIKE :pattern OR LOWER(email) LIKE :pattern"
+        where = (
+            "WHERE LOWER(username) LIKE :pattern ESCAPE '\\' "
+            "OR LOWER(email) LIKE :pattern ESCAPE '\\'"
+        )
         params = {
-            "pattern": f"%{(q.search or '').lower()}%",
+            "pattern": f"%{_escape_like((q.search or '').lower())}%",
             "limit": q.effective_limit(),
             "offset": q.offset,
         }
@@ -428,11 +444,14 @@ class SqlStorage:
         col = whitelist_col(q.sort_by, _TOKEN_SORT_COLS)
         order = self._order(q.sort_dir)
         params: dict = {
-            "pattern": f"%{(q.search or '').lower()}%",
+            "pattern": f"%{_escape_like((q.search or '').lower())}%",
             "limit": q.effective_limit(),
             "offset": q.offset,
         }
-        clauses = ["(LOWER(client_id) LIKE :pattern OR LOWER(COALESCE(user_id, '')) LIKE :pattern)"]
+        clauses = [
+            "(LOWER(client_id) LIKE :pattern ESCAPE '\\' "
+            "OR LOWER(COALESCE(user_id, '')) LIKE :pattern ESCAPE '\\')"
+        ]
         if q.status == "active":
             clauses.append("revoked = :revoked_is AND expires_at > :now")
             params["revoked_is"] = False
