@@ -15,7 +15,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
 from oauth2_server.keys import seed_keyset
-from oauth2_server.middleware import DenylistGuard
+from oauth2_server.middleware import _SECURITY_HEADERS, DenylistGuard
 from oauth2_server.routes.admin import admin_router
 from oauth2_server.routes.admin.guard import AdminAuthError
 from oauth2_server.routes.authorize import router as authorize_router
@@ -30,6 +30,7 @@ from oauth2_server.routes.wellknown import router as wellknown_router
 from oauth2_server.security import derive_session_key
 from oauth2_server.services.events import RecentEventsStore
 from oauth2_server.services.par import ParStore
+from oauth2_server.services.ratelimit import FixedWindowLimiter
 from oauth2_server.storage.base import Storage
 from oauth2_server.storage.sql import SqlStorage
 
@@ -37,14 +38,6 @@ from oauth2_server.storage.sql import SqlStorage
 # both from a source checkout and an installed wheel with the same layout
 # (src/oauth2_server/app.py -> parents[2] == repo root).
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations" / "sql"
-
-_SECURITY_HEADERS = {
-    "Cache-Control": "no-store",
-    "Pragma": "no-cache",
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "no-referrer",
-    "X-Content-Type-Options": "nosniff",
-}
 
 
 def create_app(
@@ -58,6 +51,9 @@ def create_app(
     app.state.storage = storage
     app.state.events = RecentEventsStore()
     app.state.par_store = ParStore()
+    app.state.login_limiter = FixedWindowLimiter(
+        config.login_rate_limit_attempts, config.login_rate_limit_window_secs
+    )
     app.state.keyset = seed_keyset(config)
     # Shared client for outbound OIDC back-channel logout POSTs
     # (routes/logout.py). Tests swap this for an `httpx.MockTransport`-backed
@@ -77,7 +73,8 @@ def create_app(
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith("/oauth"):
+        path = request.url.path
+        if path.startswith("/oauth") or path.startswith("/admin/api"):
             response.headers.update(_SECURITY_HEADERS)
         return response
 

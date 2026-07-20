@@ -150,6 +150,32 @@ async def test_seed_admin_user_skipped_without_password():
     assert await storage.get_user_by_username("admin") is None
 
 
+async def test_seed_admin_user_skipped_for_password_below_floor():
+    from oauth2_server.bootstrap import seed_admin_user
+
+    storage = await make_storage()
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+        seed_password="1234567",  # 7 chars — one below the 8-char floor
+    )
+    assert await seed_admin_user(storage, config) is False
+    assert await storage.get_user_by_username("admin") is None
+
+
+async def test_seed_admin_user_allows_password_at_floor():
+    from oauth2_server.bootstrap import seed_admin_user
+
+    storage = await make_storage()
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+        seed_password="12345678",  # exactly 8 chars — at the floor, allowed
+    )
+    assert await seed_admin_user(storage, config) is True
+    assert await storage.get_user_by_username("admin") is not None
+
+
 def _client() -> Client:
     now = datetime.now(timezone.utc)
     return Client(

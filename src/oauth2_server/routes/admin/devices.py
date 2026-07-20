@@ -8,18 +8,24 @@ as a router-level dependency.
 Unlike `TokenInfo.user_id`, `DeviceInfo.user_id` stays `null` when unset
 (Rust parity — only the token serializer coerces `None` to `""`).
 `POST /device/{code}/expire` always returns 200, even for an unknown device
-code (the underlying `UPDATE ... WHERE device_code = ?` is a silent no-op) —
-no audit entry, matching the Rust handler.
+code (the underlying `UPDATE ... WHERE device_code = ?` is a silent no-op).
+Divergence 12: unlike `token.revoke` (audited only when the row resolves),
+`device.expire` is audited unconditionally, including for an unknown code —
+there's no cheap existence check here (no `get_device_authorization_by_...`
+call on this path), and a no-op expire attempt against a made-up code is
+still an admin action worth recording.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.models import DeviceAuthorization
+from oauth2_server.routes.admin.guard import AdminActor, require_admin
+from oauth2_server.services.audit import build_audit, record_audit
 from oauth2_server.storage.paging import ListQuery, page_envelope
 
 router = APIRouter()
@@ -59,7 +65,15 @@ async def list_devices(
 
 
 @router.post("/device/{device_code}/expire")
-async def expire_device(device_code: str, request: Request) -> ORJSONResponse:
+async def expire_device(
+    device_code: str, request: Request, actor: AdminActor = Depends(require_admin)
+) -> ORJSONResponse:
     storage = request.app.state.storage
+    events = request.app.state.events
     await storage.expire_device_authorization(device_code)
+    await record_audit(
+        storage,
+        events,
+        build_audit(request, actor, "device.expire", "device", device_code, {}),
+    )
     return ORJSONResponse({"message": "Device code expired"})

@@ -68,3 +68,69 @@ async def test_verify_password_async_round_trip():
     h = await hash_password_async("hunter2")
     assert await verify_password_async("hunter2", h)
     assert not await verify_password_async("wrong", h)
+
+
+# ---------------------------------------------------------------------------
+# encode_id_token RS256 matrix (Task 3a-4) — the "RS256 configured but
+# private key is missing" 500 must survive the switch to signing from the
+# keyset's current RS256 key when one exists.
+# ---------------------------------------------------------------------------
+
+
+def test_encode_id_token_rs256_missing_key_still_raises_without_keyset_rs256_key():
+    from oauth2_server.config import Config
+    from oauth2_server.keys import seed_keyset
+    from oauth2_server.security import encode_id_token
+    from oauth2_server.models import IdTokenClaims
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    claims = IdTokenClaims(iss=ISS, sub="u1", aud="c1", exp=now + 600, iat=now)
+    # id_token_alg forced to RS256 with no PEM configured: seed_keyset can't
+    # seed an RS256 key either, so the keyset has none — the pre-existing
+    # 500 (via ValueError) must still fire, not a crash trying to sign with
+    # a missing key.
+    config = Config(jwt_secret=SECRET, id_token_alg="RS256")
+    keyset = seed_keyset(config)
+    assert keyset.current_for_alg("RS256") is None
+
+    with pytest.raises(ValueError, match="RS256 configured but private key is missing"):
+        encode_id_token(claims, SECRET, config=config, keyset=keyset)
+
+
+def test_encode_id_token_uses_keyset_rs256_key_even_without_pem_once_one_exists():
+    from oauth2_server.config import Config
+    from oauth2_server.keys import generate_signing_key, seed_keyset
+    from oauth2_server.security import encode_id_token
+    from oauth2_server.models import IdTokenClaims
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    claims = IdTokenClaims(iss=ISS, sub="u1", aud="c1", exp=now + 600, iat=now)
+    config = Config(jwt_secret=SECRET, id_token_alg="RS256")
+    keyset = seed_keyset(config)
+    # An admin rotation can create an RS256 key even on a config that never
+    # had a PEM -- once the keyset has a current RS256 key, id_tokens sign
+    # with it instead of raising, regardless of the (still-unset) PEM.
+    keyset.rotate(generate_signing_key("RS256", "rs256-manual"), 3600)
+
+    token = encode_id_token(claims, SECRET, config=config, keyset=keyset)
+    assert jwt.get_unverified_header(token)["kid"] == "rs256-manual"
+
+
+def test_encode_id_token_hs256_config_unaffected_by_stray_keyset_rs256_key():
+    from oauth2_server.config import Config
+    from oauth2_server.keys import generate_signing_key, seed_keyset
+    from oauth2_server.security import encode_id_token
+    from oauth2_server.models import IdTokenClaims
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    claims = IdTokenClaims(iss=ISS, sub="u1", aud="c1", exp=now + 600, iat=now)
+    # HS256 config (no PEM, default id_token_alg): an admin RS256 rotation
+    # (rotate defaults to RS256 regardless of the server's key mix) must not
+    # flip id_token signing to RS256 -- only config.id_token_alg gates that.
+    config = Config(jwt_secret=SECRET)
+    assert config.id_token_alg == "HS256"
+    keyset = seed_keyset(config)
+    keyset.rotate(generate_signing_key("RS256", "rs256-surprise"), 3600)
+
+    token = encode_id_token(claims, SECRET, config=config, keyset=keyset)
+    assert jwt.get_unverified_header(token)["alg"] == "HS256"

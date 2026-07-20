@@ -22,7 +22,7 @@ from oauth2_server.app import create_app
 from oauth2_server.config import Config
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import DenylistEntry
-from tests.helpers import make_storage, seed_client, seed_user
+from tests.helpers import login_session, make_storage, post_token, seed_client, seed_user
 
 
 def _now() -> datetime:
@@ -94,6 +94,36 @@ async def test_middleware_blocks_every_route_not_just_health():
         resp = await client.post("/oauth/token", data={"grant_type": "client_credentials"})
         assert resp.status_code == 403
         assert resp.json()["error"] == "access_denied"
+
+
+async def test_middleware_blocked_oauth_response_carries_security_headers():
+    async with build_client_from_ip("198.51.100.55") as client:
+        await _add_denylisted_ip(client.storage, "198.51.100.55")
+
+        resp = await client.post("/oauth/token", data={"grant_type": "client_credentials"})
+        assert resp.status_code == 403
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["pragma"] == "no-cache"
+        assert resp.headers["x-frame-options"] == "DENY"
+        assert resp.headers["referrer-policy"] == "no-referrer"
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+
+async def test_middleware_blocked_admin_api_response_carries_security_headers():
+    """`/admin/api/*` is behind the same short-circuit as `/oauth*` (Task 6
+    review carry-over): `DenylistGuard` is the outermost middleware layer, so
+    a blocked `/admin/api` request never reaches `app.py`'s `security_headers`
+    middleware either, and needs the same explicit stamping."""
+    async with build_client_from_ip("198.51.100.56") as client:
+        await _add_denylisted_ip(client.storage, "198.51.100.56")
+
+        resp = await client.get("/admin/api/users")
+        assert resp.status_code == 403
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["pragma"] == "no-cache"
+        assert resp.headers["x-frame-options"] == "DENY"
+        assert resp.headers["referrer-policy"] == "no-referrer"
+        assert resp.headers["x-content-type-options"] == "nosniff"
 
 
 async def test_middleware_honors_expired_denylist_entries():
@@ -218,3 +248,89 @@ async def test_check_subject_denylisted_fails_open_on_storage_error():
 
     reason = await check_subject_denylisted(storage, "username", "mallory")
     assert reason is None
+
+
+# --- subject-denylist enforcement (login + client auth) ---
+
+
+async def _add_denylist_entry(storage, kind: str, value: str, **overrides) -> DenylistEntry:
+    fields = dict(
+        id=uuid.uuid4().hex,
+        kind=kind,
+        value=value,
+        reason="abuse",
+        created_at=_now(),
+    )
+    fields.update(overrides)
+    entry = DenylistEntry(**fields)
+    await storage.add_denylist_entry(entry)
+    return entry
+
+
+async def test_denylisted_username_cannot_login(client_app):
+    await _add_denylist_entry(client_app.storage, "username", "user_rfc")
+
+    resp = await login_session(client_app)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+
+    # Session must NOT have been established: a follow-up authorize request
+    # still requires login rather than proceeding as an authenticated user.
+    resp = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+        },
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/auth/login"
+
+
+async def test_denylisted_email_cannot_login(client_app):
+    await _add_denylist_entry(client_app.storage, "email", "user_rfc@example.test")
+
+    resp = await login_session(client_app)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+
+
+async def test_expired_username_entry_does_not_block(client_app):
+    await _add_denylist_entry(
+        client_app.storage,
+        "username",
+        "user_rfc",
+        expires_at=_now() - timedelta(hours=1),
+    )
+
+    resp = await login_session(client_app)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+
+
+async def test_denylisted_client_id_rejected_at_token_endpoint(client_app):
+    await _add_denylist_entry(client_app.storage, "client_id", "client1")
+
+    resp = await post_token(
+        client_app, {"grant_type": "client_credentials"}, basic_auth=("client1", "s3cret")
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def test_denylisted_client_id_rejected_at_authorize(client_app):
+    await _add_denylist_entry(client_app.storage, "client_id", "client1")
+
+    resp = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_client"

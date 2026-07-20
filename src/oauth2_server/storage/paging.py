@@ -24,8 +24,20 @@ class ListQuery:
     search: str | None = None
     status: str | None = None
 
+    def __post_init__(self) -> None:
+        # A negative `offset` is clamped to 0 here (rather than left for
+        # each call site to catch) so every consumer of `q.offset` — the SQL
+        # LIMIT/OFFSET params below and each route's `page_envelope` call —
+        # gets a safe value for free. Postgres raises on a negative OFFSET
+        # (unlike SQLite, which silently no-ops it), so this also prevents a
+        # 500 on that backend.
+        if self.offset < 0:
+            self.offset = 0
+
     def effective_limit(self) -> int:
         limit = self.limit if self.limit is not None else _DEFAULT_LIMIT
+        if limit < 0:
+            limit = _DEFAULT_LIMIT
         return min(limit, _MAX_LIMIT)
 
 

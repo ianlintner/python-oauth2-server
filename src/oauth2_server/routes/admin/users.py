@@ -8,11 +8,12 @@ below only exists to pull the (cached) actor identity for the audit trail.
 
 Unlike clients, path `{id}` here IS the storage primary key (`User.id`) — no
 uuid -> key resolution is needed. `PUT` silently ignores an invalid `role`
-(200, unchanged) while `POST .../role` rejects it with 400 — a deliberate
-inconsistency pinned by the Rust test suite and preserved here. Several
-mutations return 200 even for a nonexistent user id, because the underlying
-`UPDATE ... WHERE id = ?` is a silent no-op — only `GET`, `PUT`, and `DELETE`
-404.
+*value* (200, unchanged) while `POST .../role` rejects it with 400 — a
+deliberate inconsistency pinned by the Rust test suite and preserved here;
+an invalid `role` *type* (not a string at all) is still a 400, via
+`UserUpdateBody` below. Several mutations return 200 even for a nonexistent
+user id, because the underlying `UPDATE ... WHERE id = ?` is a silent
+no-op — only `GET`, `PUT`, and `DELETE` 404.
 """
 
 from __future__ import annotations
@@ -23,9 +24,10 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
 from oauth2_server.models import User
-from oauth2_server.routes.admin._util import _json_body
+from oauth2_server.routes.admin._util import _json_body, _parse_body
 from oauth2_server.routes.admin.guard import AdminActor, require_admin
 from oauth2_server.security import hash_password_async
 from oauth2_server.services.audit import build_audit, record_audit
@@ -35,6 +37,21 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 _VALID_ROLES = {"admin", "user"}
+
+
+class UserUpdateBody(BaseModel):
+    """PUT /users/{id} body — all fields optional, unknown keys ignored.
+    `model_fields_set` (not "is not None") is what the handler uses to tell
+    "field provided" from "field defaulted", so partial updates work the
+    same as they did against the raw JSON dict this replaces. Fields are
+    strict-typed so e.g. `{"enabled": "yes"}` 400s instead of silently
+    coercing or persisting a garbage value."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    email: StrictStr | None = None
+    role: StrictStr | None = None
+    enabled: StrictBool | None = None
 
 
 def _user_not_found() -> ORJSONResponse:
@@ -152,19 +169,25 @@ async def update_user(
     if user is None:
         return _user_not_found()
 
-    body = await _json_body(request)
+    body_model, error = await _parse_body(request, UserUpdateBody)
+    if error is not None:
+        return error
 
+    fields_set = body_model.model_fields_set
     updates: dict = {}
-    if "email" in body:
-        updates["email"] = body["email"]
-    if "role" in body and body["role"] in _VALID_ROLES:
-        updates["role"] = body["role"]
-    if "enabled" in body:
-        updates["enabled"] = body["enabled"]
+    if "email" in fields_set:
+        updates["email"] = body_model.email
+    if "role" in fields_set and body_model.role in _VALID_ROLES:
+        updates["role"] = body_model.role
+    if "enabled" in fields_set:
+        updates["enabled"] = body_model.enabled
 
     now = datetime.now(timezone.utc)
     updated = user.model_copy(update={**updates, "updated_at": now})
     await storage.update_user(updated)
+
+    if updates.get("enabled") is False:
+        await _best_effort_revoke_by_user(storage, user_id)
 
     await record_audit(
         storage,

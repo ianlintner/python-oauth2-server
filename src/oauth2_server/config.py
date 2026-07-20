@@ -41,6 +41,11 @@ class Config(BaseSettings):
     # `OAUTH2_ID_TOKEN_ALG` explicitly always wins over that default.
     id_token_alg: str | None = None
     key_rotation_grace_hours: int = 24
+    # Login rate limiting (services/ratelimit.py::FixedWindowLimiter), keyed
+    # per-IP and per-username. Mirrors the Rust `LoginRateLimiter` default of
+    # 10 attempts / 15 minutes (900s).
+    login_rate_limit_attempts: int = 10
+    login_rate_limit_window_secs: int = 900
 
     @field_validator("allowed_origins", mode="before")
     @classmethod

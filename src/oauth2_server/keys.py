@@ -67,6 +67,13 @@ class KeySet:
     def active_keys(self) -> list[SigningKey]:
         return [key for key in self._keys if key.is_active()]
 
+    def active_keys_for_alg(self, alg: str) -> list[SigningKey]:
+        """Every active (current or in-grace) key for `alg`, insertion
+        order. Used to try-all-active-keys fallbacks: decoding an access
+        token whose `kid` is missing/unresolvable (HS256), and verifying a
+        logout `id_token_hint` whose `kid` is missing/unresolvable (RS256)."""
+        return [key for key in self._keys if key.algorithm == alg and key.is_active()]
+
     def rotate(self, new_key: SigningKey, grace_secs: int) -> None:
         """Mark every current key sharing `new_key`'s algorithm as
         non-current with `expires_at = now + grace_secs`, then add
@@ -117,11 +124,21 @@ def _uint_to_b64url(value: int) -> str:
     return base64.urlsafe_b64encode(value.to_bytes(length, "big")).rstrip(b"=").decode()
 
 
+def rsa_public_key(key_material: bytes):
+    """Derive the RSA public key from a PKCS#8 (or PKCS#1) PEM-encoded RSA
+    private key. Never feed private key material straight into PyJWT's
+    verify path (signature verification only ever needs the public half) —
+    this is the one place that parses it out, shared by JWKS publication
+    (`jwk_from_rs256_key`) and RS256 signature verification (access tokens
+    and `id_token_hint` at logout)."""
+    private_key = serialization.load_pem_private_key(key_material, password=None)
+    return private_key.public_key()
+
+
 def jwk_from_rs256_key(key: SigningKey) -> dict:
     """Build a public JWK (RFC 7517) from an RS256 `SigningKey`'s private
     PEM. Never emits the private key material itself."""
-    private_key = serialization.load_pem_private_key(key.key_material, password=None)
-    numbers = private_key.public_key().public_numbers()
+    numbers = rsa_public_key(key.key_material).public_numbers()
     return {
         "kid": key.kid,
         "kty": "RSA",

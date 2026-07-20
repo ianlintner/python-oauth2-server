@@ -140,6 +140,24 @@ async def test_get_token_404_for_missing():
         assert resp.json() == {"error": "token not found"}
 
 
+async def test_token_detail_found_beyond_newest_200():
+    # `list_all_tokens` caps at the newest 200 rows (ORDER BY created_at
+    # DESC LIMIT 200). Resolution must go through `get_token_by_id` (a
+    # direct WHERE id = :id lookup) rather than scanning that capped list,
+    # or a token older than the newest 200 would 404.
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        base = datetime.now(timezone.utc) - timedelta(days=1)
+        target = await _seed_token(storage, created_at=base)
+        for i in range(1, 201):
+            await _seed_token(storage, created_at=base + timedelta(seconds=i))
+
+        resp = await client.get(f"/admin/api/tokens/{target.id}")
+        assert resp.status_code == 200
+        assert resp.json()["id"] == target.id
+
+
 # --- Revoke by row id ---
 
 
@@ -172,6 +190,31 @@ async def test_revoke_token_unknown_id_still_200():
         resp = await client.post("/admin/api/tokens/does-not-exist/revoke")
         assert resp.status_code == 200
         assert resp.json() == {"message": "Token revoked"}
+
+
+async def test_revoke_by_id_works_beyond_newest_200():
+    # Same newest-200 blind spot as detail, but for revoke: the target must
+    # actually flip `revoked` (storage + introspection), not just no-op 200.
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        base = datetime.now(timezone.utc) - timedelta(days=1)
+        target = await _seed_token(storage, created_at=base)
+        for i in range(1, 201):
+            await _seed_token(storage, created_at=base + timedelta(seconds=i))
+
+        introspect_before = await _introspect(client, target.access_token)
+        assert introspect_before.json()["active"] is True
+
+        resp = await client.post(f"/admin/api/tokens/{target.id}/revoke")
+        assert resp.status_code == 200
+        assert resp.json() == {"message": "Token revoked"}
+
+        reloaded = await storage.get_token_by_access_token(target.access_token)
+        assert reloaded.revoked is True
+
+        introspect_after = await _introspect(client, target.access_token)
+        assert introspect_after.json()["active"] is False
 
 
 # --- Bulk revoke ---

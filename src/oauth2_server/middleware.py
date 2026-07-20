@@ -16,11 +16,17 @@ faithful reproduction of the spoofable behavior would carry the vulnerability
 forward for no benefit.
 
 `check_subject_denylisted` is the non-IP counterpart for the other four
-kinds (`user_id`/`username`/`email`/`client_id`). It exists and is unit
-tested here (Rust parity: `crates/oauth2-actix/src/middleware/
-denylist.rs:93` — defined, tested, zero production call sites) but is NOT
-wired into any handler. Whether login/token/introspection should enforce
-subject-kind entries is an explicit Phase 3 decision, not a gap in this task.
+kinds (`user_id`/`username`/`email`/`client_id`). It originated unit tested
+but unwired (Rust parity: `crates/oauth2-actix/src/middleware/
+denylist.rs:93` — defined, tested, zero production call sites); wiring it in
+was an explicit Phase 3 decision. Phase 3a wires three of the four kinds:
+`routes/login.py::login` consults `username` (and the looked-up user's
+`email`) before completing a session login, and `ClientService.authenticate`
+(`services/clients.py`) plus `routes/authorize.py::authorize` both consult
+`client_id` after the client row loads. `user_id` remains unwired — nothing
+in this codebase authenticates a subject by `user_id` pre-auth (sessions and
+tokens are keyed by `username`/`client_id`), so there is no call site to hang
+the check on.
 """
 
 from __future__ import annotations
@@ -40,6 +46,20 @@ _ACCESS_DENIED_BODY = {
     "error_description": "request source is denylisted",
 }
 
+# Shared with `app.py`'s `security_headers` middleware (imported from here,
+# not the reverse — `app.py` already imports `DenylistGuard` from this
+# module, so defining the dict in `app.py` and importing it back here would
+# be circular). Lives here so `DenylistGuard` can stamp these onto its own
+# short-circuited 403 response, which never reaches the `security_headers`
+# middleware layered inside it (see `DenylistGuard`'s class docstring).
+_SECURITY_HEADERS = {
+    "Cache-Control": "no-store",
+    "Pragma": "no-cache",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+}
+
 
 class DenylistGuard:
     """Pure-ASGI middleware — blocks HTTP requests from a denylisted IP.
@@ -47,6 +67,14 @@ class DenylistGuard:
     Fail-open by design (Rust parity): a storage exception during the lookup,
     or a request with no peer address at all, passes the request through
     rather than turning a denylist-storage outage into a global 503.
+
+    Registered as the outermost middleware layer in `create_app` (see
+    `app.py`), so a short-circuited 403 here never passes through the
+    app-level `security_headers` middleware. For an `/oauth*` or `/admin/api*`
+    path, this stamps `_SECURITY_HEADERS` onto the 403 directly so those
+    responses still carry the same `Cache-Control: no-store` etc. as every
+    other `/oauth*`/`/admin/api*` response (Task 6 review carry-over: the
+    `/admin/api` half was originally missed).
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -67,7 +95,10 @@ class DenylistGuard:
                 logger.warning("denylist lookup failed for ip=%s", client.host, exc_info=True)
                 entry = None
             if entry is not None:
-                response = JSONResponse(_ACCESS_DENIED_BODY, status_code=403)
+                path = request.url.path
+                is_oauth_or_admin_api = path.startswith("/oauth") or path.startswith("/admin/api")
+                headers = _SECURITY_HEADERS if is_oauth_or_admin_api else None
+                response = JSONResponse(_ACCESS_DENIED_BODY, status_code=403, headers=headers)
                 await response(scope, receive, send)
                 return
 

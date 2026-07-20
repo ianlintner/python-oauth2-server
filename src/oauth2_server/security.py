@@ -4,10 +4,10 @@ import anyio.to_thread
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from oauth2_server.keys import KeySet, SigningKey
+from oauth2_server.keys import KeySet, SigningKey, rsa_public_key
 from oauth2_server.models import Claims, IdTokenClaims
 
 if TYPE_CHECKING:
@@ -54,13 +54,45 @@ def encode_access_token(claims: Claims, secret: str, *, key: SigningKey | None =
     )
 
 
-def encode_id_token(claims: IdTokenClaims, secret: str, *, config: "Config | None" = None) -> str:
+def encode_id_token(
+    claims: IdTokenClaims,
+    secret: str,
+    *,
+    config: "Config | None" = None,
+    keyset: KeySet | None = None,
+) -> str:
     """Sign an id_token. RS256 when `config.id_token_alg == "RS256"` — signs
-    directly with `config.id_token_private_key_pem` (never via the rotating
-    `KeySet`; Rust parity, see research gotchas) and sets a `kid` header when
-    `config.id_token_kid` is set. Otherwise (or without `config`) falls back
-    to the original HS256(`secret`) encoding."""
+    with `keyset.current_for_alg("RS256")` (kid header from that key) when
+    the keyset has a current RS256 key, so id_tokens automatically follow
+    key rotation and stay verifiable via JWKS after the pre-rotation key's
+    grace period expires and it's pruned. This closes the Rust divergence
+    documented in research-keys-rs256.md gotchas, where id_tokens are always
+    signed from the static env PEM and JWKS publication breaks for them
+    after rotation.
+
+    Falls back to `config.id_token_private_key_pem` directly (kid header
+    from `config.id_token_kid` when set) when the keyset has no current
+    RS256 key — e.g. `keyset` not supplied, or `config.id_token_alg` was
+    forced to RS256 without ever seeding a keyset key. This is also what
+    keeps pre-rotation output byte-identical to the old config-PEM-only
+    behavior: `seed_keyset` seeds the keyset's RS256 key from that exact PEM
+    with kid `config.id_token_kid or "rs256-initial"`, so whenever
+    `id_token_kid` is set (every current RS256-mode caller) both paths sign
+    the same claims with the same key and the same `kid` header — and
+    RSASSA-PKCS1-v1_5 (RS256) is deterministic, so the signature bytes match
+    too.
+
+    Otherwise (or without `config`) falls back to the original
+    HS256(`secret`) encoding."""
     if config is not None and config.id_token_alg == "RS256":
+        signing_key = keyset.current_for_alg("RS256") if keyset is not None else None
+        if signing_key is not None:
+            return jwt.encode(
+                claims.model_dump(exclude_none=True),
+                signing_key.key_material,
+                algorithm="RS256",
+                headers={"kid": signing_key.kid},
+            )
         if not config.id_token_private_key_pem:
             raise ValueError("RS256 configured but private key is missing")
         headers = {"kid": config.id_token_kid} if config.id_token_kid else None
@@ -71,11 +103,6 @@ def encode_id_token(claims: IdTokenClaims, secret: str, *, config: "Config | Non
             headers=headers,
         )
     return jwt.encode(claims.model_dump(exclude_none=True), secret, algorithm="HS256")
-
-
-def _rsa_public_key(pem_material: bytes):
-    private_key = serialization.load_pem_private_key(pem_material, password=None)
-    return private_key.public_key()
 
 
 def decode_access_token(
@@ -96,29 +123,61 @@ def decode_access_token(
         if kid:
             signing_key = keyset.find(kid)
 
-    if signing_key is not None:
-        algorithm = signing_key.algorithm
-        verify_key = (
-            _rsa_public_key(signing_key.key_material)
-            if algorithm == "RS256"
-            else signing_key.key_material
-        )
-    else:
-        algorithm = "HS256"
-        verify_key = secret
-
     # divergence 1 (see research-keys-rs256.md gotchas): the Rust
     # jsonwebtoken v10 default validator rejects any token carrying an `aud`
     # claim when no expected audience is configured — every Claims token has
     # one, so a faithful port of that default would reject every access
     # token. verify_aud=False is a deliberate fix, not a copied bug.
-    payload = jwt.decode(
-        token, verify_key, algorithms=[algorithm], issuer=issuer, options={"verify_aud": False}
-    )
+    if signing_key is not None:
+        algorithm = signing_key.algorithm
+        verify_key = (
+            rsa_public_key(signing_key.key_material)
+            if algorithm == "RS256"
+            else signing_key.key_material
+        )
+        payload = jwt.decode(
+            token, verify_key, algorithms=[algorithm], issuer=issuer, options={"verify_aud": False}
+        )
+    else:
+        # `kid` missing or unresolvable (unknown/pruned): before trusting
+        # the single static `secret`, try every active HS256 keyset key —
+        # otherwise rotating the HS256 key is a no-op for any token that
+        # doesn't carry a resolvable kid (e.g. minted via the legacy
+        # no-keyset path). Falls back to `secret` (and its own error) only
+        # when no active keyset key verifies it, so the exception a caller
+        # sees on total failure is unchanged from before this fallback.
+        payload = _decode_with_any_active_hs256_key(token, issuer, keyset)
+        if payload is None:
+            payload = jwt.decode(
+                token, secret, algorithms=["HS256"], issuer=issuer, options={"verify_aud": False}
+            )
+
     aud = payload.get("aud")
     if isinstance(aud, str):
         payload["aud"] = [aud]
     return Claims(**payload)
+
+
+def _decode_with_any_active_hs256_key(
+    token: str, issuer: str, keyset: KeySet | None
+) -> dict | None:
+    """Try every active HS256 key in `keyset`, returning the first payload
+    that verifies, or `None` (never raises) if `keyset` is absent or no
+    active HS256 key verifies the token."""
+    if keyset is None:
+        return None
+    for key in keyset.active_keys_for_alg("HS256"):
+        try:
+            return jwt.decode(
+                token,
+                key.key_material,
+                algorithms=["HS256"],
+                issuer=issuer,
+                options={"verify_aud": False},
+            )
+        except jwt.PyJWTError:
+            continue
+    return None
 
 
 def hash_password(password: str) -> str:

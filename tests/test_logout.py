@@ -14,7 +14,7 @@ import httpx
 import jwt
 
 from oauth2_server.routes import logout
-from tests.helpers import login_session, reseed_client
+from tests.helpers import login_session, reseed_client, seed_client
 from tests.test_introspection import post_introspect
 from tests.test_token_endpoint import run_code_flow
 
@@ -153,6 +153,43 @@ async def test_backchannel_logout_posts_valid_token(client_app):
     assert isinstance(claims["jti"], str)
     assert claims["events"] == {"http://schemas.openid.net/event/backchannel-logout": {}}
     assert claims["sub"] == "u1"
+
+
+async def test_backchannel_logout_delivers_to_multiple_clients_concurrently(client_app):
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200)
+
+    client_app.app.state.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), timeout=10
+    )
+
+    await reseed_client(
+        client_app,
+        backchannel_logout_uri="https://rp1.example/bc-logout",
+        backchannel_logout_session_required=False,
+    )
+    await seed_client(
+        client_app.storage,
+        client_id="client2",
+        redirect_uris=json.dumps(["https://b.example/cb"]),
+        backchannel_logout_uri="https://rp2.example/bc-logout",
+        backchannel_logout_session_required=False,
+    )
+
+    id_token_hint = _id_token_hint(sub="u1", aud="client1")
+    resp = await client_app.get("/oauth/logout", params={"id_token_hint": id_token_hint})
+    assert resp.status_code == 200, resp.text
+
+    assert len(captured) == 2
+    urls = {str(req.url) for req in captured}
+    assert urls == {"https://rp1.example/bc-logout", "https://rp2.example/bc-logout"}
+    for req in captured:
+        assert req.headers["content-type"] == "application/x-www-form-urlencoded"
+        body = req.content.decode()
+        assert body.startswith("logout_token=")
 
 
 # ---------------------------------------------------------------------------

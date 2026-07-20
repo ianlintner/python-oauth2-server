@@ -186,6 +186,31 @@ async def test_update_user_404_for_missing():
         assert resp.status_code == 404
 
 
+async def test_put_user_rejects_non_bool_enabled():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.put("/admin/api/users/u1", json={"enabled": "not-a-bool"})
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_request"
+
+        reloaded = await client.storage.get_user_by_id("u1")
+        assert reloaded.enabled is True
+
+
+async def test_put_user_rejects_explicit_null_enabled():
+    """An explicit JSON null counts as 'provided' via model_fields_set; before
+    the _parse_body null guard it violated the NOT NULL constraint -> 500."""
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.put("/admin/api/users/u1", json={"enabled": None})
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_request"
+        assert "must not be null" in resp.json()["error_description"]
+
+        reloaded = await client.storage.get_user_by_id("u1")
+        assert reloaded.enabled is True
+
+
 # --- Delete ---
 
 

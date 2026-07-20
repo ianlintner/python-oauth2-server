@@ -26,9 +26,10 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
+from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
 from oauth2_server.models import Client
-from oauth2_server.routes.admin._util import _json_body
+from oauth2_server.routes.admin._util import _json_body, _parse_body
 from oauth2_server.routes.admin.guard import AdminActor, require_admin
 from oauth2_server.services.audit import build_audit, record_audit
 from oauth2_server.storage.paging import ListQuery, page_envelope
@@ -38,6 +39,24 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_GRANT_TYPES = ["authorization_code", "refresh_token"]
 _DEFAULT_AUTH_METHOD = "client_secret_basic"
+
+
+class ClientUpdateBody(BaseModel):
+    """PUT /clients/{id} body — all fields optional, unknown keys ignored.
+    Mirrors `UserUpdateBody` (`routes/admin/users.py`): strict-typed so
+    garbage (e.g. a string for `enabled`, a non-list for `redirect_uris`)
+    400s instead of persisting, and `model_fields_set` distinguishes
+    "provided" from "defaulted" so partial updates behave the same as the
+    raw-dict version they replace."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: StrictStr | None = None
+    redirect_uris: list[StrictStr] | None = None
+    grant_types: list[StrictStr] | None = None
+    scope: StrictStr | None = None
+    token_endpoint_auth_method: StrictStr | None = None
+    enabled: StrictBool | None = None
 
 
 def _client_not_found() -> ORJSONResponse:
@@ -124,7 +143,13 @@ async def create_client(
             status_code=400,
         )
 
-    client_id = body.get("client_id") or f"client-{uuid.uuid4().hex[:12]}"
+    requested_client_id = body.get("client_id")
+    if requested_client_id and await storage.get_client(str(requested_client_id)) is not None:
+        return ORJSONResponse(
+            {"error": "already_exists", "error_description": "client_id already registered"},
+            status_code=409,
+        )
+    client_id = requested_client_id or f"client-{uuid.uuid4().hex[:12]}"
     auth_method = body.get("token_endpoint_auth_method") or _DEFAULT_AUTH_METHOD
     is_public = auth_method == "none"
     client_secret = "" if is_public else str(body.get("client_secret") or uuid.uuid4().hex)
@@ -198,25 +223,31 @@ async def update_client(
     if client is None:
         return _client_not_found()
 
-    body = await _json_body(request)
+    body_model, error = await _parse_body(request, ClientUpdateBody)
+    if error is not None:
+        return error
 
+    fields_set = body_model.model_fields_set
     updates: dict = {}
-    if "name" in body:
-        updates["name"] = body["name"]
-    if "redirect_uris" in body:
-        updates["redirect_uris"] = json.dumps(body["redirect_uris"])
-    if "grant_types" in body:
-        updates["grant_types"] = json.dumps(body["grant_types"])
-    if "scope" in body:
-        updates["scope"] = body["scope"]
-    if "token_endpoint_auth_method" in body:
-        updates["token_endpoint_auth_method"] = body["token_endpoint_auth_method"]
-    if "enabled" in body:
-        updates["enabled"] = body["enabled"]
+    if "name" in fields_set:
+        updates["name"] = body_model.name
+    if "redirect_uris" in fields_set:
+        updates["redirect_uris"] = json.dumps(body_model.redirect_uris)
+    if "grant_types" in fields_set:
+        updates["grant_types"] = json.dumps(body_model.grant_types)
+    if "scope" in fields_set:
+        updates["scope"] = body_model.scope
+    if "token_endpoint_auth_method" in fields_set:
+        updates["token_endpoint_auth_method"] = body_model.token_endpoint_auth_method
+    if "enabled" in fields_set:
+        updates["enabled"] = body_model.enabled
 
     now = datetime.now(timezone.utc)
     updated = client.model_copy(update={**updates, "updated_at": now})
     await storage.update_client(updated)
+
+    if updates.get("enabled") is False:
+        await _best_effort_revoke_by_client(storage, client.client_id)
 
     await record_audit(
         storage,

@@ -10,12 +10,14 @@ by every test below.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timedelta, timezone
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from oauth2_server.models import Claims
 from oauth2_server.security import decode_access_token
 from tests.conftest import build_client_app
 from tests.helpers import login_admin, seed_admin
@@ -293,3 +295,167 @@ async def test_logout_rejects_rs256_hint_when_pem_not_configured(client_app):
     resp = await client_app.get("/oauth/logout", params={"id_token_hint": hint})
     assert resp.status_code == 400, resp.text
     assert resp.json()["error"] == "invalid_request"
+
+
+# ---------------------------------------------------------------------------
+# Rotation-safe id_token signing + keyset-aware hint/access verification
+# (Task 3a-4 / research-keys-rs256.md gotchas: Rust always signs id_tokens
+# from the static env PEM, so an RP verifying via JWKS breaks once that key
+# is rotated out and pruned. The Python port signs id_tokens with the
+# keyset's *current* RS256 key instead, and widens logout hint / access
+# token verification to consult the keyset rather than a single static
+# secret/PEM.)
+# ---------------------------------------------------------------------------
+
+
+async def test_id_token_pre_rotation_unchanged(rsa_pem):
+    """No rotation: id_token kid/signature come from the seeded keyset key,
+    which *is* the env PEM (`seed_keyset`) — output must be identical to
+    signing straight from `config.id_token_private_key_pem`."""
+    async with _rs256_app(rsa_pem) as client:
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        id_token = resp.json()["id_token"]
+
+        header = jwt.get_unverified_header(id_token)
+        assert header["alg"] == "RS256"
+        assert header["kid"] == "test-rs256-key"
+
+        jwks_resp = await client.get("/.well-known/jwks.json")
+        jwk = jwks_resp.json()["keys"][0]
+        assert jwk["kid"] == "test-rs256-key"
+        public_key = _public_key_from_jwk(jwk)
+
+        claims = jwt.decode(id_token, public_key, algorithms=["RS256"], audience="client1")
+        assert claims["iss"] == ISSUER
+        assert claims["sub"] == "u1"
+
+
+async def test_id_token_signed_with_current_keyset_key_after_rotation(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+        rotate_resp = await client.post("/admin/api/keys/rotate", json={"algorithm": "RS256"})
+        assert rotate_resp.status_code == 200, rotate_resp.text
+        new_kid = rotate_resp.json()["kid"]
+        assert new_kid != "test-rs256-key"
+
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        id_token = resp.json()["id_token"]
+
+        header = jwt.get_unverified_header(id_token)
+        assert header["alg"] == "RS256"
+        assert header["kid"] == new_kid
+
+        jwks_resp = await client.get("/.well-known/jwks.json")
+        jwk = next(k for k in jwks_resp.json()["keys"] if k["kid"] == new_kid)
+        public_key = _public_key_from_jwk(jwk)
+
+        claims = jwt.decode(id_token, public_key, algorithms=["RS256"], audience="client1")
+        assert claims["iss"] == ISSUER
+        assert claims["sub"] == "u1"
+
+
+async def test_logout_accepts_hint_signed_by_rotated_out_key_during_grace(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        id_token_hint = resp.json()["id_token"]
+        old_kid = jwt.get_unverified_header(id_token_hint)["kid"]
+        assert old_kid == "test-rs256-key"
+
+        await seed_admin(client.storage)
+        await login_admin(client)
+        rotate_resp = await client.post("/admin/api/keys/rotate", json={"algorithm": "RS256"})
+        assert rotate_resp.status_code == 200, rotate_resp.text
+        assert rotate_resp.json()["kid"] != old_kid
+
+        # The old key is now non-current but still within its grace period,
+        # so a hint it signed pre-rotation must still verify -- not a 400.
+        logout_resp = await client.get("/oauth/logout", params={"id_token_hint": id_token_hint})
+        assert logout_resp.status_code == 200, logout_resp.text
+
+
+async def test_logout_rejects_hint_signed_by_pruned_key_after_grace(rsa_pem):
+    """Once the old key's grace period has elapsed and it's been physically
+    pruned from the keyset, a hint it signed must be rejected outright --
+    not resurrected via the static `config.id_token_private_key_pem`
+    fallback (which happens to equal the original signing key here, since
+    `_rs256_app` seeds the keyset from that same PEM). See the invariant
+    comment on `_rs256_hint_verify_materials` in routes/logout.py: that
+    fallback is only for a keyset with *zero* active RS256 keys, which
+    never happens here because rotation always leaves a current key."""
+    async with _rs256_app(rsa_pem) as client:
+        resp, _code = await run_code_flow(client, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        id_token_hint = resp.json()["id_token"]
+        old_kid = jwt.get_unverified_header(id_token_hint)["kid"]
+        assert old_kid == "test-rs256-key"
+
+        await seed_admin(client.storage)
+        await login_admin(client)
+
+        rotate_resp = await client.post(
+            "/admin/api/keys/rotate",
+            json={"algorithm": "RS256", "grace_period_hours": 0},
+        )
+        assert rotate_resp.status_code == 200, rotate_resp.text
+        assert rotate_resp.json()["kid"] != old_kid
+
+        # `grace_period_hours=0` sets `expires_at = now` at rotation time, so
+        # the old key is *usually* already pruned by the `prune_expired()`
+        # call inside the rotate handler above -- but `is_active()` compares
+        # with a strict `<`, so that's a timing race, not a guarantee. Force
+        # the old key's expiry into the definite past directly on the
+        # keyset so the second rotate's prune below is deterministic
+        # regardless of how fast this test happens to run.
+        keyset = client.app.state.keyset
+        for key in keyset._keys:
+            if key.kid == old_kid:
+                key.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+        # Rotate again -- `prune_expired()` runs inside `rotate_key` and
+        # physically removes the now-expired old key from the keyset.
+        rotate_resp2 = await client.post("/admin/api/keys/rotate", json={"algorithm": "RS256"})
+        assert rotate_resp2.status_code == 200, rotate_resp2.text
+        assert keyset.find(old_kid) is None
+
+        logout_resp = await client.get("/oauth/logout", params={"id_token_hint": id_token_hint})
+        assert logout_resp.status_code == 400, logout_resp.text
+        assert logout_resp.json() == {
+            "error": "invalid_request",
+            "error_description": "invalid id_token_hint",
+        }
+
+
+async def test_hs256_rotation_decodes_with_active_keys(client_app):
+    await seed_admin(client_app.storage)
+    await login_admin(client_app)
+
+    rotate_resp = await client_app.post("/admin/api/keys/rotate", json={"algorithm": "HS256"})
+    assert rotate_resp.status_code == 200, rotate_resp.text
+
+    keyset = client_app.app.state.keyset
+    config = client_app.app.state.config
+    rotated_key = keyset.current_for_alg("HS256")
+    assert rotated_key.kid == rotate_resp.json()["kid"]
+
+    claims = Claims.new("u1", "client1", "read", 3600, config.issuer)
+    # A kid-less token signed with the newly-rotated HS256 key (as if the
+    # `kid` header didn't survive transport, or an older caller minted it
+    # via the legacy no-keyset path with the rotated key's material).
+    # decode_access_token must try every active keyset key before giving up
+    # on the static `jwt_secret` -- otherwise rotating the HS256 key is a
+    # no-op for any token that doesn't carry a resolvable kid.
+    token = jwt.encode(
+        claims.to_payload(),
+        rotated_key.key_material,
+        algorithm="HS256",
+        headers={"typ": "at+JWT"},
+    )
+
+    decoded = decode_access_token(
+        token, "definitely-not-" + config.jwt_secret, config.issuer, keyset=keyset
+    )
+    assert decoded.sub == "u1"

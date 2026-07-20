@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import secrets
 from urllib.parse import unquote_plus
 
 from oauth2_server.errors import OAuthError
+from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import Client
 from oauth2_server.storage.base import Storage
+
+logger = logging.getLogger(__name__)
+
+_UNKNOWN_OR_DISABLED_CLIENT_MESSAGE = "unknown or disabled client"
 
 
 class ClientService:
@@ -37,7 +43,20 @@ class ClientService:
 
         client = await self._storage.get_client(client_id)
         if client is None or not client.enabled:
-            raise OAuthError("invalid_client", "unknown or disabled client")
+            raise OAuthError("invalid_client", _UNKNOWN_OR_DISABLED_CLIENT_MESSAGE)
+
+        # Subject-kind denylist (Phase 3a): a denylisted client_id is
+        # rejected the same way as an unknown/disabled one — identical
+        # error/description/status — so the response carries no oracle
+        # distinguishing "denylisted" from "never registered".
+        denylist_reason = await check_subject_denylisted(
+            self._storage, "client_id", client.client_id
+        )
+        if denylist_reason is not None:
+            logger.warning(
+                "client auth blocked: client_id is denylisted (reason=%s)", denylist_reason
+            )
+            raise OAuthError("invalid_client", _UNKNOWN_OR_DISABLED_CLIENT_MESSAGE)
 
         if client.is_public():
             if client_secret:

@@ -76,79 +76,158 @@ From Phase 2 (`docs/plans/2026-07-19-python-oauth2-port-phase-2.md` → "Global 
    advertises `true`).
 9. Dashboard summary does not swallow storage errors into zeros; a broken backend 500s.
 
+From Phase 3a (`docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` → "Global Constraints"):
+10. Subject-kind denylist entries are ENFORCED (login username/email, client-auth client_id) — Rust
+    defines `check_subject_denylisted` but never wires it. Task 2 (commits `53ca096`, `195f9f9`).
+11. id_tokens are signed with the keyset's current RS256 key (kid header) instead of the static env
+    PEM — fixes the documented Rust rotation trap where rotated deployments break RP id_token
+    verification. Task 4 (commits `29e53d3`, `393673b`).
+12. Admin single-token revoke, device expire, and key rotation are audited (Rust audits none of them).
+    Task 5 (commits `e2a75ca`, `e91ba6d`).
+13. Login rate-limiter success resets only the per-username rate-limit key — the per-IP window
+    survives a successful login. Rust (and the original Phase 3a Task 1 brief) resets both keys on
+    success; this is a deliberate strengthening: one valid credential must not let an attacker reset the
+    per-IP throttle mid credential-stuffing run. Task 1 (commit `e5d794d`).
+
 ## Phase 3 candidates
 
 Seeded from item 12 above, the still-open minor findings in `.superpowers/sdd/progress.md`, and gaps
-noted during Phase 2 implementation:
+noted during Phase 2 implementation. Phase 3a (branch `claude/rust-oauth2-port-phase-3a`, plan
+`docs/plans/2026-07-20-python-oauth2-port-phase-3a.md`, Tasks 1–7; see `.superpowers/sdd/progress.md`
+"3a Task N" lines for the full per-task ledger) closed most of the items below; the ones still open
+after 3a are called out explicitly and carried forward to 3b/3c.
 
 - **Rate limiting** (former item 12) — `/oauth/device/verify` and the token endpoints have no
   rate/attempt limiting.
+  **Done (3a) — login only:** Task 1 (commits `f5be8dd`, `e5d794d`) — `FixedWindowLimiter` (per-IP and
+  per-username, fixed window) gates `POST /auth/login`; pinned by
+  `tests/test_rfc_compliance.py::test_login_rate_limited_after_repeated_failures`. **Still open:**
+  `/oauth/token` and `/oauth/device/verify` have no rate/attempt limiting — needs the Rust
+  `oauth2-ratelimit` crate researched before porting; deferred to Phase 3c.
 - **Subject-kind denylist enforcement is unwired** — `check_subject_denylisted(storage, kind, value)`
   (`src/oauth2_server/middleware.py`) is fully implemented and unit-tested
   (`tests/test_denylist_middleware.py`) but no route calls it; only the IP-based `DenylistGuard`
   middleware is wired into the request path. Login/registration/token issuance don't consult the
   `username`/`email` denylist kinds at all today.
+  **Done (3a):** Task 2 (commits `53ca096`, `195f9f9`) — `username`/`email` consulted at login,
+  `client_id` consulted at client auth (`ClientService.authenticate`) and `GET /oauth/authorize`; a hit
+  gets the identical generic error as "unknown"/"bad credentials" (no oracle). `user_id` stays
+  deliberately unwired — nothing authenticates a subject by `user_id` pre-auth. Pinned by
+  `tests/test_rfc_compliance.py::test_denylisted_username_blocked_at_login`. New minor(open) surfaced
+  during review: client-auth denylist check has a timing asymmetry vs. the unknown-client path, and the
+  fail-open behavior lacks an end-to-end test — carried to 3b/3c.
 - **Multi-instance persistence for `ParStore` / `KeySet` / `RecentEventsStore`** — all three are
   in-process singletons on `app.state` (see README "Single-process state caveats"); Phase 3 should back
   them with shared storage (DB or Redis) so PAR pushes, key rotation, and the admin events feed work
   correctly behind more than one worker/instance. Note the `signing_keys` table already exists in the
-  schema but is intentionally orphaned by both servers today.
+  schema but is intentionally orphaned by both servers today. **Still open** — deliberately out of scope
+  for 3a (see the Task 7 self-review); carried to 3b/3c.
 - No Postgres integration tests anywhere in the suite (pre-existing gap, noted again at Task 6); the
   whole suite runs against SQLite only, aside from the manual cross-server parity smoke in the README.
+  **Still open.**
 - `revoke_tokens_by_user_id` (storage layer) has no direct unit test — only indirect coverage via the
-  admin bulk-revoke and logout routes that call it.
+  admin bulk-revoke and logout routes that call it. **Still open.**
 - `tests/test_admin_tokens.py::test_bulk_revoke_writes_audit_entries` asserts a substring of the audit
-  action name rather than a parsed revoked-token count.
+  action name rather than a parsed revoked-token count. **Still open.**
 - Denylist upsert quirk: `POST /admin/api/denylist` on an existing `(kind, value)` pair returns the
   *new* POST-generated id while the row keeps its original id — a ported Rust quirk, not fixed in
-  Python; worth deciding whether to keep parity or fix in Phase 3.
+  Python; worth deciding whether to keep parity or fix in Phase 3. **Still open** — deliberately kept as
+  Rust parity in 3a (see the Task 7 self-review).
 - The denylist-blocked 403 response bypasses the security-headers middleware on `/oauth/*` routes
   (headers are applied after the denylist short-circuit).
+  **Done (3a):** Task 6 (commit `56b1b30`) stamped `_SECURITY_HEADERS` directly onto `DenylistGuard`'s
+  403 for `/oauth*` paths (it's the outermost middleware layer, so the short-circuit never reaches
+  `app.py`'s `security_headers` middleware); pinned by
+  `tests/test_denylist_middleware.py::test_middleware_blocked_oauth_response_carries_security_headers`.
+  Task 7 review carry-over then widened the same condition to also cover `/admin/api*`, pinned by
+  `test_middleware_blocked_admin_api_response_carries_security_headers` (this commit).
 - Admin audit entries' `created_by` field could reuse `actor.actor_email` more consistently across
-  admin routes (currently set ad hoc per handler).
+  admin routes (currently set ad hoc per handler). **Still open.**
 - `GET /oauth/check_session` inherits `X-Frame-Options: DENY` from the global security-headers
   middleware — currently harmless (no session-management consumer embeds it in an iframe yet), but a
-  latent trap if/when that's added; the OP iframe needs to be frameable by the RP.
+  latent trap if/when that's added; the OP iframe needs to be frameable by the RP. **Still open** —
+  deliberately out of scope for 3a (see the Task 7 self-review).
 - The disabled-dynamic-registration 403 body shape was never verified against the Rust handler's exact
-  shape (Python's choice is secure but unpinned as an intentional-parity assertion).
+  shape (Python's choice is secure but unpinned as an intentional-parity assertion). **Still open.**
 - PAR entries are consumed (deleted) before login on `GET /oauth/authorize`, matching a Rust parity
   quirk rather than a deliberate Python design choice; `authorize` also still lacks duplicate-query-param
   rejection (Rust has it) and its error pages don't set `Cache-Control: no-store`.
+  **Done (3a) — the latter two:** Task 6 (commit `56b1b30`) added duplicate-query-param rejection (any
+  repeated `GET /oauth/authorize` query key → 400 `invalid_request` before any other processing,
+  including PAR resolution — pinned by `tests/test_authorize.py::test_duplicate_query_parameter_rejected`
+  and `tests/test_rfc_compliance.py::test_authorize_rejects_duplicate_query_params`); the no-store header
+  on authorize's JSON error responses was verified already present via the existing `/oauth*`
+  security-headers middleware coverage (`tests/test_authorize.py::test_authorize_error_response_has_no_store_cache_control`),
+  no code change needed. Task 7 review carry-over added
+  `tests/test_par.py::test_par_request_uri_duplicate_query_param_does_not_consume_entry`, pinning that a
+  duplicated `request_uri` key 400s *without* consuming the PAR entry. **Still open:** PAR entries are
+  still consumed before login (Rust parity quirk) — deliberately kept in 3a (see the Task 7 self-review).
 - `device.py`'s scope-check inlines a `set(...).issubset(...)` instead of reusing the
-  `scope_is_subset` helper in `services/auth.py` (pre-existing inconsistency, cosmetic).
+  `scope_is_subset` helper in `services/auth.py` (pre-existing inconsistency, cosmetic). **Still open.**
 - `anyio` is used directly (`anyio.to_thread` for argon2 off-loading) but is currently only a transitive
   dependency (via `httpx`/`starlette`) — consider pinning it explicitly in `pyproject.toml`.
+  **Done (3a):** Task 6 (commit `56b1b30`) — `anyio>=4` added to `pyproject.toml` runtime dependencies.
 - **RS256 rotation trap** — id_tokens always sign with the env PEM (never the keyset); after an admin
   RS256 rotation + grace expiry, the initial key drops out of JWKS while the JWKS fallback only fires
   when zero RS256 keys remain — RPs verifying id_tokens via JWKS break silently. Needs either
   keyset-signed id_tokens or the initial PEM key pinned unexpirable.
+  **Done (3a):** Task 4 (commits `29e53d3`, `393673b`) — RS256 id_tokens now sign with the keyset's
+  current key (kid header from that key) instead of the static env PEM (divergence 11); logout's RS256
+  hint verification resolves the hint's `kid` against the keyset (falling back to trying each active
+  RS256 key). Pinned by `tests/test_rfc_compliance.py::test_id_token_kid_matches_jwks_after_rotation`
+  and `tests/test_jwks_rs256.py::test_id_token_signed_with_current_keyset_key_after_rotation`.
 - **Admin sessions have no server-side revocation** — they are client-held signed cookies (role/email
   stamped at login) with no server-side revocation; disable/demote/delete does not terminate a live
-  admin session; needs server-side session store or short-TTL re-validation against storage.
+  admin session; needs server-side session store or short-TTL re-validation against storage. **Still
+  open** — deliberately out of scope for 3a (see the Task 7 self-review).
 - **Admin token revoke by id can silently no-op for older rows** — admin `POST /tokens/{id}/revoke`
   resolves via `list_all_tokens` (`LIMIT 200`) — rows older than the newest 200 silently no-op (and
   `GET /tokens/{id}` 404s for them while the paged list can show them); needs a `get_token_by_id`
   storage method.
+  **Done (3a):** Task 3 (commit `b3c6081`) — added `get_token_by_id` to the storage Protocol/`SqlStorage`;
+  `GET /admin/api/tokens/{id}` and `POST /admin/api/tokens/{id}/revoke` resolve via it instead of
+  scanning the newest-200 list.
 - **Back-channel logout is awaited inline** — each registered RP's logout_token POST is awaited
   sequentially with a 10s timeout (`routes/logout.py`); N unreachable RPs stall the caller's logout up
   to 10s each. Move dispatch to a background task or bounded gather.
+  **Done (3a):** Task 6 (commit `56b1b30`) — dispatch is now `asyncio.gather` over per-client send
+  coroutines with `return_exceptions=True`, bounded by a `Semaphore(5)`; pinned by
+  `test_backchannel_logout_delivers_to_multiple_clients_concurrently`.
 - **Seed-admin password has no strength floor** — `OAUTH2_SEED_PASSWORD` accepts any length in
   `bootstrap.py` while the admin API enforces 8+ characters for user passwords; align the policy.
+  **Done (3a):** Task 6 (commit `56b1b30`) — `seed_admin_user` now logs a warning and skips seeding
+  (returns `False`) for passwords shorter than 8 characters, matching the admin API floor.
 - **Admin PUT handlers skip type validation and the disable cascade** — `PUT /admin/api/users/{id}` and
   `PUT /admin/api/clients/{id}` feed raw JSON into `model_copy(update=...)` (e.g. `{"enabled":"yes"}`
   persists a string, which asyncpg would reject with a 500), and PUT `enabled:false` does not revoke
   tokens while `POST .../enabled` does. Add Pydantic body models and unify the cascade.
+  **Done (3a):** Task 5 (commits `e2a75ca`, `e91ba6d`) — both PUT handlers now take all-optional Pydantic
+  body models (invalid types → 400 `invalid_request`); PUT `enabled: false` triggers the same
+  best-effort token revocation as `POST .../enabled`.
 - **Admin client create with a duplicate caller-supplied `client_id`** hits the unique constraint and
   returns a 500; users-create returns a clean 409 — align to 409.
+  **Done (3a):** Task 5 (commits `e2a75ca`, `e91ba6d`) — `POST /admin/api/clients` pre-checks via
+  `get_client` and returns 409 `already_exists` for a duplicate `client_id`.
 - **Negative `limit`/`offset` unvalidated on admin list endpoints** — `limit=-1` becomes `LIMIT -1`
   (unbounded, cap bypass) on SQLite and a 500 on Postgres; add `ge=0` bounds to the query params.
+  **Done (3a):** Task 5 (commits `e2a75ca`, `e91ba6d`) — negative `limit`/`offset` are clamped to the
+  default/0 in `ListQuery` bounds handling.
 - **Audit coverage non-uniform** — admin single-token revoke (`POST /tokens/{id}/revoke`), device
   expire, and key rotation write no audit entries while bulk revokes and CRUD do (Rust parity, but
   worth unifying).
+  **Done (3a) (divergence 12):** Task 5 (commits `e2a75ca`, `e91ba6d`) — single-token revoke now audits
+  `token.revoke`, device expire audits `device.expire`, and key rotation audits `key.rotate`.
 - **Unknown-kid JWT fallback pins HS256 trust to `jwt_secret` forever** — `decode_access_token` falls
   back to the static secret rather than trying active keyset HS256 keys, so HS256 rotation is a no-op
   for stateless decode (impact negligible today — the DB row is authoritative everywhere).
+  **Done (3a):** Task 4 (commits `29e53d3`, `393673b`) — before the static-secret fallback,
+  `decode_access_token` now tries each active HS256 keyset key on an unresolvable/missing `kid`; pinned
+  by `test_hs256_rotation_decodes_with_active_keys`.
 - **No Cache-Control headers on `/admin/api/*` responses** — the security-headers middleware only
   covers `/oauth*`; session-authenticated admin GETs are heuristically cacheable.
+  **Done (3a):** Task 5 (commits `e2a75ca`, `e91ba6d`) — the app-level `security_headers` middleware now
+  also matches `/admin/api` paths; pinned by `test_admin_api_responses_have_no_store`.
 - **LIKE search wildcards unescaped in admin search** — `%`/`_` in the search term act as wildcards
   (parameters are bound, so injection-safe; cosmetic result pollution only).
+  **Done (3a):** Task 5 (commits `e2a75ca`, `e91ba6d`) — `%`/`_` in `search` are escaped (`ESCAPE '\'`)
+  so they match literally; strengthened with wildcard-decoy tests.

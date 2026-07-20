@@ -14,6 +14,7 @@ surfaces a caller bug immediately instead of pretending the hint didn't exist.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import time
@@ -22,10 +23,10 @@ from urllib.parse import quote, urlparse
 
 import httpx
 import jwt
-from cryptography.hazmat.primitives import serialization
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
 
+from oauth2_server.keys import KeySet, rsa_public_key
 from oauth2_server.models import Client
 
 router = APIRouter()
@@ -33,6 +34,11 @@ router = APIRouter()
 # OIDC Back-Channel Logout 1.0 §2.2: logout_token lifetime and event claim.
 _BACKCHANNEL_LOGOUT_TTL_SECS = 120
 _BACKCHANNEL_EVENT = "http://schemas.openid.net/event/backchannel-logout"
+
+# Caps how many back-channel logout POSTs are in flight at once, so a logout
+# fanning out to many subscribing RPs doesn't open unbounded concurrent
+# connections.
+_BACKCHANNEL_CONCURRENCY = 5
 
 
 class _InvalidHint(Exception):
@@ -46,16 +52,46 @@ def _error(description: str, status: int = 400) -> ORJSONResponse:
     )
 
 
-def _decode_hint(id_token_hint: str, config) -> dict:
+def _rs256_hint_verify_materials(config, keyset: KeySet | None, kid: str | None) -> list[bytes]:
+    """Ordered list of RS256 private-key PEM materials to try verifying an
+    RS256-alg `id_token_hint` against: the `kid`-matched keyset key when one
+    resolves, else every active RS256 keyset key (covers a missing/unknown
+    `kid`, and a `kid` that's still active but rotated-out during grace),
+    else — only when the keyset holds no RS256 key at all — the static
+    `config.id_token_private_key_pem` as a last resort (mirrors the JWKS
+    fallback in `routes/wellknown.py`)."""
+    materials: list[bytes] = []
+    if keyset is not None:
+        found = keyset.find(kid) if kid else None
+        if found is not None and found.algorithm == "RS256":
+            materials.append(found.key_material)
+        else:
+            materials.extend(key.key_material for key in keyset.active_keys_for_alg("RS256"))
+    # Invariant: this branch is only reachable when the keyset holds zero
+    # active RS256 keys. Once RS256 is in use, `seed_keyset` always adds one
+    # and `KeySet.rotate` always adds a fresh `is_current=True` key before
+    # any pruning happens -- so a live keyset never has zero active RS256
+    # keys. Do not widen this fallback (e.g. to "kid not found"): an expired,
+    # pruned key's hint would otherwise verify against the static PEM and be
+    # silently resurrected. See test_logout_rejects_hint_signed_by_pruned_key_after_grace.
+    if not materials and config.id_token_private_key_pem:
+        materials.append(config.id_token_private_key_pem.encode())
+    return materials
+
+
+def _decode_hint(id_token_hint: str, config, keyset: KeySet | None) -> dict:
     """Decode and verify `id_token_hint`, alg pinned from the JOSE header.
 
-    HS256 (verified against `jwt_secret`) and RS256 (verified against the
-    *public* half of `config.id_token_private_key_pem`) are supported. RS256
-    is only accepted when that PEM is configured — an RS256 hint with no PEM
-    configured is rejected rather than silently falling back (kept strict,
-    per the module docstring's documented divergence from the Rust server).
-    Raises `_InvalidHint` on any decode/verification failure, including an
-    unsupported alg — never returns a claims dict for an untrusted token.
+    HS256 is verified against `jwt_secret`. RS256 resolves the hint's `kid`
+    against the keyset (falling back to every active RS256 keyset key, then
+    the static PEM — see `_rs256_hint_verify_materials`) so a hint signed by
+    a since-rotated-out key still verifies during its grace period, closing
+    the same rotation gap `encode_id_token` fixes for issuance. RS256 with
+    no keyset key and no PEM configured is rejected rather than silently
+    falling back (kept strict, per the module docstring's documented
+    divergence from the Rust server). Raises `_InvalidHint` on any
+    decode/verification failure, including an unsupported alg — never
+    returns a claims dict for an untrusted token.
     """
     try:
         header = jwt.get_unverified_header(id_token_hint)
@@ -64,33 +100,42 @@ def _decode_hint(id_token_hint: str, config) -> dict:
 
     alg = header.get("alg")
     if alg == "HS256":
-        verify_key = config.jwt_secret
-    elif alg == "RS256":
-        if not config.id_token_private_key_pem:
-            raise _InvalidHint
+        try:
+            return jwt.decode(
+                id_token_hint,
+                config.jwt_secret,
+                algorithms=["HS256"],
+                issuer=config.issuer,
+                options={"verify_aud": False},
+            )
+        except jwt.PyJWTError as exc:
+            raise _InvalidHint from exc
+
+    if alg != "RS256":
+        raise _InvalidHint
+
+    last_error: Exception | None = None
+    for material in _rs256_hint_verify_materials(config, keyset, header.get("kid")):
         try:
             # Never feed the private PEM straight into PyJWT's RSA verify
             # path (see research-keys-rs256.md gotchas) — extract the public
             # key explicitly.
-            private_key = serialization.load_pem_private_key(
-                config.id_token_private_key_pem.encode(), password=None
-            )
+            public_key = rsa_public_key(material)
         except ValueError as exc:
-            raise _InvalidHint from exc
-        verify_key = private_key.public_key()
-    else:
-        raise _InvalidHint
+            last_error = exc
+            continue
+        try:
+            return jwt.decode(
+                id_token_hint,
+                public_key,
+                algorithms=["RS256"],
+                issuer=config.issuer,
+                options={"verify_aud": False},
+            )
+        except jwt.PyJWTError as exc:
+            last_error = exc
 
-    try:
-        return jwt.decode(
-            id_token_hint,
-            verify_key,
-            algorithms=[alg],
-            issuer=config.issuer,
-            options={"verify_aud": False},
-        )
-    except jwt.PyJWTError as exc:
-        raise _InvalidHint from exc
+    raise _InvalidHint from last_error
 
 
 def _extract_audiences(claims: dict) -> list[str]:
@@ -169,6 +214,18 @@ async def _dispatch_backchannel_logout(
         pass
 
 
+async def _dispatch_backchannel_logout_bounded(
+    semaphore: asyncio.Semaphore,
+    http_client: httpx.AsyncClient,
+    client: Client,
+    config,
+    sub: str | None,
+    sid: str | None,
+) -> None:
+    async with semaphore:
+        await _dispatch_backchannel_logout(http_client, client, config, sub, sid)
+
+
 def _redirect_script(url: str) -> str:
     """Build the `<script>` tag that JS-redirects to `url` after a short delay.
 
@@ -211,6 +268,7 @@ def _render_frontchannel_page(
 async def logout(request: Request):
     config = request.app.state.config
     storage = request.app.state.storage
+    keyset = request.app.state.keyset
     params = request.query_params
 
     id_token_hint = params.get("id_token_hint")
@@ -226,7 +284,7 @@ async def logout(request: Request):
     # --- 1. id_token_hint: decode, aud check, best-effort user-token revoke ---
     if id_token_hint:
         try:
-            claims = _decode_hint(id_token_hint, config)
+            claims = _decode_hint(id_token_hint, config, keyset)
         except _InvalidHint:
             return _error("invalid id_token_hint")
 
@@ -250,8 +308,10 @@ async def logout(request: Request):
 
     clients = await storage.list_all_clients()
 
-    # --- 3. Back-channel logout: fire-and-forget POST to every subscriber ---
+    # --- 3. Back-channel logout: bounded-concurrent POST to every subscriber ---
     http_client = request.app.state.http_client
+    semaphore = asyncio.Semaphore(_BACKCHANNEL_CONCURRENCY)
+    dispatches = []
     for client in clients:
         if not client.backchannel_logout_uri:
             continue
@@ -260,7 +320,16 @@ async def logout(request: Request):
             # OIDC Back-Channel Logout 1.0 §2.5: a logout_token must identify
             # a session via sub and/or sid — skip clients we can't identify.
             continue
-        await _dispatch_backchannel_logout(http_client, client, config, sub, token_sid)
+        dispatches.append(
+            _dispatch_backchannel_logout_bounded(
+                semaphore, http_client, client, config, sub, token_sid
+            )
+        )
+    if dispatches:
+        # return_exceptions=True: _dispatch_backchannel_logout already
+        # swallows per-client failures internally, but this ensures one
+        # client's dispatch can never abort the others or the logout itself.
+        await asyncio.gather(*dispatches, return_exceptions=True)
 
     # --- post_logout_redirect_uri validation, shared by both branches below ---
     redirect_url: str | None = None

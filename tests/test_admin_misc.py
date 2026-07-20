@@ -16,6 +16,7 @@ import pytest
 
 from oauth2_server import security
 from oauth2_server.models import DeviceAuthorization, Token, User
+from oauth2_server.storage.paging import ListQuery
 from tests.conftest import build_client_app
 from tests.helpers import login_admin, seed_admin, seed_client
 from tests.test_device_flow import poll_device_token, start_device_flow
@@ -126,6 +127,63 @@ async def test_expire_device_unknown_code_still_200():
         assert resp.json() == {"message": "Device code expired"}
 
 
+# --- Single-target audit uniformity (divergence 12) ---
+
+
+async def test_single_revoke_device_expire_and_rotate_are_audited():
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+
+        token = Token(
+            id=uuid.uuid4().hex,
+            access_token=uuid.uuid4().hex,
+            client_id="client1",
+            expires_at=_future(),
+        )
+        await storage.save_token(token)
+        resp = await client.post(f"/admin/api/tokens/{token.id}/revoke")
+        assert resp.status_code == 200
+
+        device = await _seed_device(storage, user_code="AUDT-0001")
+        resp = await client.post(f"/admin/api/device/{device.device_code}/expire")
+        assert resp.status_code == 200
+
+        resp = await client.post("/admin/api/keys/rotate", json={"algorithm": "HS256"})
+        assert resp.status_code == 200
+
+        items, _total = await storage.list_audit_log(ListQuery())
+        actions = {e.action for e in items}
+        assert "token.revoke" in actions
+        assert "device.expire" in actions
+        assert "key.rotate" in actions
+
+        token_entry = next(e for e in items if e.action == "token.revoke")
+        assert token_entry.target_kind == "token"
+        assert token_entry.target_id == token.id
+
+        device_entry = next(e for e in items if e.action == "device.expire")
+        assert device_entry.target_kind == "device"
+        assert device_entry.target_id == device.device_code
+
+        key_entry = next(e for e in items if e.action == "key.rotate")
+        assert key_entry.target_kind == "key"
+        assert '"algorithm"' in key_entry.metadata
+        assert '"kid"' in key_entry.metadata
+
+
+async def test_revoke_token_unknown_id_not_audited():
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+
+        resp = await client.post("/admin/api/tokens/does-not-exist/revoke")
+        assert resp.status_code == 200
+
+        items, _total = await storage.list_audit_log(ListQuery())
+        assert not any(e.action == "token.revoke" for e in items)
+
+
 # --- Dashboard ---
 
 
@@ -228,6 +286,37 @@ async def test_dashboard_does_not_swallow_storage_errors():
 
         with pytest.raises(Exception):
             await client.get("/admin/api/dashboard")
+
+
+# --- Paging bounds ---
+
+
+async def test_negative_limit_clamped():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.get("/admin/api/users", params={"limit": -1})
+        assert resp.status_code == 200
+        assert resp.json()["limit"] == 25
+
+
+async def test_negative_offset_clamped():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.get("/admin/api/users", params={"offset": -5})
+        assert resp.status_code == 200
+        assert resp.json()["offset"] == 0
+
+
+# --- Security headers ---
+
+
+async def test_admin_api_responses_have_no_store():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.get("/admin/api/users")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["x-frame-options"] == "DENY"
 
 
 # --- Capabilities ---
