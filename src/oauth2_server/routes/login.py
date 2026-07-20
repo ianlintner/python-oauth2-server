@@ -2,11 +2,18 @@
 
 Ported from `crates/oauth2-actix/src/handlers/login.rs` (`login_page` for the
 error-banner mapping, `login_submit` for credential verification,
-disabled-account rejection, and the safe `return_to` redirect). Rate limiting
-(`LoginRateLimiter` / `too_many_attempts`) is out of scope for this port —
-the `too_many_attempts` error key is still supported by the banner mapping
-below so a future rate limiter (or an upstream proxy) can redirect here with
-it, but nothing in this module currently produces that redirect itself.
+disabled-account rejection, and the safe `return_to` redirect).
+
+Rate limiting mirrors Rust's `LoginRateLimiter`: before any credential
+lookup, `app.state.login_limiter` (`services/ratelimit.py::FixedWindowLimiter`)
+is checked for both `login:ip:{ip}` and `login:user:{username}` — either key
+being over its limit short-circuits straight to the `too_many_attempts`
+redirect (with `Retry-After`) without touching storage or Argon2 at all. Both
+keys are checked (and thus recorded) on *every* attempt, matching the Rust
+comment "Check on every attempt — not just failures — to prevent evasion via
+unknown usernames"; unlike Rust (whose token bucket has no reset), a
+*successful* login resets both keys here so a user who mistypes their
+password a few times isn't left throttled after finally getting it right.
 """
 
 from __future__ import annotations
@@ -96,6 +103,25 @@ async def login(request: Request):
     username = form.get("username", "")
     password = form.get("password", "")
 
+    # Rate-limit by IP and by username to block credential-stuffing, before
+    # ever touching storage. Checked in this order (IP first) so an
+    # already-exhausted IP short-circuits without also recording an attempt
+    # against the username key.
+    limiter = request.app.state.login_limiter
+    client_host = request.client.host if request.client else "unknown"
+    ip_key = f"login:ip:{client_host}"
+    user_key = f"login:user:{username}"
+
+    retry_after = limiter.check(ip_key)
+    if retry_after is None:
+        retry_after = limiter.check(user_key)
+    if retry_after is not None:
+        return RedirectResponse(
+            "/auth/login?error=too_many_attempts",
+            status_code=303,
+            headers={"Retry-After": str(retry_after)},
+        )
+
     storage = request.app.state.storage
     user = await storage.get_user_by_username(username)
 
@@ -107,6 +133,10 @@ async def login(request: Request):
         or not await verify_password_async(password, user.password_hash)
     ):
         return RedirectResponse("/auth/login?error=invalid_credentials", status_code=303)
+
+    # Successful login — clear both rate-limit keys (see module docstring).
+    limiter.reset(ip_key)
+    limiter.reset(user_key)
 
     # `return_to` was saved to the session by GET /oauth/authorize (or
     # GET /oauth/device/verify) before redirecting here; read it before

@@ -30,6 +30,7 @@ from oauth2_server.routes.wellknown import router as wellknown_router
 from oauth2_server.security import derive_session_key
 from oauth2_server.services.events import RecentEventsStore
 from oauth2_server.services.par import ParStore
+from oauth2_server.services.ratelimit import FixedWindowLimiter
 from oauth2_server.storage.base import Storage
 from oauth2_server.storage.sql import SqlStorage
 
@@ -58,6 +59,9 @@ def create_app(
     app.state.storage = storage
     app.state.events = RecentEventsStore()
     app.state.par_store = ParStore()
+    app.state.login_limiter = FixedWindowLimiter(
+        config.login_rate_limit_attempts, config.login_rate_limit_window_secs
+    )
     app.state.keyset = seed_keyset(config)
     # Shared client for outbound OIDC back-channel logout POSTs
     # (routes/logout.py). Tests swap this for an `httpx.MockTransport`-backed
