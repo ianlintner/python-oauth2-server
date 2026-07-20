@@ -14,6 +14,7 @@ surfaces a caller bug immediately instead of pretending the hint didn't exist.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import time
@@ -33,6 +34,11 @@ router = APIRouter()
 # OIDC Back-Channel Logout 1.0 §2.2: logout_token lifetime and event claim.
 _BACKCHANNEL_LOGOUT_TTL_SECS = 120
 _BACKCHANNEL_EVENT = "http://schemas.openid.net/event/backchannel-logout"
+
+# Caps how many back-channel logout POSTs are in flight at once, so a logout
+# fanning out to many subscribing RPs doesn't open unbounded concurrent
+# connections.
+_BACKCHANNEL_CONCURRENCY = 5
 
 
 class _InvalidHint(Exception):
@@ -208,6 +214,18 @@ async def _dispatch_backchannel_logout(
         pass
 
 
+async def _dispatch_backchannel_logout_bounded(
+    semaphore: asyncio.Semaphore,
+    http_client: httpx.AsyncClient,
+    client: Client,
+    config,
+    sub: str | None,
+    sid: str | None,
+) -> None:
+    async with semaphore:
+        await _dispatch_backchannel_logout(http_client, client, config, sub, sid)
+
+
 def _redirect_script(url: str) -> str:
     """Build the `<script>` tag that JS-redirects to `url` after a short delay.
 
@@ -290,8 +308,10 @@ async def logout(request: Request):
 
     clients = await storage.list_all_clients()
 
-    # --- 3. Back-channel logout: fire-and-forget POST to every subscriber ---
+    # --- 3. Back-channel logout: bounded-concurrent POST to every subscriber ---
     http_client = request.app.state.http_client
+    semaphore = asyncio.Semaphore(_BACKCHANNEL_CONCURRENCY)
+    dispatches = []
     for client in clients:
         if not client.backchannel_logout_uri:
             continue
@@ -300,7 +320,16 @@ async def logout(request: Request):
             # OIDC Back-Channel Logout 1.0 §2.5: a logout_token must identify
             # a session via sub and/or sid — skip clients we can't identify.
             continue
-        await _dispatch_backchannel_logout(http_client, client, config, sub, token_sid)
+        dispatches.append(
+            _dispatch_backchannel_logout_bounded(
+                semaphore, http_client, client, config, sub, token_sid
+            )
+        )
+    if dispatches:
+        # return_exceptions=True: _dispatch_backchannel_logout already
+        # swallows per-client failures internally, but this ensures one
+        # client's dispatch can never abort the others or the logout itself.
+        await asyncio.gather(*dispatches, return_exceptions=True)
 
     # --- post_logout_redirect_uri validation, shared by both branches below ---
     redirect_url: str | None = None

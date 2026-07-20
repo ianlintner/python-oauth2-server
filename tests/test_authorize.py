@@ -23,6 +23,52 @@ async def test_rfc9207_iss_included_in_authorization_response(app_with_session):
     assert "code" in q
 
 
+async def test_duplicate_query_parameter_rejected(app_with_session):
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params=[
+            ("response_type", "code"),
+            ("response_type", "code"),
+            ("client_id", "client1"),
+            ("redirect_uri", "https://a.example/cb"),
+            ("scope", "read"),
+        ],
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"] == "invalid_request"
+    assert "duplicate query parameter" in body["error_description"]
+
+
+async def test_duplicate_query_parameter_rejected_before_client_validation(app_with_session):
+    # A repeated key is rejected even when client_id doesn't correspond to
+    # any registered client — the dupe check runs before anything else.
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params=[
+            ("response_type", "code"),
+            ("client_id", "no-such-client"),
+            ("client_id", "no-such-client"),
+        ],
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+    assert "duplicate query parameter" in resp.json()["error_description"]
+
+
+async def test_authorize_error_response_has_no_store_cache_control(app_with_session):
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "unknown-client",
+            "redirect_uri": "https://a.example/cb",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.headers["cache-control"] == "no-store"
+
+
 async def test_unregistered_redirect_uri_never_redirects(app_with_session):
     await login_session(app_with_session)
     resp = await app_with_session.get(

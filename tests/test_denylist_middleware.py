@@ -96,6 +96,19 @@ async def test_middleware_blocks_every_route_not_just_health():
         assert resp.json()["error"] == "access_denied"
 
 
+async def test_middleware_blocked_oauth_response_carries_security_headers():
+    async with build_client_from_ip("198.51.100.55") as client:
+        await _add_denylisted_ip(client.storage, "198.51.100.55")
+
+        resp = await client.post("/oauth/token", data={"grant_type": "client_credentials"})
+        assert resp.status_code == 403
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["pragma"] == "no-cache"
+        assert resp.headers["x-frame-options"] == "DENY"
+        assert resp.headers["referrer-policy"] == "no-referrer"
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+
 async def test_middleware_honors_expired_denylist_entries():
     async with build_client_from_ip("198.51.100.8") as client:
         await _add_denylisted_ip(

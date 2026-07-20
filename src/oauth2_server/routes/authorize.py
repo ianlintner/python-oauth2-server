@@ -4,7 +4,11 @@ Ported from `crates/oauth2-actix/src/handlers/oauth.rs::authorize`. This is a
 Phase-1 subset: authorization_code + PKCE (+ RFC 9126 PAR) only — no JAR/hybrid.
 
 Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
-0. If `request_uri` is present, resolve the pushed authorization request
+0. Any repeated query key (e.g. `?response_type=code&response_type=code`) ->
+   400 JSON `invalid_request` *before anything else*, including PAR
+   resolution and `client_id` validation (Rust parity). A well-formed
+   request never repeats a key.
+1. If `request_uri` is present, resolve the pushed authorization request
    (RFC 9126) *before* anything else. Consumption is destructive
    (single-use): unknown/expired -> 400 JSON `invalid_request` (never a
    redirect — no `redirect_uri` can be trusted yet); the entry's `client_id`
@@ -15,15 +19,15 @@ Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
    `code_challenge_method`, `nonce`, `resource`, `state`,
    `authorization_details`, `claims`, `acr_values`. `client_id` and
    `response_type` always come from the query string.
-1. Unknown/disabled `client_id` -> 400 JSON, never redirect (redirecting would let
+2. Unknown/disabled `client_id` -> 400 JSON, never redirect (redirecting would let
    an attacker exfiltrate data to an unregistered endpoint).
-2. `redirect_uri` not an exact match against the client's registered list -> 400
+3. `redirect_uri` not an exact match against the client's registered list -> 400
    JSON, never redirect, for the same reason.
-3. Everything else is delivered via redirect to `redirect_uri` (`error=...`), since
+4. Everything else is delivered via redirect to `redirect_uri` (`error=...`), since
    the redirect target is now trusted.
-4. Unauthenticated (or `prompt=login`/expired `max_age`) -> save `return_to` in the
+5. Unauthenticated (or `prompt=login`/expired `max_age`) -> save `return_to` in the
    session and 302 to `/auth/login`.
-5. Success -> 302 to `redirect_uri` with `code`, `state` (if given), and `iss`
+6. Success -> 302 to `redirect_uri` with `code`, `state` (if given), and `iss`
    (RFC 9207, to prevent authorization-response mix-up attacks).
 """
 
@@ -109,9 +113,19 @@ async def authorize(request: Request):
     config = request.app.state.config
     storage = request.app.state.storage
 
+    # --- 0. Reject a repeated query key outright (Rust parity) — before any
+    # other processing, including PAR resolution and client_id validation. A
+    # well-formed request never repeats a key, so this can only reject
+    # malformed/ambiguous input (e.g. parameter-pollution attempts). ---
+    seen_keys: set[str] = set()
+    for key, _ in params.multi_items():
+        if key in seen_keys:
+            return _error_page(400, "invalid_request", "duplicate query parameter")
+        seen_keys.add(key)
+
     client_id = params.get("client_id")
 
-    # --- 0. Resolve a pushed authorization request, if referenced (RFC 9126) ---
+    # --- 1. Resolve a pushed authorization request, if referenced (RFC 9126) ---
     merged: dict[str, str] = dict(params)
     request_uri = params.get("request_uri")
     if request_uri is not None:
@@ -127,7 +141,7 @@ async def authorize(request: Request):
     redirect_uri = merged.get("redirect_uri")
     state = merged.get("state")
 
-    # --- 1. client_id must exist and be enabled — 400, never redirect ---
+    # --- 2. client_id must exist and be enabled — 400, never redirect ---
     client = await storage.get_client(client_id) if client_id else None
     denylist_reason = (
         await check_subject_denylisted(storage, "client_id", client_id) if client_id else None
@@ -142,11 +156,11 @@ async def authorize(request: Request):
             )
         return _error_page(400, "invalid_client", "unknown or disabled client_id")
 
-    # --- 2. redirect_uri must exact-match the registered list — 400, never redirect ---
+    # --- 3. redirect_uri must exact-match the registered list — 400, never redirect ---
     if not redirect_uri or redirect_uri not in client.redirect_uri_list():
         return _error_page(400, "invalid_request", "redirect_uri is not registered for this client")
 
-    # --- 3. From here on, errors are delivered via redirect ---
+    # --- 4. From here on, errors are delivered via redirect ---
     if "authorization_code" not in client.grant_type_list():
         return _error_redirect(
             redirect_uri,
@@ -206,7 +220,7 @@ async def authorize(request: Request):
                 config.issuer,
             )
 
-    # --- 4. Require an authenticated session ---
+    # --- 5. Require an authenticated session ---
     # OIDC Core §3.1.2.1: `prompt` is a space-delimited list of values.
     prompt_values = (params.get("prompt") or "").split()
     force_login = "login" in prompt_values or "select_account" in prompt_values
@@ -261,7 +275,7 @@ async def authorize(request: Request):
         request.session["return_to_ts"] = int(time.time())
         return RedirectResponse("/auth/login", status_code=302)
 
-    # --- 5. Success: mint the authorization code and redirect back to the client ---
+    # --- 6. Success: mint the authorization code and redirect back to the client ---
     auth_code = await AuthorizeService(storage, config).issue_code(
         client,
         user_id,

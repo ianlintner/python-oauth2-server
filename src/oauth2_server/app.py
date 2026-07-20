@@ -15,7 +15,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
 from oauth2_server.keys import seed_keyset
-from oauth2_server.middleware import DenylistGuard
+from oauth2_server.middleware import _SECURITY_HEADERS, DenylistGuard
 from oauth2_server.routes.admin import admin_router
 from oauth2_server.routes.admin.guard import AdminAuthError
 from oauth2_server.routes.authorize import router as authorize_router
@@ -38,14 +38,6 @@ from oauth2_server.storage.sql import SqlStorage
 # both from a source checkout and an installed wheel with the same layout
 # (src/oauth2_server/app.py -> parents[2] == repo root).
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations" / "sql"
-
-_SECURITY_HEADERS = {
-    "Cache-Control": "no-store",
-    "Pragma": "no-cache",
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "no-referrer",
-    "X-Content-Type-Options": "nosniff",
-}
 
 
 def create_app(
