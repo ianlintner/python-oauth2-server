@@ -2,6 +2,7 @@ import base64
 import json
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,52 @@ async def make_storage() -> SqlStorage:
     s = SqlStorage("sqlite+aiosqlite://", MIGRATIONS)
     await s.init()
     return s
+
+
+@asynccontextmanager
+async def build_mongo_client_app(uri: str, config_overrides: dict | None = None):
+    """Mongo analogue of `tests.conftest.build_client_app`: build a full
+    FastAPI app on `MongoStorage` bound to a real mongod at `uri`, seed the
+    same `client1`/`user_rfc` fixtures the SQL path uses, and yield an httpx
+    ASGI client carrying `.storage`/`.app` — used by the
+    `RUN_TESTCONTAINERS=1`-gated Mongo end-to-end tests
+    (`tests/test_mongo_e2e.py`, `tests/test_rfc_compliance.py::
+    test_mongo_backend_storage_contract`).
+
+    `MongoStorage` (and `create_app`/`Config`/httpx) are imported lazily
+    inside this function, not at module level — `motor` is an optional
+    dependency (`pip install oauth2-server[mongo]`), so importing
+    `tests.helpers` itself (which every test module in the suite does,
+    directly or transitively) must never require it. Callers are
+    responsible for gating on `RUN_TESTCONTAINERS=1` (+ motor/testcontainers
+    importability) before calling this — see the module docstring of
+    `tests/test_mongo_storage.py` for the shared gating pattern.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    from oauth2_server.app import create_app
+    from oauth2_server.config import Config
+    from oauth2_server.storage.mongo import MongoStorage
+
+    storage = MongoStorage(uri)
+    await storage.init()
+    await seed_client(storage)
+    await seed_user(storage)
+
+    overrides = {
+        "jwt_secret": "unit-test-secret-not-for-production-0123456789abcdef",
+        "issuer": "https://auth.example.com",
+        "dynamic_registration_enabled": True,
+        **(config_overrides or {}),
+    }
+    config = Config(**overrides)
+    app = create_app(config, storage)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://auth.example.com"
+    ) as c:
+        c.storage = storage
+        c.app = app
+        yield c
 
 
 async def seed_client(storage, **overrides) -> Client:

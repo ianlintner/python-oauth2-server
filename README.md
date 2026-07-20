@@ -278,6 +278,123 @@ does not expose a verification flag for it). Operators who list any address in
 confirm that provider actually verifies email ownership before granting the OAuth app access to
 production.
 
+## Phase 3d: MongoDB Backend
+
+Phase 3d (see `docs/plans/2026-07-20-python-oauth2-port-phase-3d.md` and `docs/PHASE2-BACKLOG.md` →
+"Accepted divergences" 28–31) adds a second `Storage` implementation, `MongoStorage`
+(`src/oauth2_server/storage/mongo.py`, motor async driver), satisfying the exact same `Storage`
+protocol as the default SQL backend — "same data model, second engine."
+
+**Backend selection** is automatic and scheme-based: `storage/factory.py::create_storage(config)`
+dispatches on `OAUTH2_DATABASE_URL`'s scheme. `mongodb://` or `mongodb+srv://` selects
+`MongoStorage`; anything else (`sqlite+aiosqlite://`, `postgresql+asyncpg://`, ...) falls through
+to the existing SQL backend unchanged. `mongodb+srv://` (DNS-SRV discovery, e.g. for MongoDB
+Atlas) is supported here — divergence 31; the Rust server hard-rejects it to dodge a
+hickory-proto DNS-resolver advisory that doesn't apply to this driver stack.
+
+**Install:** `motor` is an optional dependency, not a default one — the default SQLite/Postgres
+deployment path never imports it. Install it with the `mongo` extra:
+
+```bash
+pip install "oauth2-server[mongo]"
+# or, from this repo with uv:
+uv sync --extra mongo
+```
+
+Constructing `create_storage()` against a `mongodb://` URL without the extra installed raises a
+`RuntimeError` naming the missing package and the install command above, rather than an opaque
+`ImportError`.
+
+**Database name** comes from the URL path — `mongodb://host:27017/my_db` binds to `my_db`;
+a URL with no path (or `/`) falls back to `oauth2`.
+
+**Cross-server parity:** documents are the JSON-mode serialization of the same `oauth2_server.
+models` Pydantic models the SQL backend uses — same field names, the same JSON-array-as-string
+convention (`Client.redirect_uris` etc. stay JSON strings, never BSON arrays), and the same
+RFC 3339-string datetime convention (never BSON dates) — so a single MongoDB database can be
+shared across a Python server and the Rust reference server's own Mongo backend, the same
+single-database cross-server parity guarantee Phase 1 established for Postgres.
+
+**Fixed gaps vs. the Rust Mongo backend** (divergences 28–30 — this port does not copy Rust's
+Mongo stub gaps):
+
+- `revoke_token_family` / `revoke_tokens_by_user_id` are actually implemented (`update_many` +
+  `modified_count`), where Rust's trait defaults silently no-op on Mongo — meaning on Rust,
+  RFC 9700 §4.13.2 refresh-token-replay cascade revocation and OIDC-logout token revocation
+  simply don't work when Mongo is the backend. Fixed here.
+- Denylist + audit-log storage (`denylist`/`audit_log` collections) are fully implemented and
+  `supports_denylist()`/`supports_audit_log()` return `True` — Rust stubs both as no-ops
+  returning `False`, silently disabling the admin denylist/audit features on Mongo.
+- `mark_authorization_code_used` / `mark_device_authorization_used` use an atomic
+  `find_one_and_update({..., used: false}, {$set: {used: true}})` single-claim (matching the SQL
+  backend's `... AND used = false` guard) instead of Rust's non-atomic `update_one`, closing a
+  double-spend race.
+
+**Caveats (deliberate, Cosmos-DB-compatibility / Rust-parity choices — not bugs):**
+
+- **App-side full-collection scans for every list/page method.** `list_all_*`/`list_*_page`/
+  `list_denylist`/`list_audit_log` all do a `find({})` full scan, then sort/filter/paginate in
+  Python — there is no server-side `$sort`/`$skip`/`$limit` pipeline. This is O(collection size)
+  per call and matches the Rust Mongo backend's own choice (made for Azure Cosmos DB for MongoDB
+  compatibility, whose aggregation-pipeline support is more limited than real MongoDB's).
+- **No TTL indexes.** Expired tokens, authorization codes, device authorizations, and denylist
+  entries are never automatically deleted — they accumulate in their collections until an
+  operator prunes them manually (or a future migration adds `expireAfterSeconds` indexes). The
+  SQL backend has the same gap (no scheduled cleanup job either), so this isn't a Mongo-specific
+  regression, just worth calling out since MongoDB TTL indexes are the idiomatic fix and aren't
+  wired up.
+- **`list_all_tokens` truncates to 200; `list_all_device_authorizations` truncates to 500** —
+  both are newest-first (`created_at` desc) caps matching the SQL backend's `LIMIT`, ported for
+  Rust parity, not a Mongo-specific restriction.
+- **Denylist upsert is non-atomic.** `add_denylist_entry`'s "keep the original row's `id` on a
+  `(kind, value)` conflict" behavior is a read-then-write (`find_one` then `replace_one(upsert=
+  True)`), not a single atomic operation — a benign race under concurrent admin writes to the
+  same `(kind, value)` pair (admin-only, low-traffic surface). Rust's own Mongo backend has the
+  same non-atomicity.
+
+**Testing:** the full `MongoStorage` contract suite (`tests/test_mongo_storage.py`,
+`tests/test_mongo_admin.py`), the app-level end-to-end suite (`tests/test_mongo_e2e.py` — full
+HTTP flows including the refresh-replay family-cascade proof above and a real `DenylistGuard` 403),
+and the compliance pin (`tests/test_rfc_compliance.py::test_mongo_backend_storage_contract`) all
+self-skip unless `RUN_TESTCONTAINERS=1` is set (and `motor`+`testcontainers` are installed — both
+are dev dependencies), starting a real `mongo:7.0` container via `testcontainers`:
+
+```bash
+RUN_TESTCONTAINERS=1 uv run pytest tests/test_mongo_storage.py tests/test_mongo_admin.py \
+  tests/test_mongo_e2e.py tests/test_rfc_compliance.py -q
+```
+
+`bash scripts/gate.sh` (the default CI gate) never requires Docker — it runs SQLite-only, and
+every Mongo-gated test self-skips without the env var. CI runs the Mongo suite in a separate,
+parallel `db-tests` job (`.github/workflows/ci.yml`) that does require Docker (available on
+GitHub-hosted `ubuntu-latest` runners).
+
+A documentation-grade, manually-runnable cross-backend HTTP smoke — `docker run` a real mongod,
+start the Python server against it, register a client, run client_credentials + introspect +
+revoke over curl — lives in `scripts/mongo_parity_smoke.sh`:
+
+```bash
+bash scripts/mongo_parity_smoke.sh
+```
+
+```
+== 1. Start mongod ==
+mongod started on port 27017, database 'oauth2_smoke'
+== 2. Start the Python server against MongoStorage ==
+waiting for the server to become ready...
+== 3. Register a client (RFC 7591, persisted into MongoStorage) ==
+{"client_id": "client_...", "client_secret": "...", ...}
+registered client_id=client_...
+== 4. client_credentials grant ==
+{"access_token": "eyJhbGci...", "token_type": "Bearer", "expires_in": 3600, "scope": "read"}
+== 5. Introspect the client_credentials access token ==
+{"active": true, "scope": "read", "client_id": "client_...", ...}
+== 6. Revoke the client_credentials token, re-introspect ==
+{"active": false}
+
+== Result: PASS ==
+```
+
 ## Running
 
 ```bash

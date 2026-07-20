@@ -17,3 +17,27 @@ jobs:
         run: uv sync --locked
       - name: Gate (ruff + pytest)
         run: bash scripts/gate.sh
+
+  # MongoDB backend contract suite (Phase 3d) — deliberately NOT a `needs:`
+  # of `gate` above (runs in parallel) and NOT folded into `scripts/gate.sh`,
+  # so the default SQLite gate stays fast and never requires Docker. Docker
+  # is available on ubuntu-latest GitHub-hosted runners, so the
+  # `testcontainers` python package (already a dev dependency) can start its
+  # own mongod — no `services:` container needed, keeping the local-dev and
+  # CI code paths for the Mongo suite identical (same
+  # `RUN_TESTCONTAINERS=1 uv run pytest ...` invocation either way).
+  db-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies (incl. mongo extra)
+        run: uv sync --locked --all-extras
+      - name: MongoStorage contract + e2e + compliance pin (testcontainers)
+        env:
+          RUN_TESTCONTAINERS: "1"
+        run: >-
+          uv run pytest tests/test_mongo_storage.py tests/test_mongo_admin.py
+          tests/test_mongo_e2e.py tests/test_rfc_compliance.py -q

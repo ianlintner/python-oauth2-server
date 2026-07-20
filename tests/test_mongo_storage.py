@@ -15,6 +15,7 @@ duplicate-key / atomic-claim assertions can't leak across tests.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -335,6 +336,38 @@ async def test_duplicate_authorization_code_raises(storage):
     await storage.save_authorization_code(_auth_code())
     with pytest.raises(OAuthError):
         await storage.save_authorization_code(_auth_code())
+
+
+async def test_authorization_code_round_trips_rar_details_and_dpop_bound_access_token(storage):
+    """`tests/test_mongo_serde.py` only proves `authorization_details` is
+    OMITTED when None (unit-level, no mongod). This proves the non-None
+    case round-trips through a REAL mongod: an authorization code carrying
+    RFC 9396 `authorization_details` (RAR), then a Token whose
+    `access_token` is a JWT-shaped string carrying an RFC 9449 `cnf.jkt`
+    claim. DPoP binding has no dedicated storage column — the `cnf.jkt`
+    claim lives inside the JWT `access_token` string itself
+    (`services/tokens.py`), so proving that string round-trips byte-for-byte
+    through `MongoStorage` IS the DPoP-bound-token persistence proof; RAR's
+    `authorization_details` is a genuine JSON-string field that needs its
+    own present-value assertion."""
+    await storage.save_client(_client())
+    await storage.save_user(_user())
+
+    rar_details = json.dumps([{"type": "payment_initiation", "actions": ["initiate"]}])
+    code = _auth_code("c-rar").model_copy(update={"authorization_details": rar_details})
+    await storage.save_authorization_code(code)
+    got_code = await storage.get_authorization_code("c-rar")
+    assert got_code.authorization_details == rar_details
+
+    dpop_bound_jwt = (
+        "eyJhbGciOiJIUzI1NiJ9."
+        "eyJjbmYiOnsiamt0IjoiYWJjZGVmMTIzIn0sInN1YiI6ImNsaWVudDEifQ."
+        "sig-not-verified-here"
+    )
+    await storage.save_token(_token(dpop_bound_jwt))
+    got_token = await storage.get_token_by_access_token(dpop_bound_jwt)
+    assert got_token is not None
+    assert got_token.access_token == dpop_bound_jwt
 
 
 async def test_mark_authorization_code_used_is_atomic_single_claim(storage):
