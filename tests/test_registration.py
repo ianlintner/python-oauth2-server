@@ -130,6 +130,79 @@ async def test_fragment_redirect_uri_rejected(client):
     assert resp.json()["error"] == "invalid_client_metadata"
 
 
+async def test_invalid_scheme_backchannel_logout_uri_rejected(client):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "backchannel_logout_uri": "gopher://app.example/bc-logout",
+        },
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"] == "invalid_client_metadata"
+    assert body["error_description"] == (
+        "backchannel_logout_uri must be an absolute http(s) URL without fragment"
+    )
+
+
+async def test_fragment_frontchannel_logout_uri_rejected(client):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "frontchannel_logout_uri": "https://app.example/fc-logout#frag",
+        },
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"] == "invalid_client_metadata"
+    assert body["error_description"] == (
+        "frontchannel_logout_uri must be an absolute http(s) URL without fragment"
+    )
+
+
+async def test_invalid_scheme_post_logout_redirect_uri_rejected(client):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "post_logout_redirect_uris": ["gopher://app.example/logged-out"],
+        },
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"] == "invalid_client_metadata"
+    assert body["error_description"] == (
+        "post_logout_redirect_uris must be a list of absolute http(s) URLs without fragment"
+    )
+
+
+async def test_fragment_post_logout_redirect_uri_rejected(client):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "post_logout_redirect_uris": ["https://app.example/logged-out#frag"],
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_client_metadata"
+
+
+async def test_valid_logout_uris_still_accepted(client):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "backchannel_logout_uri": "https://app.example/bc-logout",
+            "frontchannel_logout_uri": "https://app.example/fc-logout",
+            "post_logout_redirect_uris": ["https://app.example/logged-out"],
+        },
+    )
+    assert resp.status_code == 201, resp.text
+
+
 async def test_client_registration_includes_logout_fields(client):
     resp = await client.post(
         "/connect/register",

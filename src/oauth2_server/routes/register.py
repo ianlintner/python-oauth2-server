@@ -62,6 +62,23 @@ async def register_client(request: Request) -> ORJSONResponse:
     if not reg.redirect_uris or not all(_is_valid_redirect_uri(u) for u in reg.redirect_uris):
         return _registration_error("redirect_uris must be a non-empty list of absolute URLs")
 
+    if reg.backchannel_logout_uri and not _is_valid_redirect_uri(reg.backchannel_logout_uri):
+        return _registration_error(
+            "backchannel_logout_uri must be an absolute http(s) URL without fragment"
+        )
+
+    if reg.frontchannel_logout_uri and not _is_valid_redirect_uri(reg.frontchannel_logout_uri):
+        return _registration_error(
+            "frontchannel_logout_uri must be an absolute http(s) URL without fragment"
+        )
+
+    if reg.post_logout_redirect_uris and not all(
+        _is_valid_redirect_uri(u) for u in reg.post_logout_redirect_uris
+    ):
+        return _registration_error(
+            "post_logout_redirect_uris must be a list of absolute http(s) URLs without fragment"
+        )
+
     if reg.token_endpoint_auth_method not in _VALID_AUTH_METHODS:
         return _registration_error(
             f"token_endpoint_auth_method must be one of {sorted(_VALID_AUTH_METHODS)}"

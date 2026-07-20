@@ -118,3 +118,14 @@ noted during Phase 2 implementation:
   `scope_is_subset` helper in `services/auth.py` (pre-existing inconsistency, cosmetic).
 - `anyio` is used directly (`anyio.to_thread` for argon2 off-loading) but is currently only a transitive
   dependency (via `httpx`/`starlette`) — consider pinning it explicitly in `pyproject.toml`.
+- **RS256 rotation trap** — id_tokens always sign with the env PEM (never the keyset); after an admin
+  RS256 rotation + grace expiry, the initial key drops out of JWKS while the JWKS fallback only fires
+  when zero RS256 keys remain — RPs verifying id_tokens via JWKS break silently. Needs either
+  keyset-signed id_tokens or the initial PEM key pinned unexpirable.
+- **Admin sessions have no server-side revocation** — they are client-held signed cookies (role/email
+  stamped at login) with no server-side revocation; disable/demote/delete does not terminate a live
+  admin session; needs server-side session store or short-TTL re-validation against storage.
+- **Admin token revoke by id can silently no-op for older rows** — admin `POST /tokens/{id}/revoke`
+  resolves via `list_all_tokens` (`LIMIT 200`) — rows older than the newest 200 silently no-op (and
+  `GET /tokens/{id}` 404s for them while the paged list can show them); needs a `get_token_by_id`
+  storage method.
