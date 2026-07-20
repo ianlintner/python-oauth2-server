@@ -13,6 +13,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
+from oauth2_server.middleware import DenylistGuard
 from oauth2_server.routes.admin import admin_router
 from oauth2_server.routes.admin.guard import AdminAuthError
 from oauth2_server.routes.authorize import router as authorize_router
@@ -84,6 +85,12 @@ def create_app(
         same_site="lax",
         https_only=not config.allow_insecure_defaults,
     )
+
+    # Registered last so it becomes the outermost middleware (Starlette runs
+    # the most-recently-`add_middleware`d layer first) — every HTTP request,
+    # for every route below, passes through DenylistGuard before session/CORS/
+    # security-header handling or routing. See middleware.py for behavior.
+    app.add_middleware(DenylistGuard)
 
     app.include_router(token_router, prefix="/oauth")
     app.include_router(introspect_router, prefix="/oauth")

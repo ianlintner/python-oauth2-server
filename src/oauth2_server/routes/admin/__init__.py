@@ -17,8 +17,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
+from oauth2_server.routes.admin.audit import router as audit_router
 from oauth2_server.routes.admin.clients import router as clients_router
 from oauth2_server.routes.admin.dashboard import router as dashboard_router
+from oauth2_server.routes.admin.denylist import router as denylist_router
 from oauth2_server.routes.admin.devices import router as devices_router
 from oauth2_server.routes.admin.events import router as events_router
 from oauth2_server.routes.admin.guard import require_admin
@@ -33,3 +35,5 @@ admin_router.include_router(tokens_router)
 admin_router.include_router(devices_router)
 admin_router.include_router(dashboard_router)
 admin_router.include_router(events_router)
+admin_router.include_router(denylist_router)
+admin_router.include_router(audit_router)
