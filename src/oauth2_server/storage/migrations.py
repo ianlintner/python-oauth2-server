@@ -69,6 +69,10 @@ async def run_migrations(engine: AsyncEngine, migrations_dir: Path) -> None:
     files = sorted(migrations_dir.glob("V*.sql"), key=_version_of)
     is_sqlite = engine.dialect.name == "sqlite"
     async with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            # Serialize concurrent migrators (multi-worker startup) for the
+            # duration of this transaction; released automatically at commit.
+            await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 961_748_927})
         await conn.execute(
             text("CREATE TABLE IF NOT EXISTS py_schema_version (version INTEGER PRIMARY KEY)")
         )

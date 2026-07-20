@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
+from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 
+from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
 from oauth2_server.routes.authorize import router as authorize_router
 from oauth2_server.routes.device import router as device_router
@@ -35,8 +38,13 @@ _SECURITY_HEADERS = {
 }
 
 
-def create_app(config: Config, storage: Storage) -> FastAPI:
-    app = FastAPI(default_response_class=ORJSONResponse)
+def create_app(
+    config: Config,
+    storage: Storage,
+    *,
+    lifespan: Callable[[FastAPI], AbstractAsyncContextManager[Any]] | None = None,
+) -> FastAPI:
+    app = FastAPI(default_response_class=ORJSONResponse, lifespan=lifespan)
     app.state.config = config
     app.state.storage = storage
 
@@ -91,10 +99,12 @@ def build() -> FastAPI:
     config = Config()
     config.validate_for_production()
     storage = SqlStorage(config.database_url, MIGRATIONS_DIR, pool_size=config.max_connections)
-    app = create_app(config, storage)
 
-    @app.on_event("startup")
-    async def _init_storage() -> None:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
         await storage.init()
+        await seed_admin_user(storage, config)
+        yield
 
+    app = create_app(config, storage, lifespan=lifespan)
     return app

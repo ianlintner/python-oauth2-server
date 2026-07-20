@@ -28,6 +28,9 @@ class Config(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
     max_connections: Annotated[int, Field(validation_alias="OAUTH2_DATABASE_MAX_CONNECTIONS")] = 10
+    seed_username: str = "admin"
+    seed_password: str | None = None
+    seed_email: str = "admin@example.com"
 
     @field_validator("allowed_origins", mode="before")
     @classmethod
