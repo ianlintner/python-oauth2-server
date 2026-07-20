@@ -364,6 +364,20 @@ class SqlStorage:
             )
         return Token(**row) if row else None
 
+    async def get_token_by_id(self, token_id: str) -> Token | None:
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(f"SELECT {_TOKEN_COLS} FROM tokens WHERE id = :id"),
+                        {"id": token_id},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return Token(**row) if row else None
+
     async def revoke_token(self, token: str) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(

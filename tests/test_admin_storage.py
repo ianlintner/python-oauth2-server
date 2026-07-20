@@ -247,6 +247,25 @@ async def test_audit_log_respects_limit_offset():
     assert total == 7
 
 
+# --- get_token_by_id ---
+
+
+async def test_get_token_by_id_round_trip():
+    storage = await make_storage()
+    client = await seed_client(storage)
+    token = _token(client.client_id)
+    await storage.save_token(token)
+
+    got = await storage.get_token_by_id(token.id)
+    assert got is not None
+    assert got.access_token == token.access_token
+
+
+async def test_get_token_by_id_miss_returns_none():
+    storage = await make_storage()
+    assert await storage.get_token_by_id("does-not-exist") is None
+
+
 # --- Bulk token revocation ---
 
 

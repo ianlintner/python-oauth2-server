@@ -9,10 +9,12 @@ Deliberate divergence from Rust (see research-admin-api.md gotchas): the
 Rust `POST /admin/api/tokens/{id}/revoke` feeds the path `id` straight into
 `storage.revoke_token`, whose SQL matches on the token VALUE (access_token OR
 refresh_token) — since `id` is the separate row uuid, that's a silent no-op
-that still returns 200. This port resolves the row by `id` first (scanning
-`list_all_tokens`, same as detail) and revokes the actual `access_token`
-value, so the endpoint actually works. An unknown `id` is still a no-op that
-returns 200, matching the "no 404" contract.
+that still returns 200. This port resolves the row by `id` first (via
+`storage.get_token_by_id`, a direct `WHERE id = :id` lookup — not the
+`list_all_tokens` newest-200 scan used by `list`, which would silently miss
+older rows) and revokes the actual `access_token` value, so the endpoint
+actually works. An unknown `id` is still a no-op that returns 200, matching
+the "no 404" contract.
 """
 
 from __future__ import annotations
@@ -33,13 +35,6 @@ router = APIRouter()
 
 def _token_not_found() -> ORJSONResponse:
     return ORJSONResponse({"error": "token not found"}, status_code=404)
-
-
-async def _resolve_token(storage, token_id: str) -> Token | None:
-    for token in await storage.list_all_tokens():
-        if token.id == token_id:
-            return token
-    return None
 
 
 def _token_info(token: Token) -> dict:
@@ -78,7 +73,7 @@ async def list_tokens(
 @router.get("/tokens/{token_id}")
 async def get_token(token_id: str, request: Request) -> ORJSONResponse:
     storage = request.app.state.storage
-    token = await _resolve_token(storage, token_id)
+    token = await storage.get_token_by_id(token_id)
     if token is None:
         return _token_not_found()
     return ORJSONResponse(_token_info(token))
@@ -87,7 +82,7 @@ async def get_token(token_id: str, request: Request) -> ORJSONResponse:
 @router.post("/tokens/{token_id}/revoke")
 async def revoke_token_by_id(token_id: str, request: Request) -> ORJSONResponse:
     storage = request.app.state.storage
-    token = await _resolve_token(storage, token_id)
+    token = await storage.get_token_by_id(token_id)
     if token is not None:
         await storage.revoke_token(token.access_token)
     return ORJSONResponse({"message": "Token revoked"})
