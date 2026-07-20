@@ -204,6 +204,35 @@ async def test_par_request_uri_is_single_use(client_app):
     assert second.json()["error_description"] == "Unknown or expired request_uri"
 
 
+async def test_par_request_uri_duplicate_query_param_does_not_consume_entry(client_app):
+    """Task 6 review carry-over: the duplicate-query-param check (step 0 in
+    `authorize()`) runs before PAR resolution (step 1), so a malformed
+    request repeating `request_uri` must 400 without taking the entry out of
+    the store — a well-formed follow-up request with the same (single-use)
+    `request_uri` still succeeds."""
+    request_uri = await _push_client1_par(client_app)
+
+    await login_session(client_app)
+    probe = await client_app.get(
+        "/oauth/authorize",
+        params=[
+            ("request_uri", request_uri),
+            ("request_uri", request_uri),
+            ("client_id", "client1"),
+            ("response_type", "code"),
+        ],
+    )
+    assert probe.status_code == 400
+    assert probe.json()["error"] == "invalid_request"
+    assert "duplicate query parameter" in probe.json()["error_description"]
+
+    follow_up = await client_app.get(
+        "/oauth/authorize",
+        params={"request_uri": request_uri, "client_id": "client1", "response_type": "code"},
+    )
+    assert follow_up.status_code == 302, follow_up.text
+
+
 async def test_par_request_uri_client_mismatch_consumes_entry(client_app):
     await seed_client(
         client_app.storage,

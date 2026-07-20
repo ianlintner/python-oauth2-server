@@ -6,7 +6,7 @@ Python port of [rust-oauth2-server](https://github.com/ianlintner/rust-oauth2-se
 - RFC compliance tests ported 1:1 from the Rust suite act as the spec.
 - Stack: FastAPI, uvicorn+uvloop, Pydantic v2, SQLAlchemy async (raw SQL), PyJWT, argon2-cffi, cryptography (RS256/JWKS).
 
-Plan: `docs/plans/2026-07-19-python-oauth2-port.md` (Phase 1), `docs/plans/2026-07-19-python-oauth2-port-phase-2.md` (Phase 2).
+Plan: `docs/plans/2026-07-19-python-oauth2-port.md` (Phase 1), `docs/plans/2026-07-19-python-oauth2-port-phase-2.md` (Phase 2), `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` (Phase 3a).
 
 ## Phase 2 features
 
@@ -76,6 +76,35 @@ processes or server instances:
 deployment with a sticky-session load balancer that pins a given client to one process, until
 Phase 3 adds persistence for these three stores (see `docs/PHASE2-BACKLOG.md` → "Phase 3
 candidates").
+
+## Phase 3a hardening
+
+Phase 3a (see `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` and `docs/PHASE2-BACKLOG.md` →
+"Accepted divergences" 10–13) closes most of the Phase 2 review backlog:
+
+- **Login rate limiting** — `POST /auth/login` is gated by an in-memory, single-process fixed-window
+  limiter keyed on both source IP and username (either blocked → blocked); a blocked attempt returns
+  303 with `error=too_many_attempts` and a `Retry-After` header without touching credential
+  verification. Endpoint-level rate limiting (`/oauth/token`, `/oauth/device/verify`) is **not** covered
+  yet — deferred to Phase 3c.
+- **Subject-kind denylist enforcement** — the `username`/`email` denylist kinds are now consulted at
+  login, and `client_id` at client authentication (`ClientService.authenticate`) and
+  `GET /oauth/authorize`; a hit gets the identical generic error as an unknown user/client (no oracle).
+  `user_id` stays unwired (no pre-auth call site keys on it).
+- **Rotation-safe id_tokens** — RS256 id_tokens sign with the keyset's current key instead of the
+  static env PEM, closing the rotation trap where a rotated deployment breaks RP id_token verification
+  once the original key ages out of JWKS.
+- Admin API polish: PUT validation + disable-cascade parity, a 409 on duplicate `client_id` create,
+  clamped negative paging bounds, `Cache-Control: no-store` on all `/admin/api/*` responses, escaped
+  `LIKE` search wildcards, and uniform audit logging for single-token revoke / device expire / key
+  rotation.
+
+### New environment variables (Phase 3a)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OAUTH2_LOGIN_RATE_LIMIT_ATTEMPTS` | `10` | Max `POST /auth/login` attempts allowed per window, per IP and per username (either exhausted → blocked). |
+| `OAUTH2_LOGIN_RATE_LIMIT_WINDOW_SECS` | `900` | Fixed-window duration (seconds) for the login rate limiter. |
 
 ## Running
 

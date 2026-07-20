@@ -70,10 +70,11 @@ class DenylistGuard:
 
     Registered as the outermost middleware layer in `create_app` (see
     `app.py`), so a short-circuited 403 here never passes through the
-    app-level `security_headers` middleware. For an `/oauth*` path, this
-    stamps `_SECURITY_HEADERS` onto the 403 directly so those responses
-    still carry the same `Cache-Control: no-store` etc. as every other
-    `/oauth*` response.
+    app-level `security_headers` middleware. For an `/oauth*` or `/admin/api*`
+    path, this stamps `_SECURITY_HEADERS` onto the 403 directly so those
+    responses still carry the same `Cache-Control: no-store` etc. as every
+    other `/oauth*`/`/admin/api*` response (Task 6 review carry-over: the
+    `/admin/api` half was originally missed).
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -94,7 +95,9 @@ class DenylistGuard:
                 logger.warning("denylist lookup failed for ip=%s", client.host, exc_info=True)
                 entry = None
             if entry is not None:
-                headers = _SECURITY_HEADERS if request.url.path.startswith("/oauth") else None
+                path = request.url.path
+                is_oauth_or_admin_api = path.startswith("/oauth") or path.startswith("/admin/api")
+                headers = _SECURITY_HEADERS if is_oauth_or_admin_api else None
                 response = JSONResponse(_ACCESS_DENIED_BODY, status_code=403, headers=headers)
                 await response(scope, receive, send)
                 return

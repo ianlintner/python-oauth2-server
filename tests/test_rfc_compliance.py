@@ -34,10 +34,12 @@ from oauth2_server.config import Config
 from oauth2_server.models import DenylistEntry, Token
 from tests.conftest import build_client_app
 from tests.helpers import (
+    login_admin,
     login_session,
     make_storage,
     post_token,
     reseed_client,
+    seed_admin,
     seed_client,
     seed_user,
 )
@@ -896,3 +898,115 @@ async def test_denylist_ip_blocked():
             "error": "access_denied",
             "error_description": "request source is denylisted",
         }
+
+
+# --- Phase 3a compliance pins -------------------------------------------------
+
+
+async def test_login_rate_limited_after_repeated_failures(client_app, monkeypatch):
+    """Full coverage: test_ratelimit.py::test_login_blocked_after_repeated_failures."""
+    import oauth2_server.routes.login as login_routes
+
+    calls = []
+
+    async def spy_verify_password_async(password, phc_hash):
+        calls.append(password)
+        return False
+
+    monkeypatch.setattr(login_routes, "verify_password_async", spy_verify_password_async)
+
+    for _ in range(10):
+        resp = await client_app.post(
+            "/auth/login", data={"username": "user_rfc", "password": "wrong-password"}
+        )
+        assert resp.status_code == 303
+    assert len(calls) == 10
+
+    resp = await client_app.post(
+        "/auth/login", data={"username": "user_rfc", "password": "wrong-password"}
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login?error=too_many_attempts"
+    assert int(resp.headers["retry-after"]) > 0
+    assert len(calls) == 10, "the blocked attempt must short-circuit before credential verification"
+
+
+async def test_denylisted_username_blocked_at_login(client_app):
+    """Full coverage: test_denylist_middleware.py::test_denylisted_username_cannot_login."""
+    await client_app.storage.add_denylist_entry(
+        DenylistEntry(
+            id=uuid.uuid4().hex,
+            kind="username",
+            value="user_rfc",
+            reason="pinned compliance test",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+
+    resp = await login_session(client_app)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+
+    # No session was established: a follow-up authorize request still
+    # requires login rather than proceeding as an authenticated user.
+    resp = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+        },
+    )
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/auth/login"
+
+
+async def test_id_token_kid_matches_jwks_after_rotation():
+    """Full coverage:
+    test_jwks_rs256.py::test_id_token_signed_with_current_keyset_key_after_rotation.
+    """
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+    async with build_client_app(
+        {"id_token_private_key_pem": pem, "id_token_kid": "pin-rotation-key"}
+    ) as app:
+        await seed_admin(app.storage)
+        await login_admin(app)
+        rotate_resp = await app.post("/admin/api/keys/rotate", json={"algorithm": "RS256"})
+        assert rotate_resp.status_code == 200, rotate_resp.text
+        new_kid = rotate_resp.json()["kid"]
+        assert new_kid != "pin-rotation-key"
+
+        resp, _code = await run_code_flow(app, scope="openid email")
+        assert resp.status_code == 200, resp.text
+        header = jwt.get_unverified_header(resp.json()["id_token"])
+        assert header["alg"] == "RS256"
+        assert header["kid"] == new_kid, "id_token must be signed with the rotated-in key (kid)"
+
+        jwks_resp = await app.get("/.well-known/jwks.json")
+        published_kids = {k["kid"] for k in jwks_resp.json()["keys"]}
+        assert new_kid in published_kids, "the signing kid must be published in JWKS"
+
+
+async def test_authorize_rejects_duplicate_query_params(app_with_session):
+    """Full coverage: test_authorize.py::test_duplicate_query_parameter_rejected."""
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params=[
+            ("response_type", "code"),
+            ("response_type", "code"),
+            ("client_id", "client1"),
+            ("redirect_uri", "https://a.example/cb"),
+            ("scope", "read"),
+        ],
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"] == "invalid_request"
+    assert "duplicate query parameter" in body["error_description"]

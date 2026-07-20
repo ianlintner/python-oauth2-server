@@ -109,6 +109,23 @@ async def test_middleware_blocked_oauth_response_carries_security_headers():
         assert resp.headers["x-content-type-options"] == "nosniff"
 
 
+async def test_middleware_blocked_admin_api_response_carries_security_headers():
+    """`/admin/api/*` is behind the same short-circuit as `/oauth*` (Task 6
+    review carry-over): `DenylistGuard` is the outermost middleware layer, so
+    a blocked `/admin/api` request never reaches `app.py`'s `security_headers`
+    middleware either, and needs the same explicit stamping."""
+    async with build_client_from_ip("198.51.100.56") as client:
+        await _add_denylisted_ip(client.storage, "198.51.100.56")
+
+        resp = await client.get("/admin/api/users")
+        assert resp.status_code == 403
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["pragma"] == "no-cache"
+        assert resp.headers["x-frame-options"] == "DENY"
+        assert resp.headers["referrer-policy"] == "no-referrer"
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+
 async def test_middleware_honors_expired_denylist_entries():
     async with build_client_from_ip("198.51.100.8") as client:
         await _add_denylisted_ip(
