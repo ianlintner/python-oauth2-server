@@ -188,6 +188,46 @@ async def test_global_limit_429_body_and_headers():
         assert b"Retry-After" in header_names
 
 
+async def test_global_limit_429_on_oauth_token_carries_no_store():
+    # Matches the `DenylistGuard`-403 precedent (`test_denylist_middleware.py`
+    # ::test_middleware_blocked_oauth_response_carries_security_headers`): a
+    # rate-limited `/oauth*` response must not be cacheable either.
+    async with _build_client({"rate_limit_enabled": True, "rate_limit_max_requests": 1}) as c:
+        resp = await c.post("/oauth/token", data={"grant_type": "client_credentials"})
+        assert resp.status_code != 429  # first request consumes the single-token bucket
+
+        resp = await c.post("/oauth/token", data={"grant_type": "client_credentials"})
+        assert resp.status_code == 429
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["pragma"] == "no-cache"
+        assert resp.headers["x-frame-options"] == "DENY"
+        assert resp.headers["referrer-policy"] == "no-referrer"
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+
+async def test_global_limit_429_on_admin_api_carries_no_store():
+    async with _build_client({"rate_limit_enabled": True, "rate_limit_max_requests": 1}) as c:
+        resp = await c.get("/admin/api/users")
+        assert resp.status_code != 429
+
+        resp = await c.get("/admin/api/users")
+        assert resp.status_code == 429
+        assert resp.headers["cache-control"] == "no-store"
+
+
+async def test_global_limit_429_off_oauth_admin_api_has_no_security_headers():
+    # Negative case: a non-`/oauth*`/`/admin/api*` path's 429 does NOT gain
+    # the security-header bundle -- the condition is genuinely path-scoped,
+    # not applied unconditionally to every 429.
+    async with _build_client({"rate_limit_enabled": True, "rate_limit_max_requests": 1}) as c:
+        resp = await c.get("/auth/login")
+        assert resp.status_code != 429
+
+        resp = await c.get("/auth/login")
+        assert resp.status_code == 429
+        assert "cache-control" not in resp.headers
+
+
 async def test_exempt_paths_bypass_rate_limit():
     async with _build_client({"rate_limit_enabled": True, "rate_limit_max_requests": 1}) as c:
         for _ in range(5):

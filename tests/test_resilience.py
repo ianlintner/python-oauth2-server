@@ -316,6 +316,120 @@ async def test_middleware_exempt_path_bypasses_everything():
 
 
 # ---------------------------------------------------------------------------
+# ResilienceMiddleware — handler exceptions (not just returned >=500)
+#
+# Regression coverage for the bug where record_failure/record_success only
+# ran AFTER `await self.app(...)` returned — an exception propagating out of
+# the handler skipped that whole accounting block, so (a) the breaker was
+# blind to crash-only outages (never tripped, no matter how many requests
+# crashed) and (b) a crashing HALF_OPEN probe never released its slot via
+# `CircuitBreaker.record_failure`'s internal release, permanently starving
+# `_probes_in_use` and wedging the circuit at a stuck 503 forever.
+# ---------------------------------------------------------------------------
+
+
+def _build_raising_harness(
+    circuit: CircuitBreaker, concurrency: ConcurrencyLimiter, metrics: Metrics
+):
+    async def boom(request):
+        raise RuntimeError("boom")
+
+    async def health(request):
+        return PlainTextResponse("ok")
+
+    app = Starlette(routes=[Route("/boom", boom), Route("/health", health)])
+    app.state.circuit_breaker = circuit
+    app.state.concurrency_limiter = concurrency
+    app.state.metrics = metrics
+    app.add_middleware(ResilienceMiddleware)
+    return app
+
+
+@asynccontextmanager
+async def _raising_harness_client(
+    circuit: CircuitBreaker, concurrency: ConcurrencyLimiter, metrics: Metrics
+):
+    app = _build_raising_harness(circuit, concurrency, metrics)
+    # `raise_app_exceptions=False`: Starlette's own `ServerErrorMiddleware`
+    # (outermost, ahead of `ResilienceMiddleware`) already turns the
+    # unhandled exception into a 500 response and then re-raises for
+    # server-side logging/test-client visibility; httpx's default
+    # `raise_app_exceptions=True` would propagate that re-raise into the test
+    # itself instead of surfacing it as a normal `resp.status_code == 500`.
+    async with AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+    ) as c:
+        yield c
+
+
+async def test_route_exception_records_failure_and_opens_after_threshold():
+    circuit = CircuitBreaker(
+        failure_threshold=1, success_threshold=2, open_secs=30, half_open_max_probes=3
+    )
+    concurrency = ConcurrencyLimiter(max_concurrent=10)
+    metrics = Metrics()
+
+    async with _raising_harness_client(circuit, concurrency, metrics) as c:
+        resp = await c.get("/boom")
+        # Starlette's ServerErrorMiddleware default 500 — the point is the
+        # breaker accounting below, not this response's exact shape.
+        assert resp.status_code == 500
+        assert circuit.state() == CircuitState.OPEN
+        assert circuit.total_trips == 1
+        # The concurrency slot is released despite the exception.
+        assert concurrency.in_flight() == 0
+
+        # Circuit now OPEN: the middleware rejects the next request itself,
+        # before the handler (which would crash again) ever runs.
+        resp2 = await c.get("/boom")
+        assert resp2.status_code == 503
+
+
+async def test_half_open_probe_exception_releases_slot_no_permanent_stuck_state(monkeypatch):
+    import oauth2_server.services.resilience as resilience_module
+
+    real_monotonic = resilience_module.time.monotonic
+    circuit = CircuitBreaker(
+        failure_threshold=1, success_threshold=1, open_secs=30, half_open_max_probes=1
+    )
+    concurrency = ConcurrencyLimiter(max_concurrent=10)
+    metrics = Metrics()
+
+    async with _raising_harness_client(circuit, concurrency, metrics) as c:
+        # Trip the breaker CLOSED -> OPEN via an ordinary crash.
+        await c.get("/boom")
+        assert circuit.state() == CircuitState.OPEN
+
+        # Elapse open_secs -> HALF_OPEN, admitting exactly one probe.
+        monkeypatch.setattr(resilience_module.time, "monotonic", lambda: real_monotonic() + 31)
+        assert circuit.state() == CircuitState.HALF_OPEN
+
+        # The probe itself crashes.
+        resp = await c.get("/boom")
+        assert resp.status_code == 500
+
+        # Without the fix, this probe's slot would leak forever
+        # (`_probes_in_use` stuck at 1, `allow_request()` never admits
+        # again, every subsequent request rejected with a permanent 503).
+        # The fix releases the slot (via `CircuitBreaker.record_failure`'s
+        # own internal release for HALF_OPEN) AND re-opens the circuit
+        # immediately (a single half-open failure is enough).
+        assert circuit.state() == CircuitState.OPEN
+        assert circuit._probes_in_use == 0
+        assert concurrency.in_flight() == 0
+
+        # A request while OPEN is rejected cleanly, not hung/stuck.
+        resp2 = await c.get("/boom")
+        assert resp2.status_code == 503
+
+        # After open_secs elapses again, a fresh probe is admitted — proof
+        # there is no permanent stuck state from the crashed probe.
+        monkeypatch.setattr(resilience_module.time, "monotonic", lambda: real_monotonic() + 62)
+        assert circuit.state() == CircuitState.HALF_OPEN
+        assert await circuit.allow_request() is True
+
+
+# ---------------------------------------------------------------------------
 # ResilienceMiddleware — real app integration (mounting/ordering/metrics)
 # ---------------------------------------------------------------------------
 
@@ -348,6 +462,22 @@ async def test_circuit_open_returns_503_with_retry_after_on_real_app():
         assert resp.headers["retry-after"] == "45"
 
 
+async def test_circuit_open_503_on_oauth_path_carries_no_store():
+    # Matches the `DenylistGuard`-403 precedent (`test_denylist_middleware.py`
+    # ::test_middleware_blocked_oauth_response_carries_security_headers`): a
+    # circuit-open `/oauth*` short-circuit must not be cacheable either.
+    async with build_client_app({"resilience_enabled": True}) as c:
+        c.app.state.circuit_breaker._open()
+
+        resp = await c.get("/oauth/nonexistent")
+        assert resp.status_code == 503
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["pragma"] == "no-cache"
+        assert resp.headers["x-frame-options"] == "DENY"
+        assert resp.headers["referrer-policy"] == "no-referrer"
+        assert resp.headers["x-content-type-options"] == "nosniff"
+
+
 async def test_exempt_paths_bypass_resilience_even_when_circuit_open():
     async with build_client_app({"resilience_enabled": True}) as c:
         c.app.state.circuit_breaker._open()
@@ -370,6 +500,17 @@ async def test_back_pressure_returns_503_at_capacity():
             "error_description": "Server is at capacity. Please retry later.",
         }
         assert resp.headers["retry-after"] == "1"
+
+
+async def test_back_pressure_503_on_admin_api_path_carries_no_store():
+    async with build_client_app({"resilience_enabled": True}) as c:
+        limiter = c.app.state.concurrency_limiter
+        for _ in range(limiter.max_concurrent):
+            assert await limiter.try_acquire() is True
+
+        resp = await c.get("/admin/api/users")
+        assert resp.status_code == 503
+        assert resp.headers["cache-control"] == "no-store"
 
 
 async def test_back_pressure_increments_rejected_metric():

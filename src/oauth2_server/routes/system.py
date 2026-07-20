@@ -11,6 +11,7 @@ not confuse the two when porting routes").
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, Response
@@ -18,6 +19,8 @@ from fastapi.responses import ORJSONResponse
 from prometheus_client import generate_latest
 
 from oauth2_server.services.metrics import CONTENT_TYPE
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -51,9 +54,17 @@ async def ready(request: Request) -> Response:
     storage = request.app.state.storage
     try:
         await storage.healthcheck()
-    except Exception as exc:
-        # Plain text body on failure, not the JSON {status, checks} shape —
-        # Rust parity (research doc gotchas: "/ready failure body is plain
-        # error text with 503 ... not the JSON {status,checks} shape").
-        return Response(content=str(exc), status_code=503, media_type="text/plain")
+    except Exception:
+        # Deliberate divergence from Rust parity (previously: plain-text body
+        # containing `str(exc)`, per research doc gotchas "/ready failure
+        # body is plain error text with 503 ... not the JSON {status,checks}
+        # shape"). The raw exception text can carry a DB connection string,
+        # credentials, or internal hostnames (e.g. an asyncpg DSN in the
+        # error message) — leaking that to any unauthenticated caller that
+        # can reach `/ready` is a real disclosure risk, not just cosmetic.
+        # Log the detail server-side and return a generic body instead.
+        logger.warning("readiness check failed", exc_info=True)
+        return ORJSONResponse(
+            {"status": "unavailable", "checks": {"database": "error"}}, status_code=503
+        )
     return ORJSONResponse({"status": "ready", "checks": {"database": "ok"}})

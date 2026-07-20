@@ -389,7 +389,19 @@ From Phase 3c (`docs/plans/2026-07-20-python-oauth2-port-phase-3c.md` → "Globa
 22. `/metrics` content-type is pinned to the literal `text/plain; version=0.0.4`, with the
     `charset=utf-8` suffix `prometheus_client`'s own `CONTENT_TYPE_LATEST` normally appends
     stripped off — exact byte-parity with the Rust exposition's content-type header.
-    Task 1 (commits `4e724c8`, `c50dec8`).
+    Task 1 (commits `4e724c8`, `c50dec8`). Related: the three metric families whose Rust names
+    lack a `_total` suffix despite being monotonic counters — `oauth_authorization_codes_issued`,
+    `oauth_failed_authentications`, and `http_requests_total_by_route` (the last one already
+    HAS `_total`, just not at the end) — are implemented as `prometheus_client` `Gauge`s rather
+    than `Counter`s specifically so the emitted name matches Rust byte-for-byte;
+    `Counter`'s constructor unconditionally appends a literal `_total` unless the declared name
+    already ENDS with `_total`, which would otherwise mangle the first two into
+    `..._issued_total`/`..._authentications_total` and double up the third into
+    `..._by_route_total`. Each is still only ever `.inc()`'d (never `.dec()`/`.set()` to a
+    smaller value), so the *scrape value line* is byte-identical to Rust's `IntCounter` output
+    either way — the only observable difference is the `# TYPE` line, which reads
+    `# TYPE oauth2_server_<name> gauge` here vs. Rust's `counter`. See
+    `services/metrics.py`'s module docstring for the full mechanics.
 23. Login rate limiting (`OAUTH2_LOGIN_RATE_LIMIT_*`, Phase 3a) is already env-tunable, where
     Rust's equivalent is hardcoded. Kept as-is; no code change in Phase 3c.
 24. The parity-only metric families (`db_*`, `oauth_clients_total`, `oauth_active_tokens`,
@@ -411,3 +423,12 @@ From Phase 3c (`docs/plans/2026-07-20-python-oauth2-port-phase-3c.md` → "Globa
     `csrf_token`/`pkce_verifier`/`provider` from the session after a successful exchange (Rust
     leaves them, reusing the same session keys PKCE/CSRF state occupies) — a second, related
     improvement. Task 4 (commits `0c3aa20`, `ddfe1b6`).
+27. Social provisioning REQUIRES a verified provider email — Google's userinfo `verified_email`
+    must be `true` (`services/social.py`), and GitHub's provisioned email must come from
+    `/user/emails` with both `primary` AND `verified` true (an unverified/unconfirmed GitHub
+    primary email is rejected even though GitHub's API happily returns one). Rust provisions
+    unconditionally off whatever email the provider's userinfo endpoint returns, verified or
+    not. Stricter than Rust: some users Rust would silently provision an account for now get a
+    400 instead — a deliberate hardening (an attacker-controlled unverified email would let
+    someone provision/claim an account for an address they don't actually own), not a bug.
+    Task 4 (commit `ddfe1b6`).

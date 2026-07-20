@@ -46,6 +46,7 @@ from fastapi.responses import ORJSONResponse
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from oauth2_server.middleware import _SECURITY_HEADERS
 from oauth2_server.services.limiter import RateLimitResult
 from oauth2_server.services.resilience import CircuitBreaker, CircuitState, ConcurrencyLimiter
 
@@ -66,6 +67,15 @@ _GLOBAL_CIRCUIT_LABEL = "global"
 
 def _is_exempt(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in _EXEMPT_PREFIXES)
+
+
+def _is_oauth_or_admin_api(path: str) -> bool:
+    """Mirrors `DenylistGuard`'s `/oauth*`/`/admin/api*` gate (`middleware.py`)
+    so the 429/503 error responses below carry the same `_SECURITY_HEADERS`
+    (notably `Cache-Control: no-store`) as every other response on those
+    path prefixes, rather than only the ones the app-level `security_headers`
+    middleware happens to reach."""
+    return path.startswith("/oauth") or path.startswith("/admin/api")
 
 
 def _ip_prefix(key: str) -> str:
@@ -113,6 +123,12 @@ async def _send_rate_limit_rejected(
     freely — header casing doesn't matter anywhere else since HTTP header
     names are case-insensitive per RFC 7230 §3.2; this is purely to match
     a documented, if cosmetic, Rust behavioral detail).
+
+    Also stamps `_SECURITY_HEADERS` (`Cache-Control: no-store` etc., imported
+    from `middleware.py`) onto the response for `/oauth*`/`/admin/api*` paths
+    — matching the `DenylistGuard`-403 precedent (`middleware.py`) so a
+    caller can't extract cacheable signal from a rate-limited request to
+    those prefixes.
     """
     payload = orjson.dumps(body)
     headers = [
@@ -123,6 +139,8 @@ async def _send_rate_limit_rejected(
         (b"X-RateLimit-Remaining", b"0"),
         (b"X-RateLimit-Reset", str(result.reset_at).encode()),
     ]
+    if _is_oauth_or_admin_api(scope.get("path", "")):
+        headers.extend((key.encode(), value.encode()) for key, value in _SECURITY_HEADERS.items())
     await send({"type": "http.response.start", "status": 429, "headers": headers})
     await send({"type": "http.response.body", "body": payload})
 
@@ -225,6 +243,21 @@ class ResilienceMiddleware:
     recorded for e.g. a request that raced in while the circuit was already
     `OPEN` — though that path is unreachable here since `OPEN` is rejected
     at step 1 before the handler ever runs).
+
+    An unhandled exception propagating out of the handler is treated
+    identically to a returned `>= 500`: it records a circuit failure under
+    the same CLOSED-or-probe gate before re-raising, so a crashing route
+    both (a) trips the breaker on repeated crashes — Rust-parity accounting
+    the plain returned-status path alone can't provide, since a crash never
+    produces a `status_box["code"]` to inspect — and (b) releases this
+    request's half-open probe slot (via `CircuitBreaker.record_failure`'s own
+    internal release) so a crashing probe can't permanently starve
+    `_probes_in_use`. Without this, an exception would skip the post-handler
+    accounting block entirely (it sits after `await self.app(...)`, which
+    never returns on an exception) while `finally` only releases the
+    *concurrency* slot, not the circuit's probe slot — leaving a half-open
+    breaker stuck with an occupied slot it can never reclaim, and every
+    subsequent request rejected with 503 forever.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -286,6 +319,21 @@ class ResilienceMiddleware:
 
         try:
             await self.app(scope, receive, send_wrapper)
+        except Exception:
+            # Mirror the post-handler >=500 accounting below: an unhandled
+            # exception is a failure too, and — critically — this is the
+            # ONLY path that releases a half-open probe's slot when the
+            # probe request crashes instead of returning a response
+            # (`CircuitBreaker.record_failure` does the actual release
+            # internally when the breaker is HALF_OPEN). Skipping this would
+            # leak the slot permanently: `_probes_in_use` would stay
+            # incremented forever, `allow_request()` would never admit
+            # another probe, and the circuit could never leave OPEN/
+            # HALF_OPEN — a permanent stuck 503, not just a missed metric.
+            if circuit.state() == CircuitState.CLOSED or is_probe:
+                await circuit.record_failure()
+            self._record_circuit_metrics(metrics, circuit)
+            raise
         finally:
             concurrency.release()
             metrics.concurrent_requests_in_flight.set(concurrency.in_flight())
@@ -314,13 +362,17 @@ class ResilienceMiddleware:
         circuit: CircuitBreaker, scope: Scope, receive: Receive, send: Send
     ) -> None:
         body = {"error": "service_unavailable", "error_description": _CIRCUIT_OPEN_DESCRIPTION}
-        response = ORJSONResponse(
-            body, status_code=503, headers={"Retry-After": str(circuit.open_secs)}
-        )
+        headers = {"Retry-After": str(circuit.open_secs)}
+        if _is_oauth_or_admin_api(scope.get("path", "")):
+            headers.update(_SECURITY_HEADERS)
+        response = ORJSONResponse(body, status_code=503, headers=headers)
         await response(scope, receive, send)
 
     @staticmethod
     async def _send_at_capacity(scope: Scope, receive: Receive, send: Send) -> None:
         body = {"error": "service_unavailable", "error_description": _AT_CAPACITY_DESCRIPTION}
-        response = ORJSONResponse(body, status_code=503, headers={"Retry-After": "1"})
+        headers = {"Retry-After": "1"}
+        if _is_oauth_or_admin_api(scope.get("path", "")):
+            headers.update(_SECURITY_HEADERS)
+        response = ORJSONResponse(body, status_code=503, headers=headers)
         await response(scope, receive, send)

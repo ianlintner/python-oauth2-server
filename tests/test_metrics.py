@@ -351,13 +351,16 @@ async def test_ready_success_shape(client_app):
     assert resp.json() == {"status": "ready", "checks": {"database": "ok"}}
 
 
-async def test_ready_failure_returns_503_plain_text(client_app):
+async def test_ready_failure_returns_503_generic_body_no_exception_leak(client_app):
+    # The raw exception text (which can carry a DB DSN/credentials) must
+    # never reach the response body — only a generic status/checks shape.
     async def _broken_healthcheck():
-        raise RuntimeError("db is down")
+        raise RuntimeError("db is down: postgres://user:hunter2@10.0.0.5/prod")
 
     client_app.storage.healthcheck = _broken_healthcheck
 
     resp = await client_app.get("/ready")
     assert resp.status_code == 503
-    assert resp.headers["content-type"].startswith("text/plain")
-    assert "db is down" in resp.text
+    assert resp.json() == {"status": "unavailable", "checks": {"database": "error"}}
+    assert "hunter2" not in resp.text
+    assert "db is down" not in resp.text
