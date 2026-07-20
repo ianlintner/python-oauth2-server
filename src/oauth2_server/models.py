@@ -5,13 +5,53 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _coerce_datetime(value: Any) -> Any:
+    """Tolerant datetime coercion — port of `oauth2-core::chrono_serde`.
+
+    Every datetime field on the storage models runs through this before
+    Pydantic's normal validation, so it must accept everything a document
+    round-tripped through Mongo (or the existing SQL path) can hand back:
+
+    - a native `datetime` — the SQL path already passes these straight
+      through (asyncpg on Postgres) or via ISO strings (SQLite TEXT
+      columns); a naive value is assumed UTC, an aware value passes
+      through unchanged.
+    - an RFC 3339 / ISO 8601 string, including one with a trailing "Z"
+      (`datetime.fromisoformat` alone doesn't accept "Z" prior to
+      Python 3.11's relaxed parser, so it's normalized to "+00:00" first).
+    - the MongoDB extended-JSON forms `{"$date": <millis>}` (v1, a bare
+      int) and `{"$date": {"$numberLong": "<millis>"}}` (v2, wrapped —
+      what `mongoexport`/some drivers emit for 64-bit ints), both encoding
+      milliseconds since the Unix epoch.
+
+    Anything else is passed through unchanged so Pydantic's own error
+    reporting applies.
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if isinstance(value, dict) and "$date" in value:
+        raw = value["$date"]
+        if isinstance(raw, dict):
+            raw = raw["$numberLong"]
+        millis = int(raw)
+        return datetime.fromtimestamp(millis / 1000, tz=timezone.utc)
+    return value
+
+
+MongoDateTime = Annotated[datetime, BeforeValidator(_coerce_datetime)]
 
 
 class Client(BaseModel):
@@ -22,8 +62,8 @@ class Client(BaseModel):
     grant_types: str  # JSON array stored as string
     scope: str
     name: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: MongoDateTime
+    updated_at: MongoDateTime
     token_endpoint_auth_method: str = "client_secret_basic"
     registration_access_token: str = ""
     response_types: str = '["code"]'
@@ -75,8 +115,8 @@ class User(BaseModel):
     email: str
     enabled: bool = True
     role: str = "user"
-    created_at: datetime = Field(default_factory=_now)
-    updated_at: datetime = Field(default_factory=_now)
+    created_at: MongoDateTime = Field(default_factory=_now)
+    updated_at: MongoDateTime = Field(default_factory=_now)
 
     def is_admin(self) -> bool:
         return self.role == "admin"
@@ -91,8 +131,8 @@ class Token(BaseModel):
     scope: str = ""
     client_id: str
     user_id: str | None = None
-    created_at: datetime = Field(default_factory=_now)
-    expires_at: datetime
+    created_at: MongoDateTime = Field(default_factory=_now)
+    expires_at: MongoDateTime
     revoked: bool = False
     token_family: str | None = None
 
@@ -104,8 +144,8 @@ class AuthorizationCode(BaseModel):
     user_id: str
     redirect_uri: str
     scope: str
-    created_at: datetime = Field(default_factory=_now)
-    expires_at: datetime
+    created_at: MongoDateTime = Field(default_factory=_now)
+    expires_at: MongoDateTime
     used: bool = False
     code_challenge: str | None = None
     code_challenge_method: str | None = None
@@ -122,8 +162,8 @@ class DeviceAuthorization(BaseModel):
     user_code: str
     client_id: str
     scope: str
-    created_at: datetime = Field(default_factory=_now)
-    expires_at: datetime
+    created_at: MongoDateTime = Field(default_factory=_now)
+    expires_at: MongoDateTime
     interval_seconds: int = 5
     approved: bool = False
     denied: bool = False
@@ -277,8 +317,8 @@ class DenylistEntry(BaseModel):
     value: str
     reason: str = ""
     created_by: str = ""
-    created_at: datetime
-    expires_at: datetime | None = None
+    created_at: MongoDateTime
+    expires_at: MongoDateTime | None = None
 
     def is_active(self) -> bool:
         return self.expires_at is None or self.expires_at > _now()
@@ -296,7 +336,7 @@ class AuditLogEntry(BaseModel):
     ip: str = ""
     user_agent: str = ""
     metadata: str = ""
-    created_at: datetime
+    created_at: MongoDateTime
 
 
 class ClientRegistrationResponse(BaseModel):
