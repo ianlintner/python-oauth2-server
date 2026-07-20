@@ -20,9 +20,10 @@ async def client():
 
 
 async def test_health(client):
+    # Full shape coverage: tests/test_metrics.py::test_health_shape.
     resp = await client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    assert resp.json()["status"] == "healthy"
 
 
 def test_insecure_jwt_secret_rejected():

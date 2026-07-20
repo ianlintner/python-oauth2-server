@@ -59,6 +59,89 @@ class Config(BaseSettings):
     # actually enforces it (research-rar-token-exchange.md gotchas, backlog
     # gap #20) — the Python port makes this config-driven and enforced.
     rar_types_supported: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["openid"])
+    # Rate limiting (services/limiter.py::TokenBucketLimiter) +
+    # resilience (services/resilience.py, middleware_ratelimit.py) — ported
+    # from `oauth2-ratelimit`/`oauth2-resilience` (research doc
+    # research-ratelimit-resilience.md `config_keys`). Both master switches
+    # default to False (Rust parity: `rate_limit.enabled`/`resilience.
+    # enabled` are both off out of the box); `rate_limit_invalid_client_max_
+    # requests` is independent of `rate_limit_enabled` and defaults ON (5),
+    # matching Rust's always-active invalid_client penalty bucket.
+    rate_limit_enabled: bool = False
+    rate_limit_max_requests: int = 100
+    rate_limit_window_secs: int = 60
+    rate_limit_invalid_client_max_requests: int = 5
+    # Shared by the global rate-limit middleware's IP-extraction (honor
+    # `X-Forwarded-For` only when set) — env name matches Rust's
+    # `server.trust_proxy_headers` (`OAUTH2_SERVER_TRUST_PROXY_HEADERS`),
+    # not the `OAUTH2_RATE_LIMIT_*`-prefixed sibling fields above, since
+    # Rust scopes this under `[server]`, not `[rate_limit]`.
+    trust_proxy_headers: Annotated[
+        bool, Field(validation_alias="OAUTH2_SERVER_TRUST_PROXY_HEADERS")
+    ] = False
+    resilience_enabled: bool = False
+    resilience_max_concurrent: int = 1000
+    resilience_cb_failure_threshold: int = 5
+    resilience_cb_success_threshold: int = 2
+    resilience_cb_open_secs: int = 30
+    resilience_cb_half_open_max_probes: int = 3
+    # Event bus (services/events_bus.py) — ported from `crates/oauth2-events`
+    # (research-events-observability.md `config_keys`). Enabled by default
+    # (Rust parity: `OAUTH2_EVENTS_ENABLED` defaults true); `events_backend`
+    # only recognizes `console`/`in_memory`/`both` in this port — the
+    # feature-gated Redis Streams/Kafka/RabbitMQ backends are out of scope
+    # (see `services/events_bus.py`'s module docstring). `events_ingest_
+    # bearer_token` unset + `events_public_ingest` False means `POST
+    # /events/ingest` fails CLOSED with 503 `event_ingest_auth_not_configured`
+    # rather than ever accepting an unauthenticated request.
+    events_enabled: bool = True
+    events_public_ingest: bool = False
+    events_ingest_bearer_token: str | None = None
+    events_backend: str = "in_memory"
+    events_filter_mode: str = "allow_all"
+    events_types: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Social login (routes/social.py, services/social.py) — ported from
+    # `oauth2-social-login`/`oauth2-config::SocialConfig` (research doc
+    # research-social-login.md `config_keys`). A provider is "configured"
+    # (Rust: `enabled`) iff BOTH `_client_id` and `_client_secret` are set;
+    # Rust's config-file `enabled` bool is never actually checked by any
+    # handler (decorative) and has no analogue in this env-var-only
+    # `Config`, so it's intentionally not ported. `*_redirect_uri` falls
+    # back to an issuer-based default (`services/social.py::resolve_
+    # provider_config`) rather than Rust's hardcoded `localhost:8080`.
+    # Azure has its own optional client_id/secret/redirect_uri but falls
+    # back whole-hog to the Microsoft credentials when unset (Rust parity:
+    # `config.azure.or(config.microsoft)`), always using ITS OWN
+    # `azure_tenant_id` either way. Okta/Auth0 stay 503 stubs (divergence
+    # 25) — their client_id/secret/redirect_uri fields are accepted for
+    # forward-compat but never read by any handler.
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_redirect_uri: str | None = None
+    microsoft_client_id: str | None = None
+    microsoft_client_secret: str | None = None
+    microsoft_redirect_uri: str | None = None
+    microsoft_tenant_id: str = "common"
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
+    github_redirect_uri: str | None = None
+    azure_client_id: str | None = None
+    azure_client_secret: str | None = None
+    azure_redirect_uri: str | None = None
+    azure_tenant_id: str = "common"
+    okta_client_id: str | None = None
+    okta_client_secret: str | None = None
+    okta_redirect_uri: str | None = None
+    auth0_client_id: str | None = None
+    auth0_client_secret: str | None = None
+    auth0_redirect_uri: str | None = None
+
+    @field_validator("events_types", mode="before")
+    @classmethod
+    def _split_events_types(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [t.strip() for t in v.split(",") if t.strip()]
+        return v
 
     @field_validator("dpop_nonce_lifetime_secs")
     @classmethod

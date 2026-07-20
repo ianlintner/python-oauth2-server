@@ -91,6 +91,7 @@ async def revoke_token_by_id(
     token = await storage.get_token_by_id(token_id)
     if token is not None:
         await storage.revoke_token(token.access_token)
+        request.app.state.metrics.oauth_token_revoked_total.inc()
         await record_audit(
             storage,
             events,

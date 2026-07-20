@@ -42,6 +42,7 @@ from fastapi.responses import ORJSONResponse, RedirectResponse
 
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.services.auth import AuthorizeService, scope_is_subset
+from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.sessions import current_user_id
 
@@ -298,6 +299,14 @@ async def authorize(request: Request):
         code_challenge_method=code_challenge_method,
         nonce=merged.get("nonce"),
         authorization_details=authorization_details,
+    )
+    request.app.state.metrics.oauth_authorization_codes_issued.inc()
+    emit_event(
+        request.app.state.event_bus,
+        "authorization_code_created",
+        user_id=user_id,
+        client_id=client.client_id,
+        metadata={"scope": scope, "redirect_uri": redirect_uri},
     )
 
     success_params = {"code": auth_code.code, "iss": config.issuer}

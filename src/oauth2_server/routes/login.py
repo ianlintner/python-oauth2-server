@@ -122,6 +122,9 @@ async def login(request: Request):
     if retry_after is None:
         retry_after = limiter.check(user_key)
     if retry_after is not None:
+        # Rust parity (login.rs rate-limited site): a throttled login attempt
+        # also counts as a failed authentication.
+        request.app.state.metrics.oauth_failed_authentications.inc()
         return RedirectResponse(
             "/auth/login?error=too_many_attempts",
             status_code=303,
@@ -159,6 +162,12 @@ async def login(request: Request):
             logger.warning(
                 "login blocked: %s is denylisted (reason=%s)", denylist_kind, denylist_reason
             )
+        # Rust parity (login.rs: bad password / unknown user / disabled
+        # account / denylisted all count as failed authentications). This
+        # single branch already collapses all four Rust call sites into one
+        # generic outcome (see the module docstring), so one increment here
+        # covers all of them.
+        request.app.state.metrics.oauth_failed_authentications.inc()
         return RedirectResponse("/auth/login?error=invalid_credentials", status_code=303)
 
     # Successful login — clear only the per-username key. The user proved

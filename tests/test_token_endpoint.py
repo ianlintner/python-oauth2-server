@@ -161,6 +161,35 @@ async def test_basic_auth_secret_mismatched_with_form_rejected(client_app):
     assert resp.json()["error"] == "invalid_client"
 
 
+async def test_non_ascii_basic_auth_secret_rejected_with_401_not_500(client_app):
+    # `secrets.compare_digest` raises TypeError when either `str` operand
+    # contains a non-ASCII character instead of returning False. A
+    # Basic-auth password decodes via UTF-8 with no ASCII restriction
+    # (`_parse_basic_auth`), so a non-ASCII secret used to crash this
+    # comparison with an unhandled 500 instead of the documented 401
+    # invalid_client.
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials"},
+        basic_auth=("client1", "wröng-sëcret"),
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def test_non_ascii_form_client_secret_mismatched_with_basic_auth_rejected(client_app):
+    # Same TypeError trap, hit via the "duplicate credentials disagree"
+    # branch: a non-ASCII `client_secret` in the form body compared
+    # against the Basic-auth-decoded secret.
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials", "client_secret": "wröng-sëcret"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "invalid_client"
+
+
 async def _seed_public_client(client_app, client_id: str = "pubclient"):
     await seed_client(
         client_app.storage,
@@ -226,6 +255,45 @@ async def test_used_code_replay_revokes_family(client_app):
 async def test_pkce_verifier_mismatch_rejected(client_app):
     wrong_verifier = secrets.token_urlsafe(32)
     resp, _code = await run_code_flow(client_app, code_verifier=wrong_verifier)
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_grant"
+
+
+async def test_pkce_non_ascii_code_challenge_returns_400_not_500(client_app):
+    # /oauth/authorize (and PAR) only length-check `code_challenge`
+    # (43-128 chars) — RFC 7636's base64url alphabet is never enforced —
+    # so a client can store a non-ASCII code_challenge on the
+    # authorization code. `secrets.compare_digest` raises TypeError when
+    # either `str` operand contains a non-ASCII character instead of
+    # returning False, which used to crash the verifier check with an
+    # unhandled 500 instead of the documented 400 invalid_grant.
+    await login_session(client_app)
+    non_ascii_challenge = "ö" + "a" * 42  # 43 chars: within the valid length range
+    authorize_resp = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "openid email",
+            "code_challenge": non_ascii_challenge,
+            "code_challenge_method": "S256",
+        },
+    )
+    assert authorize_resp.status_code == 302, authorize_resp.text
+    code = parse_qs(urlparse(authorize_resp.headers["location"]).query)["code"][0]
+
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "https://a.example/cb",
+            "client_id": "client1",
+            "code_verifier": secrets.token_urlsafe(32),
+        },
+        basic_auth=("client1", "s3cret"),
+    )
     assert resp.status_code == 400
     assert resp.json()["error"] == "invalid_grant"
 

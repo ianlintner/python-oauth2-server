@@ -66,7 +66,9 @@ async def par(request: Request) -> ORJSONResponse:
 
     storage = request.app.state.storage
     try:
-        await ClientService(storage).authenticate(params, request.headers.get("authorization"))
+        await ClientService(storage, request.app.state.event_bus).authenticate(
+            params, request.headers.get("authorization")
+        )
     except OAuthError as exc:
         return oauth_error(exc.error, exc.description, exc.status)
 
