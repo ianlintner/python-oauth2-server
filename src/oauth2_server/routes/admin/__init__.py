@@ -18,10 +18,18 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from oauth2_server.routes.admin.clients import router as clients_router
+from oauth2_server.routes.admin.dashboard import router as dashboard_router
+from oauth2_server.routes.admin.devices import router as devices_router
+from oauth2_server.routes.admin.events import router as events_router
 from oauth2_server.routes.admin.guard import require_admin
+from oauth2_server.routes.admin.tokens import router as tokens_router
 from oauth2_server.routes.admin.users import router as users_router
 
 admin_router = APIRouter(prefix="/admin/api", dependencies=[Depends(require_admin)])
 
 admin_router.include_router(clients_router)
 admin_router.include_router(users_router)
+admin_router.include_router(tokens_router)
+admin_router.include_router(devices_router)
+admin_router.include_router(dashboard_router)
+admin_router.include_router(events_router)
