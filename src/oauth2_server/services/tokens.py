@@ -29,6 +29,7 @@ class TokenService:
         token_family: str | None = None,
         cnf: dict | None = None,
         authorization_details: list[dict] | None = None,
+        act: dict | None = None,
     ) -> TokenResponse:
         """Issue an access (+ optional refresh) token.
 
@@ -52,11 +53,17 @@ class TokenService:
         path except the JWT claim — see research-rar-token-exchange.md).
         Callers pass `None` here for grants that drop RAR details entirely
         (refresh_token, device_code — Rust parity).
+
+        `act` (RFC 8693 §4.1 delegation claim) follows the same opaque-mode
+        drop rule as `cnf`/`authorization_details` — see routes/token.py's
+        token-exchange branch for the only caller that passes a value and
+        `models.Claims.act`'s docstring for the JWT-vs-response-body split.
         """
         config = self._config
         subject = user_id or client.client_id
         bound_cnf = cnf if not config.access_tokens_opaque else None
         bound_details = authorization_details if not config.access_tokens_opaque else None
+        bound_act = act if not config.access_tokens_opaque else None
 
         if config.access_tokens_opaque:
             access_token = secrets.token_urlsafe(32)
@@ -69,6 +76,7 @@ class TokenService:
                 config.issuer,
                 cnf=bound_cnf,
                 authorization_details=bound_details,
+                act=bound_act,
             )
             # Prefer the current RS256 key so access+refresh tokens follow
             # RS256 rotation automatically whenever one is configured; fall

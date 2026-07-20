@@ -53,6 +53,7 @@ def _discovery_document(issuer: str, id_token_alg: str, rar_types_supported: lis
             "client_credentials",
             "refresh_token",
             "urn:ietf:params:oauth:grant-type:device_code",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
         ],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"],

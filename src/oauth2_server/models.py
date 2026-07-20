@@ -154,6 +154,15 @@ class Claims(BaseModel):
     # `services/rar.py::validate_authorization_details` for how this is
     # produced, and `routes/token.py` for which grants embed it.
     authorization_details: list[dict] | None = None
+    # RFC 8693 §4.1 delegation/impersonation claim: `{"sub": <exchanging
+    # client_id>}` on every token minted by the token-exchange grant —
+    # omitted entirely (never a literal `null`) otherwise, same pattern as
+    # `cnf`/`authorization_details`. Rust never sets this on the JWT (only
+    # ever on the HTTP response body, and only when `actor_token` was
+    # present — see research-rar-token-exchange.md gotchas); this port fixes
+    # the JWT gap while keeping the response-body member Rust-conditional
+    # (routes/token.py's token-exchange branch).
+    act: dict | None = None
 
     @classmethod
     def new(
@@ -166,6 +175,7 @@ class Claims(BaseModel):
         *,
         cnf: dict | None = None,
         authorization_details: list[dict] | None = None,
+        act: dict | None = None,
     ) -> "Claims":
         iat = int(_now().timestamp())
         return cls(
@@ -179,6 +189,7 @@ class Claims(BaseModel):
             client_id=client_id,
             cnf=cnf,
             authorization_details=authorization_details,
+            act=act,
         )
 
     def to_payload(self) -> dict[str, Any]:

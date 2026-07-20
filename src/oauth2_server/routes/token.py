@@ -63,6 +63,13 @@ router = APIRouter()
 _MIN_VERIFIER_LEN = 43
 _MAX_VERIFIER_LEN = 128
 
+# RFC 8693 §2.1 grant identifier and the single subject/requested token type
+# this server supports exchanging (access tokens only — no id_token/SAML/JWT
+# subject types, matching the Rust server's storage-lookup-only model; see
+# `.superpowers/sdd/research-rar-token-exchange.md` token-exchange section).
+_TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
+_ACCESS_TOKEN_TYPE_URN = "urn:ietf:params:oauth:token-type:access_token"
+
 
 def _half_hash(value: str) -> str:
     """OIDC Core §3.3.2.11 / §3.1.3.6: base64url-no-pad(left-half(SHA-256(value)))."""
@@ -488,6 +495,104 @@ async def token(request: Request) -> ORJSONResponse:
                 return oauth_error("server_error", str(exc), status=500)
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    if grant_type == _TOKEN_EXCHANGE_GRANT:
+        # RFC 8693 token exchange. Check order per
+        # `.superpowers/sdd/task-6-brief.md`: grant allow-list -> public-
+        # client rejection -> subject_token presence -> subject_token_type
+        # validation -> requested_token_type validation -> storage lookup ->
+        # validity -> scope subset -> issue. Confidential clients only, and
+        # the client must register the full URN (exact match, same
+        # `grant_type_list()` check as every other branch above) — there is
+        # no short alias, unlike device_code.
+        if grant_type not in client.grant_type_list():
+            return oauth_error(
+                "unauthorized_client", "client is not authorized for this grant type"
+            )
+
+        if client.is_public():
+            return oauth_error("invalid_client", "Public clients cannot use token-exchange")
+
+        subject_token = form.get("subject_token")
+        if not subject_token:
+            return oauth_error("invalid_request", "Missing subject_token")
+
+        # RFC 8693 §2.1 / divergence 18 (research doc): Rust parses
+        # subject_token_type/actor_token_type and then ignores them
+        # (`#[allow(dead_code)]`) — an id_token or SAML assertion type
+        # silently behaves like an access token. This port actually
+        # enforces the single type it supports (storage only ever holds
+        # access tokens), rejecting anything else including a missing value.
+        if form.get("subject_token_type") != _ACCESS_TOKEN_TYPE_URN:
+            return oauth_error(
+                "invalid_request",
+                f"unsupported subject_token_type: only '{_ACCESS_TOKEN_TYPE_URN}' is supported",
+            )
+
+        requested_token_type = form.get("requested_token_type")
+        if requested_token_type is not None and requested_token_type != _ACCESS_TOKEN_TYPE_URN:
+            return oauth_error(
+                "invalid_request",
+                f"unsupported requested_token_type: only '{_ACCESS_TOKEN_TYPE_URN}' is supported",
+            )
+
+        # subject_token is resolved by STORAGE LOOKUP, not JWT signature
+        # verification — only a token this server issued and still holds
+        # can be exchanged (Rust parity, research doc `key_behaviors`).
+        subject_row = await storage.get_token_by_access_token(subject_token)
+        if subject_row is None:
+            return oauth_error("invalid_grant", "subject_token not found or expired")
+
+        if subject_row.revoked or subject_row.expires_at <= datetime.now(timezone.utc):
+            return oauth_error("invalid_grant", "subject_token is expired or revoked")
+
+        requested_scope = form.get("scope")
+        if requested_scope:
+            if not scope_is_subset(requested_scope, subject_row.scope):
+                return oauth_error("invalid_scope", "requested scope exceeds client permissions")
+            scope = requested_scope
+        else:
+            scope = subject_row.scope
+
+        # RFC 8693 §4.1 delegation: `act` is ALWAYS embedded in the issued
+        # JWT for an exchanged token — this is impersonation happening
+        # regardless of whether the caller declared an `actor_token` — a
+        # fixed gap vs Rust, which never puts `act` in the JWT at all (see
+        # models.Claims.act's docstring). The response-body `act` member
+        # below stays Rust-conditional: present only when `actor_token` was
+        # supplied on this request (`actor_token`'s VALUE is never
+        # validated, matching Rust — its mere presence triggers the
+        # response member).
+        act = {"sub": client.client_id}
+        actor_token_present = form.get("actor_token") is not None
+
+        # Impersonation model (Rust parity): issued token carries the
+        # SUBJECT token's user_id but the EXCHANGING client's client_id.
+        # Never a refresh token (`with_refresh=False`, no `token_family`).
+        # `cnf` binds THIS request's own DPoP proof (the shared pre-grant
+        # block above), not the subject token's binding.
+        token_response = await TokenService(storage, config, keyset).issue(
+            client,
+            subject_row.user_id,
+            scope,
+            with_refresh=False,
+            cnf=cnf,
+            act=act,
+        )
+
+        body: dict[str, object] = {
+            "access_token": token_response.access_token,
+            "issued_token_type": _ACCESS_TOKEN_TYPE_URN,
+            "token_type": token_response.token_type,
+            "expires_in": token_response.expires_in,
+            "scope": token_response.scope,
+        }
+        if actor_token_present:
+            body["act"] = act
+
+        response = ORJSONResponse(body)
         response.headers["Cache-Control"] = "no-store"
         return response
 
