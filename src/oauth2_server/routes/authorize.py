@@ -91,6 +91,15 @@ async def authorize(request: Request):
         return _error_page(400, "invalid_request", "redirect_uri is not registered for this client")
 
     # --- 3. From here on, errors are delivered via redirect ---
+    if "authorization_code" not in client.grant_type_list():
+        return _error_redirect(
+            redirect_uri,
+            "unauthorized_client",
+            "client is not authorized for this grant type",
+            state,
+            config.issuer,
+        )
+
     response_type = params.get("response_type")
     if response_type != "code":
         return _error_redirect(

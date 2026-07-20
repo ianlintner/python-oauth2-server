@@ -108,8 +108,9 @@ async def token(request: Request) -> ORJSONResponse:
 
         requested_scope = form.get("scope") or ""
         if requested_scope:
-            client_scopes = set(client.scope.split())
-            scope = " ".join(s for s in requested_scope.split() if s in client_scopes)
+            if not scope_is_subset(requested_scope, client.scope):
+                return oauth_error("invalid_scope", "requested scope exceeds client scope")
+            scope = requested_scope
         else:
             scope = client.scope
 
@@ -121,6 +122,11 @@ async def token(request: Request) -> ORJSONResponse:
         return response
 
     if grant_type == "authorization_code":
+        if "authorization_code" not in client.grant_type_list():
+            return oauth_error(
+                "unauthorized_client", "client is not authorized for this grant type"
+            )
+
         code_value = form.get("code")
         auth_code = await storage.get_authorization_code(code_value) if code_value else None
         if auth_code is None:
@@ -188,6 +194,11 @@ async def token(request: Request) -> ORJSONResponse:
         return response
 
     if grant_type == "refresh_token":
+        if "refresh_token" not in client.grant_type_list():
+            return oauth_error(
+                "unauthorized_client", "client is not authorized for this grant type"
+            )
+
         refresh_token_value = form.get("refresh_token")
         old_token = (
             await storage.get_token_by_refresh_token(refresh_token_value)
@@ -238,6 +249,11 @@ async def token(request: Request) -> ORJSONResponse:
         return response
 
     if grant_type == "urn:ietf:params:oauth:grant-type:device_code":
+        if grant_type not in client.grant_type_list():
+            return oauth_error(
+                "unauthorized_client", "client is not authorized for this grant type"
+            )
+
         device_code = form.get("device_code")
         device = (
             await storage.get_device_authorization_by_device_code(device_code)

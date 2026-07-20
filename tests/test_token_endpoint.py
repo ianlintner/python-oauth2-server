@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 import jwt
 
-from tests.helpers import login_session, post_token, seed_client
+from tests.helpers import login_session, post_token, reseed_client, seed_client
 
 JWT_SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
 
@@ -338,3 +338,52 @@ async def test_refresh_without_openid_scope_has_no_id_token(client_app):
         basic_auth=("client1", "s3cret"),
     )
     assert resp2.json().get("id_token") is None
+
+
+# --- grant-type allow-list enforcement (Task 4) -------------------------------
+
+
+async def test_auth_code_grant_requires_allowlist(client_app):
+    await reseed_client(client_app, grant_types=["client_credentials"])
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "authorization_code",
+            "code": "x",
+            "redirect_uri": "https://a.example/cb",
+        },
+        basic_auth=("client1", "s3cret"),
+    )
+    assert (resp.status_code, resp.json()["error"]) == (400, "unauthorized_client")
+
+
+async def test_refresh_grant_requires_allowlist(client_app):
+    await reseed_client(client_app, grant_types=["client_credentials"])
+    resp = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": "x"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert (resp.status_code, resp.json()["error"]) == (400, "unauthorized_client")
+
+
+async def test_device_grant_requires_allowlist(client_app):
+    await reseed_client(client_app, grant_types=["client_credentials"])
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": "x",
+        },
+        basic_auth=("client1", "s3cret"),
+    )
+    assert (resp.status_code, resp.json()["error"]) == (400, "unauthorized_client")
+
+
+async def test_client_credentials_excess_scope_rejected(client_app):
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials", "scope": "read admin:everything"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert (resp.status_code, resp.json()["error"]) == (400, "invalid_scope")

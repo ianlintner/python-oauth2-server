@@ -1,6 +1,6 @@
 import re
 
-from tests.helpers import login_session, post_token, seed_client
+from tests.helpers import login_session, post_token, reseed_client, seed_client
 
 _USER_CODE_RE = re.compile(r"^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$")
 
@@ -137,3 +137,10 @@ async def test_device_verify_requires_login(client_app):
         "/oauth/device/verify", data={"user_code": user_code, "action": "approve"}
     )
     assert verify_resp.status_code == 401
+
+
+async def test_device_authorization_requires_allowlist(client_app):
+    await reseed_client(client_app, grant_types=["client_credentials"])
+    resp = await start_device_flow(client_app)
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "unauthorized_client"

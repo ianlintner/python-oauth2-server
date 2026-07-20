@@ -23,6 +23,7 @@ from oauth2_server.sessions import current_user_id
 
 router = APIRouter()
 
+_DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 _USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"
 _EXPIRES_IN = 600
 _INTERVAL = 5
@@ -55,6 +56,9 @@ async def device_authorization(request: Request) -> ORJSONResponse:
         )
     except OAuthError as exc:
         return oauth_error(exc.error, exc.description, exc.status)
+
+    if _DEVICE_GRANT_TYPE not in client.grant_type_list():
+        return oauth_error("unauthorized_client", "client is not authorized for this grant type")
 
     requested_scope = form.get("scope") or ""
     if requested_scope:

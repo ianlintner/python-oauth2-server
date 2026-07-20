@@ -1,7 +1,7 @@
 import secrets
 from urllib.parse import parse_qs, urlparse
 
-from tests.helpers import login_session, seed_client
+from tests.helpers import login_session, reseed_client, seed_client
 
 
 async def test_rfc9207_iss_included_in_authorization_response(app_with_session):
@@ -145,3 +145,23 @@ async def test_login_without_pending_authorize_does_not_replay(app_with_session)
     resp = await login_session(app_with_session)
     assert resp.status_code == 302
     assert resp.headers["location"] == "/"
+
+
+async def test_authorize_requires_authorization_code_grant(app_with_session):
+    await reseed_client(app_with_session, grant_types=["client_credentials"])
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "state": "xyz",
+        },
+    )
+    assert resp.status_code == 302
+    q = parse_qs(urlparse(resp.headers["location"]).query)
+    assert q["error"] == ["unauthorized_client"]
+    assert q["state"] == ["xyz"]
+    assert "iss" in q
