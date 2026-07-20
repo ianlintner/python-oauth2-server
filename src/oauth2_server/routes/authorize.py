@@ -1,9 +1,20 @@
 """GET /oauth/authorize — RFC 6749 §4.1.1 authorization endpoint (PKCE + RFC 9207 iss).
 
 Ported from `crates/oauth2-actix/src/handlers/oauth.rs::authorize`. This is a
-Phase-1 subset: authorization_code + PKCE only (no PAR/JAR/hybrid/prompt handling).
+Phase-1 subset: authorization_code + PKCE (+ RFC 9126 PAR) only — no JAR/hybrid.
 
 Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
+0. If `request_uri` is present, resolve the pushed authorization request
+   (RFC 9126) *before* anything else. Consumption is destructive
+   (single-use): unknown/expired -> 400 JSON `invalid_request` (never a
+   redirect — no `redirect_uri` can be trusted yet); the entry's `client_id`
+   must match the query string's `client_id` -> else 401 JSON `invalid_client`.
+   The entry is removed from the store either way, even when the mismatch
+   check then fails (Rust parity). PAR-stored values take precedence over
+   the query string for exactly: `redirect_uri`, `scope`, `code_challenge`,
+   `code_challenge_method`, `nonce`, `resource`, `state`,
+   `authorization_details`, `claims`, `acr_values`. `client_id` and
+   `response_type` always come from the query string.
 1. Unknown/disabled `client_id` -> 400 JSON, never redirect (redirecting would let
    an attacker exfiltrate data to an unregistered endpoint).
 2. `redirect_uri` not an exact match against the client's registered list -> 400
@@ -31,6 +42,23 @@ router = APIRouter()
 
 _MIN_CODE_CHALLENGE_LEN = 43
 _MAX_CODE_CHALLENGE_LEN = 128
+
+# RFC 9126 PAR merge whitelist: exactly these keys are overridden by the
+# pushed request's stored params, when present. `client_id` and
+# `response_type` are deliberately excluded — they always come from the
+# query string (Rust parity).
+_PAR_MERGE_KEYS = (
+    "redirect_uri",
+    "scope",
+    "code_challenge",
+    "code_challenge_method",
+    "nonce",
+    "resource",
+    "state",
+    "authorization_details",
+    "claims",
+    "acr_values",
+)
 
 
 def _strip_reauth_params(query: str) -> str:
@@ -78,8 +106,22 @@ async def authorize(request: Request):
     storage = request.app.state.storage
 
     client_id = params.get("client_id")
-    redirect_uri = params.get("redirect_uri")
-    state = params.get("state")
+
+    # --- 0. Resolve a pushed authorization request, if referenced (RFC 9126) ---
+    merged: dict[str, str] = dict(params)
+    request_uri = params.get("request_uri")
+    if request_uri is not None:
+        entry = request.app.state.par_store.take(request_uri)
+        if entry is None:
+            return _error_page(400, "invalid_request", "Unknown or expired request_uri")
+        if entry.client_id != client_id:
+            return _error_page(401, "invalid_client", "request_uri client_id mismatch")
+        for key in _PAR_MERGE_KEYS:
+            if key in entry.params:
+                merged[key] = entry.params[key]
+
+    redirect_uri = merged.get("redirect_uri")
+    state = merged.get("state")
 
     # --- 1. client_id must exist and be enabled — 400, never redirect ---
     client = await storage.get_client(client_id) if client_id else None
@@ -91,6 +133,15 @@ async def authorize(request: Request):
         return _error_page(400, "invalid_request", "redirect_uri is not registered for this client")
 
     # --- 3. From here on, errors are delivered via redirect ---
+    if "authorization_code" not in client.grant_type_list():
+        return _error_redirect(
+            redirect_uri,
+            "unauthorized_client",
+            "client is not authorized for this grant type",
+            state,
+            config.issuer,
+        )
+
     response_type = params.get("response_type")
     if response_type != "code":
         return _error_redirect(
@@ -101,7 +152,7 @@ async def authorize(request: Request):
             config.issuer,
         )
 
-    scope = params.get("scope") or "read"
+    scope = merged.get("scope") or "read"
     if not scope_is_subset(scope, client.scope):
         return _error_redirect(
             redirect_uri,
@@ -111,8 +162,8 @@ async def authorize(request: Request):
             config.issuer,
         )
 
-    code_challenge = params.get("code_challenge")
-    code_challenge_method = params.get("code_challenge_method")
+    code_challenge = merged.get("code_challenge")
+    code_challenge_method = merged.get("code_challenge_method")
 
     if client.is_public() and not code_challenge:
         return _error_redirect(
@@ -146,18 +197,18 @@ async def authorize(request: Request):
     prompt_values = (params.get("prompt") or "").split()
     force_login = "login" in prompt_values or "select_account" in prompt_values
 
-    user_id = current_user_id(request)
-
-    # prompt=none: the AS must not display any UI. Without a session, this is
-    # an error delivered via the redirect channel (OIDC Core §3.1.2.6).
-    if "none" in prompt_values and user_id is None:
+    # prompt=none is mutually exclusive with every other prompt value (OIDC
+    # Core §3.1.2.1): "none" MUST NOT be used with any other value.
+    if "none" in prompt_values and len(prompt_values) > 1:
         return _error_redirect(
             redirect_uri,
-            "login_required",
-            "User is not authenticated and prompt=none was requested",
+            "invalid_request",
+            "prompt=none cannot be combined with other values",
             state,
             config.issuer,
         )
+
+    user_id = current_user_id(request)
 
     # max_age: if the session's auth_time is older than max_age seconds (or
     # missing entirely), the user must re-authenticate.
@@ -171,6 +222,19 @@ async def authorize(request: Request):
         if max_age_secs is not None:
             auth_time = request.session.get("auth_time")
             auth_expired = auth_time is None or (time.time() - auth_time) >= max_age_secs
+
+    # prompt=none: the AS must not display any UI. If the caller isn't
+    # authenticated, re-authentication would be forced, or the existing
+    # session's max_age has expired, that's an error delivered via the
+    # redirect channel (OIDC Core §3.1.2.6) — never the interactive login UI.
+    if "none" in prompt_values and (user_id is None or force_login or auth_expired):
+        return _error_redirect(
+            redirect_uri,
+            "login_required",
+            "User is not authenticated and prompt=none was requested",
+            state,
+            config.issuer,
+        )
 
     if user_id is None or force_login or auth_expired:
         original = request.url.path
@@ -191,7 +255,7 @@ async def authorize(request: Request):
         scope,
         code_challenge=code_challenge,
         code_challenge_method=code_challenge_method,
-        nonce=params.get("nonce"),
+        nonce=merged.get("nonce"),
     )
 
     success_params = {"code": auth_code.code, "iss": config.issuer}

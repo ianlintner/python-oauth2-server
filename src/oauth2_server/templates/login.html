@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 360px; margin: 4rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.25rem; }
+  .error { background: #fdecea; border: 1px solid #f5c2c0; color: #611a15; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
+  label { display: block; margin-top: 1rem; font-weight: 600; font-size: 0.9rem; }
+  input[type="text"], input[type="password"] { width: 100%; padding: 0.5rem; margin-top: 0.25rem; box-sizing: border-box; font-size: 1rem; }
+  button { margin-top: 1.5rem; padding: 0.5rem 1.25rem; font-size: 1rem; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>Sign in</h1>
+<!--SERVER_ERROR-->
+<form method="post" action="/auth/login">
+  <label for="username">Username</label>
+  <input type="text" id="username" name="username" autocomplete="username" required>
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" autocomplete="current-password" required>
+  <button type="submit">Sign in</button>
+</form>
+</body>
+</html>

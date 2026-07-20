@@ -2,7 +2,9 @@ from tests.helpers import post_token, seed_client
 from tests.test_token_endpoint import run_code_flow
 
 
-async def post_introspect(client_app, token: str, basic_auth: tuple[str, str] | None):
+async def post_introspect(
+    client_app, token: str, basic_auth: tuple[str, str] | None = ("client1", "s3cret")
+):
     import base64
 
     headers = {}
@@ -123,3 +125,13 @@ async def test_introspect_unknown_token_inactive(client_app):
     )
     assert resp.status_code == 200
     assert resp.json() == {"active": False}
+
+
+async def test_refresh_token_introspects_with_refresh_expiry(client_app):
+    resp, _ = await run_code_flow(client_app, scope="read")
+    body = resp.json()
+    intro = await post_introspect(client_app, body["refresh_token"])
+    data = intro.json()
+    assert data["active"] is True
+    # exp reflects the refresh TTL (86400), not the access TTL (3600).
+    assert data["exp"] - data["iat"] > 3600

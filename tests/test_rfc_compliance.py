@@ -17,13 +17,31 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import jwt
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from httpx import ASGITransport, AsyncClient
 
+from oauth2_server.app import create_app
+from oauth2_server.config import Config
+from oauth2_server.models import DenylistEntry, Token
 from tests.conftest import build_client_app
-from tests.helpers import login_session, post_token, seed_client
+from tests.helpers import (
+    login_session,
+    make_storage,
+    post_token,
+    reseed_client,
+    seed_client,
+    seed_user,
+)
+from tests.test_token_endpoint import run_code_flow
 
 ISSUER = "https://auth.example.com"
 JWT_SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
@@ -466,6 +484,73 @@ async def test_max_age_zero_forces_reauthentication(client_app):
     assert resp.headers["location"] == "/auth/login", "max_age=0 must force re-authentication"
 
 
+async def test_prompt_none_with_expired_max_age_returns_login_required(app_with_session):
+    await login_session(app_with_session)
+
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "prompt": "none",
+            "max_age": "0",
+            "state": "s1",
+        },
+    )
+    assert resp.status_code == 302, "must redirect"
+    q = _query(resp.headers["location"])
+    assert q["error"] == "login_required", (
+        "OIDC: prompt=none with an expired max_age must return login_required, "
+        "not fall through to the interactive login UI"
+    )
+    assert q["state"] == "s1", "state must be preserved in error redirect"
+    assert resp.headers["location"].startswith("https://a.example/cb")
+
+
+async def test_prompt_none_combined_with_login_is_invalid_request(app_with_session):
+    await login_session(app_with_session)
+
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "prompt": "none login",
+        },
+    )
+    assert resp.status_code == 302, "must redirect"
+    q = _query(resp.headers["location"])
+    assert q["error"] == "invalid_request", (
+        "OIDC: prompt=none combined with any other prompt value is invalid_request"
+    )
+
+
+async def test_prompt_none_with_fresh_session_issues_code(app_with_session):
+    await login_session(app_with_session)
+
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "prompt": "none",
+            "state": "fresh1",
+        },
+    )
+    assert resp.status_code == 302, "must redirect"
+    assert resp.headers["location"].startswith("https://a.example/cb")
+    q = _query(resp.headers["location"])
+    assert "code" in q, "prompt=none with a fresh session must issue a code"
+    assert q["state"] == "fresh1", "state must be preserved in the redirect"
+    assert q["iss"] == ISSUER, "RFC 9207: iss must be present in the redirect"
+
+
 # ---------------------------------------------------------------------------
 # Chunk 1.E — Logout with id_token_hint / cascade revocation
 # ---------------------------------------------------------------------------
@@ -550,3 +635,264 @@ async def test_discovery_includes_iss_parameter_supported(client_app):
     claims = body["claims_supported"]
     assert "email" in claims, "claims_supported must include 'email'"
     assert "preferred_username" in claims, "claims_supported must include 'preferred_username'"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 compliance pins (Task 15)
+#
+# Each test below is a thin wrapper pinning one Phase 2 behavior that already
+# has full coverage in its own dedicated module (named in each docstring).
+# Keeping a copy here — with names matching the Rust `compliance_wave*.rs`
+# suites — keeps this file the single diffable compliance surface for both
+# implementations.
+# ---------------------------------------------------------------------------
+
+
+def _basic_header(client_id: str, client_secret: str) -> dict:
+    raw = f"{client_id}:{client_secret}".encode()
+    return {"Authorization": "Basic " + base64.b64encode(raw).decode()}
+
+
+async def test_refresh_token_expires_after_ttl(client_app):
+    """Full coverage: test_token_endpoint.py::test_expired_refresh_token_rejected."""
+    resp, _ = await run_code_flow(client_app, scope="read")
+    refresh = resp.json()["refresh_token"]
+    row = await client_app.storage.get_token_by_refresh_token(refresh)
+    aged = row.model_copy(update={"created_at": row.created_at - timedelta(seconds=86400 + 60)})
+    await client_app.storage.revoke_token(row.access_token)
+    await client_app.storage.save_token(
+        aged.model_copy(
+            update={"id": uuid.uuid4().hex, "access_token": "at-aged", "refresh_token": "rt-aged"}
+        )
+    )
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": "rt-aged"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp2.status_code == 400, "refresh past created_at + refresh_token_ttl_secs must fail"
+    body = resp2.json()
+    assert body["error"] == "invalid_grant"
+    assert "expired" in body["error_description"]
+
+
+async def test_prompt_none_expired_max_age_login_required(app_with_session):
+    """Full coverage: test_prompt_none_with_expired_max_age_returns_login_required above."""
+    await login_session(app_with_session)
+
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "prompt": "none",
+            "max_age": "0",
+            "state": "pin1",
+        },
+    )
+    assert resp.status_code == 302
+    q = _query(resp.headers["location"])
+    assert q["error"] == "login_required", (
+        "prompt=none with an expired max_age must return login_required, not the login UI"
+    )
+    assert q["state"] == "pin1"
+
+
+async def test_rfc9126_par_round_trip(client_app):
+    """Full coverage: test_par.py::test_par_request_uri_full_flow."""
+    verifier, challenge = _pkce_pair()
+    push_resp = await client_app.post(
+        "/oauth/par",
+        data={
+            "client_id": "client1",
+            "response_type": "code",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        },
+        headers=_basic_header("client1", "s3cret"),
+    )
+    assert push_resp.status_code == 201, push_resp.text
+    request_uri = push_resp.json()["request_uri"]
+    assert request_uri.startswith("urn:ietf:params:oauth:request-uri:")
+
+    await login_session(client_app)
+    authorize_resp = await client_app.get(
+        "/oauth/authorize",
+        params={"request_uri": request_uri, "client_id": "client1", "response_type": "code"},
+    )
+    assert authorize_resp.status_code == 302, authorize_resp.text
+    code = _query(authorize_resp.headers["location"])["code"]
+
+    token_resp = await client_app.post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "https://a.example/cb",
+            "client_id": "client1",
+            "code_verifier": verifier,
+        },
+        headers=_basic_header("client1", "s3cret"),
+    )
+    assert token_resp.status_code == 200, token_resp.text
+    assert "access_token" in token_resp.json(), (
+        "RFC 9126: a pushed request_uri must complete the full authorization_code exchange"
+    )
+
+
+async def test_oidc_logout_redirects_with_exact_state(client_app):
+    """Full coverage: test_logout.py::test_logout_redirects_with_exact_state."""
+    await reseed_client(
+        client_app,
+        redirect_uris=json.dumps(["https://app.example.com/logged-out"]),
+        post_logout_redirect_uris="",
+    )
+
+    resp = await client_app.get(
+        "/oauth/logout",
+        params={
+            "post_logout_redirect_uri": "https://app.example.com/logged-out",
+            "state": "pin-state",
+        },
+    )
+    assert resp.status_code == 302, resp.text
+    assert resp.headers["location"] == "https://app.example.com/logged-out?state=pin-state", (
+        "OIDC RP-initiated logout must echo state exactly and add no other query params"
+    )
+
+
+async def test_backchannel_logout_token_shape(client_app):
+    """Full coverage: test_logout.py::test_backchannel_logout_posts_valid_token."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200)
+
+    client_app.app.state.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), timeout=10
+    )
+
+    await reseed_client(
+        client_app,
+        backchannel_logout_uri="https://rp.example/bc-logout",
+        backchannel_logout_session_required=False,
+    )
+
+    id_token_hint = jwt.encode(
+        {"iss": ISSUER, "sub": "u1", "aud": "client1", "exp": 9999999999, "iat": 0},
+        JWT_SECRET,
+        algorithm="HS256",
+    )
+    resp = await client_app.get("/oauth/logout", params={"id_token_hint": id_token_hint})
+    assert resp.status_code == 200, resp.text
+
+    assert len(captured) == 1, "back-channel logout must POST exactly once to the RP"
+    logout_token = captured[0].content.decode().removeprefix("logout_token=")
+
+    header = jwt.get_unverified_header(logout_token)
+    assert header["typ"] == "logout+JWT", "back-channel logout token must be typed logout+JWT"
+
+    claims = jwt.decode(
+        logout_token, JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False}
+    )
+    assert claims["events"] == {"http://schemas.openid.net/event/backchannel-logout": {}}
+    assert claims["sub"] == "u1"
+    assert claims["aud"] == "client1"
+    assert "jti" in claims
+    assert "iat" in claims
+    assert "exp" in claims
+
+
+async def test_jwks_rs256_shape(client_app):
+    """Full coverage: test_jwks_rs256.py::test_jwks_publishes_rs256_key_shape."""
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+    async with build_client_app(
+        {"id_token_private_key_pem": pem, "id_token_kid": "pin-rs256-key"}
+    ) as app:
+        resp = await app.get("/.well-known/jwks.json")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body["keys"]) == 1
+        jwk = body["keys"][0]
+        assert jwk["kid"] == "pin-rs256-key"
+        assert jwk["kty"] == "RSA"
+        assert jwk["use"] == "sig"
+        assert jwk["alg"] == "RS256"
+        assert set(jwk) == {"kid", "kty", "use", "alg", "n", "e"}, (
+            "JWKS entries must expose only the public-key material, never `d`/`p`/`q`"
+        )
+
+
+async def test_admin_rbac_bearer_allowlist(client_app):
+    """Full coverage: test_admin_rbac.py bearer + admin_client_ids tests."""
+    async with build_client_app({"admin_client_ids": ["client1"]}) as app:
+        allowed = Token(
+            id=uuid.uuid4().hex,
+            access_token=uuid.uuid4().hex,
+            client_id="client1",
+            scope="admin read",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        await app.storage.save_token(allowed)
+        resp = await app.get(
+            "/admin/api/users", headers={"Authorization": f"Bearer {allowed.access_token}"}
+        )
+        assert resp.status_code == 200, (
+            "admin-scoped bearer from an allowlisted client_id must pass the guard"
+        )
+
+        denied = Token(
+            id=uuid.uuid4().hex,
+            access_token=uuid.uuid4().hex,
+            client_id="not-allowlisted-client",
+            scope="admin read",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        await app.storage.save_token(denied)
+        resp2 = await app.get(
+            "/admin/api/users", headers={"Authorization": f"Bearer {denied.access_token}"}
+        )
+        assert resp2.status_code == 403, (
+            "the 'admin' scope alone is not sufficient without OAUTH2_ADMIN_CLIENT_IDS membership"
+        )
+        assert resp2.json()["error"] == "insufficient_scope"
+
+
+async def test_denylist_ip_blocked():
+    """Full coverage: test_denylist_middleware.py::test_middleware_blocks_denylisted_ip."""
+    config = Config(jwt_secret=JWT_SECRET, issuer=ISSUER)
+    storage = await make_storage()
+    await seed_client(storage)
+    await seed_user(storage)
+    app = create_app(config, storage)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("198.51.100.42", 123)),
+        base_url=ISSUER,
+    ) as client:
+        await storage.add_denylist_entry(
+            DenylistEntry(
+                id=uuid.uuid4().hex,
+                kind="ip",
+                value="198.51.100.42",
+                reason="pinned compliance test",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        resp = await client.get("/health")
+        assert resp.status_code == 403, "DenylistGuard must block every route, including /health"
+        assert resp.json() == {
+            "error": "access_denied",
+            "error_description": "request source is denylisted",
+        }

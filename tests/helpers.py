@@ -24,7 +24,14 @@ async def seed_client(storage, **overrides) -> Client:
         client_id="client1",
         client_secret="s3cret",
         redirect_uris=json.dumps(["https://a.example/cb"]),
-        grant_types=json.dumps(["authorization_code", "client_credentials", "refresh_token"]),
+        grant_types=json.dumps(
+            [
+                "authorization_code",
+                "client_credentials",
+                "refresh_token",
+                "urn:ietf:params:oauth:grant-type:device_code",
+            ]
+        ),
         scope="read openid email profile",
         name="test-client",
         created_at=now,
@@ -35,6 +42,18 @@ async def seed_client(storage, **overrides) -> Client:
     client = Client(**fields)
     await storage.save_client(client)
     return client
+
+
+async def reseed_client(client_app, **overrides) -> Client:
+    """Delete and re-save `client1` with `overrides` layered on top of the
+    `seed_client` defaults. Useful for tests that need `client1` to have a
+    narrower `grant_types` allow-list than the default. `grant_types` may be
+    passed as a plain list (it will be JSON-encoded automatically)."""
+    if isinstance(overrides.get("grant_types"), list):
+        overrides["grant_types"] = json.dumps(overrides["grant_types"])
+    storage = client_app.storage
+    await storage.delete_client("client1")
+    return await seed_client(storage, **overrides)
 
 
 async def seed_user(storage) -> User:
@@ -48,9 +67,26 @@ async def seed_user(storage) -> User:
     return user
 
 
+async def seed_admin(storage) -> User:
+    user = User(
+        id="admin1",
+        username="admin_rfc",
+        email="admin_rfc@example.test",
+        password_hash=security.hash_password("password123"),
+        role="admin",
+    )
+    await storage.save_user(user)
+    return user
+
+
 async def login_session(client, username: str = "user_rfc", password: str = "password123"):
     """POST /auth/login and let the httpx client carry the resulting session cookie."""
     return await client.post("/auth/login", data={"username": username, "password": password})
+
+
+async def login_admin(client):
+    """POST /auth/login as the seeded admin user from `seed_admin`."""
+    return await login_session(client, username="admin_rfc", password="password123")
 
 
 async def post_token(client_app, data: dict, basic_auth: tuple[str, str] | None = None):

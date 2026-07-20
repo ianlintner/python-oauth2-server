@@ -4,9 +4,78 @@ Python port of [rust-oauth2-server](https://github.com/ianlintner/rust-oauth2-se
 
 - Same DB schema: `migrations/sql/` is vendored verbatim from the Rust repo (source of truth); both servers can share one Postgres.
 - RFC compliance tests ported 1:1 from the Rust suite act as the spec.
-- Stack: FastAPI, uvicorn+uvloop, Pydantic v2, SQLAlchemy async (raw SQL), PyJWT, argon2-cffi.
+- Stack: FastAPI, uvicorn+uvloop, Pydantic v2, SQLAlchemy async (raw SQL), PyJWT, argon2-cffi, cryptography (RS256/JWKS).
 
-Plan: `docs/plans/2026-07-19-python-oauth2-port.md`
+Plan: `docs/plans/2026-07-19-python-oauth2-port.md` (Phase 1), `docs/plans/2026-07-19-python-oauth2-port-phase-2.md` (Phase 2).
+
+## Phase 2 features
+
+Phase 2 closes the Phase 1 review backlog (see `docs/PHASE2-BACKLOG.md`) and ports the
+remaining Rust feature set:
+
+- **Admin JSON API + RBAC** (`/admin/api/*`) — clients/users/tokens/devices CRUD, dashboard
+  summary, capabilities, and a recent-events feed, all behind a dual-mode guard that accepts
+  either an authenticated admin session (`role=admin` or an allowlisted email) or a bearer
+  token with `admin` scope from an allowlisted `client_id`.
+- **Denylist + audit log** — a global `DenylistGuard` ASGI middleware blocks requests by
+  source IP (fail-open on storage errors); every admin mutation and revocation writes a
+  best-effort `audit_log` entry.
+- **Full OIDC RP-initiated logout** — `GET /oauth/logout` supports `id_token_hint`,
+  `post_logout_redirect_uri` validation, front-channel iframe logout, and back-channel
+  `logout+JWT` delivery via `httpx`; `GET /oauth/check_session` for session-status iframes.
+  `dynamic_registration_enabled` gates `/connect/register` (default off).
+- **PAR (RFC 9126)** — `POST /oauth/par` pushes authorization parameters and returns a
+  short-lived, single-use `request_uri` that `GET /oauth/authorize` can consume.
+- **RS256 key rotation + JWKS** — when `OAUTH2_ID_TOKEN_PRIVATE_KEY_PEM` is configured, access
+  and ID tokens are signed RS256 and published at `/.well-known/jwks.json`;
+  `POST /admin/api/keys/rotate` rotates in a new key while keeping the old one available in
+  the JWKS for `key_rotation_grace_hours` (default 24) so in-flight tokens keep verifying.
+- **Login + device-verify UI** — minimal server-rendered HTML for `/auth/login` and the
+  `GET /oauth/device/verify` user-code entry page (the `POST` endpoint stays JSON, a
+  deliberate divergence from Rust — see "Accepted divergences" in `docs/PHASE2-BACKLOG.md`).
+- Hardening carried over from the Phase 1 backlog: refresh-token TTL enforcement (+
+  `id_token` re-mint on refresh/device-code grants), a migration advisory lock so multiple
+  workers can boot against a fresh DB safely, HKDF-derived session-cookie signing key,
+  async (non-blocking) argon2 password verification, `at+JWT` typ enforcement on access
+  tokens, and a single grant-type allow-list applied consistently across every grant.
+
+### New environment variables (Phase 2)
+
+All are `OAUTH2_`-prefixed (see `src/oauth2_server/config.py` for the full `Config` model):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OAUTH2_ADMIN_CLIENT_IDS` | unset (empty) | Comma-separated `client_id` allowlist for the bearer-token admin-API path. Fails closed — an empty/unset list denies every bearer token, even one with `admin` scope. |
+| `OAUTH2_ADMIN_EMAILS` | unset (empty) | Comma-separated, case-insensitive email allowlist that grants admin-API access to a session even when the user's `role` isn't `admin`. |
+| `OAUTH2_SEED_USERNAME` | `admin` | Username for the optional startup-seeded admin user. |
+| `OAUTH2_SEED_PASSWORD` | unset | **Admin seeding only runs when this is explicitly set** — a deliberate divergence from Rust, which ships an insecure default password rejected only in production mode. |
+| `OAUTH2_SEED_EMAIL` | `admin@example.com` | Email for the seeded admin user. |
+| `OAUTH2_ID_TOKEN_PRIVATE_KEY_PEM` | unset | PEM-encoded RSA private key. When set, access + ID tokens are signed RS256 instead of HS256 and JWKS publishes a public key. Literal `\n` sequences in a single-line env value are unescaped automatically. |
+| `OAUTH2_ID_TOKEN_KID` | unset | `kid` for the configured RS256 key; required alongside the PEM to appear in JWKS/token headers. |
+| `OAUTH2_ID_TOKEN_ALG` | `RS256` if a PEM is set, else `HS256` | Explicit override for the signing algorithm; normalized to upper-case. |
+| `OAUTH2_KEY_ROTATION_GRACE_HOURS` | `24` | How long a rotated-out RS256 key stays published in JWKS after `POST /admin/api/keys/rotate`, so tokens signed just before rotation still verify. |
+| `OAUTH2_DYNAMIC_REGISTRATION_ENABLED` | `false` | Gates `POST /connect/register`. Off by default, unlike Rust. |
+
+### Single-process state caveats
+
+Three Phase 2 subsystems are in-process, in-memory singletons hung off `app.state`
+(mirroring the Rust server's in-memory actors) and are **not** shared across worker
+processes or server instances:
+
+- **`ParStore`** (`services/par.py`) — pushed-authorization-request state (RFC 9126). A
+  `request_uri` pushed on one worker cannot be consumed by `GET /oauth/authorize` on
+  another.
+- **`KeySet`** (`keys.py`) — the RS256 signing-key set, including rotation history. Rotating
+  keys via `POST /admin/api/keys/rotate` on one worker does not propagate to sibling workers,
+  and the `signing_keys` DB table is intentionally unused (orphaned, matching Rust) — key
+  material is never persisted.
+- **`RecentEventsStore`** (`services/events.py`) — the bounded ring buffer backing
+  `GET /admin/api/events`. Each worker only sees the events it personally handled.
+
+**Practical consequence:** run `OAUTH2_WORKERS=1`, or front a multi-worker/multi-instance
+deployment with a sticky-session load balancer that pins a given client to one process, until
+Phase 3 adds persistence for these three stores (see `docs/PHASE2-BACKLOG.md` → "Phase 3
+candidates").
 
 ## Running
 

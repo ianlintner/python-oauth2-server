@@ -36,6 +36,17 @@ def _is_valid_redirect_uri(uri: str) -> bool:
 
 @router.post("/register")
 async def register_client(request: Request) -> ORJSONResponse:
+    config = request.app.state.config
+    if not config.dynamic_registration_enabled:
+        return ORJSONResponse(
+            {
+                "error": "access_denied",
+                "error_description": "dynamic client registration is disabled",
+            },
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+        )
+
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
@@ -47,10 +58,26 @@ async def register_client(request: Request) -> ORJSONResponse:
         return _registration_error("invalid registration request")
 
     storage = request.app.state.storage
-    config = request.app.state.config
 
     if not reg.redirect_uris or not all(_is_valid_redirect_uri(u) for u in reg.redirect_uris):
         return _registration_error("redirect_uris must be a non-empty list of absolute URLs")
+
+    if reg.backchannel_logout_uri and not _is_valid_redirect_uri(reg.backchannel_logout_uri):
+        return _registration_error(
+            "backchannel_logout_uri must be an absolute http(s) URL without fragment"
+        )
+
+    if reg.frontchannel_logout_uri and not _is_valid_redirect_uri(reg.frontchannel_logout_uri):
+        return _registration_error(
+            "frontchannel_logout_uri must be an absolute http(s) URL without fragment"
+        )
+
+    if reg.post_logout_redirect_uris and not all(
+        _is_valid_redirect_uri(u) for u in reg.post_logout_redirect_uris
+    ):
+        return _registration_error(
+            "post_logout_redirect_uris must be a list of absolute http(s) URLs without fragment"
+        )
 
     if reg.token_endpoint_auth_method not in _VALID_AUTH_METHODS:
         return _registration_error(
@@ -83,6 +110,11 @@ async def register_client(request: Request) -> ORJSONResponse:
         token_endpoint_auth_method=reg.token_endpoint_auth_method,
         registration_access_token=registration_access_token,
         contacts=json.dumps(reg.contacts),
+        backchannel_logout_uri=reg.backchannel_logout_uri or "",
+        backchannel_logout_session_required=reg.backchannel_logout_session_required,
+        frontchannel_logout_uri=reg.frontchannel_logout_uri or "",
+        frontchannel_logout_session_required=reg.frontchannel_logout_session_required,
+        post_logout_redirect_uris=json.dumps(reg.post_logout_redirect_uris),
         enabled=True,
     )
     await storage.save_client(client)
@@ -100,6 +132,11 @@ async def register_client(request: Request) -> ORJSONResponse:
         token_endpoint_auth_method=reg.token_endpoint_auth_method,
         client_name=reg.client_name,
         scope=reg.scope,
+        backchannel_logout_uri=reg.backchannel_logout_uri,
+        backchannel_logout_session_required=reg.backchannel_logout_session_required,
+        frontchannel_logout_uri=reg.frontchannel_logout_uri,
+        frontchannel_logout_session_required=reg.frontchannel_logout_session_required,
+        post_logout_redirect_uris=reg.post_logout_redirect_uris,
     )
     return ORJSONResponse(
         response_body.model_dump(exclude_none=True),

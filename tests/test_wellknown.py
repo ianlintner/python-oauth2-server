@@ -33,10 +33,32 @@ async def test_discovery_advertises_none_auth_method(client_app):
     assert "none" in resp.json()["token_endpoint_auth_methods_supported"]
 
 
+async def test_discovery_advertises_par(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["pushed_authorization_request_endpoint"] == "https://auth.example.com/oauth/par"
+    assert body["require_pushed_authorization_requests"] is False
+    assert body["request_uri_parameter_supported"] is True
+    assert body["request_parameter_supported"] is False
+
+
 async def test_jwks_returns_empty_keys(client_app):
     resp = await client_app.get("/.well-known/jwks.json")
     assert resp.status_code == 200
     assert resp.json() == {"keys": []}
+
+
+async def test_discovery_includes_session_management_fields(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["end_session_endpoint"] == "https://auth.example.com/oauth/logout"
+    assert body["check_session_iframe"] == "https://auth.example.com/oauth/check_session"
+    assert body["backchannel_logout_supported"] is True
+    assert body["backchannel_logout_session_supported"] is True
+    assert body["frontchannel_logout_supported"] is True
+    assert body["frontchannel_logout_session_supported"] is True
 
 
 async def _get_userinfo(client_app, access_token: str | None, *, in_query: bool = False):

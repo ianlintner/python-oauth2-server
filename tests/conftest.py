@@ -15,6 +15,11 @@ async def build_client_app(config_overrides: dict | None = None):
     overrides = {
         "jwt_secret": "unit-test-secret-not-for-production-0123456789abcdef",
         "issuer": "https://auth.example.com",
+        # Most of the suite exercises /connect/register directly; keep it
+        # enabled here so the production-default-False gate (tested
+        # explicitly in tests/test_registration.py) doesn't need to be
+        # threaded through every call site.
+        "dynamic_registration_enabled": True,
         **(config_overrides or {}),
     }
     config = Config(**overrides)
@@ -26,6 +31,7 @@ async def build_client_app(config_overrides: dict | None = None):
         transport=ASGITransport(app=app), base_url="https://auth.example.com"
     ) as c:
         c.storage = storage
+        c.app = app
         yield c
 
 

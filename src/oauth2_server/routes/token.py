@@ -6,13 +6,14 @@ import base64
 import hashlib
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
+from oauth2_server.config import Config
 from oauth2_server.errors import OAuthError, oauth_error
-from oauth2_server.models import IdTokenClaims
+from oauth2_server.models import Client, IdTokenClaims, User
 from oauth2_server.security import encode_id_token
 from oauth2_server.services.auth import scope_is_subset
 from oauth2_server.services.clients import ClientService
@@ -35,11 +36,58 @@ def _pkce_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
+def _mint_id_token(
+    config: Config,
+    client: Client,
+    user_id: str,
+    user: User | None,
+    scope: str,
+    access_token: str,
+    *,
+    nonce: str | None = None,
+    code: str | None = None,
+) -> str:
+    """Build and encode an OIDC id_token (OIDC Core §2).
+
+    Shared by the authorization_code and refresh_token grant branches. Callers
+    must check `"openid" in scope` before calling; the id_token is minted
+    unconditionally for openid scope, using `user_id` as `sub`. `user` is an
+    optional best-effort lookup (`get_user_by_id`) — when the user row is
+    missing (e.g. the user was deleted after the token was issued), `sub` is
+    still set from `user_id` and email/preferred_username are simply omitted.
+    `nonce`/`code` are only supplied on the initial code exchange — OIDC Core
+    §12.2 forbids echoing `nonce` on a refreshed id_token, and there is no
+    code to hash on refresh. Raises `ValueError` (caught by both call sites,
+    turned into a 500 `server_error`) when `config.id_token_alg == "RS256"`
+    but `config.id_token_private_key_pem` is unset.
+    """
+    scope_set = set(scope.split())
+    now = int(datetime.now(timezone.utc).timestamp())
+    id_claims = IdTokenClaims(
+        iss=config.issuer,
+        sub=user_id,
+        aud=client.client_id,
+        exp=now + config.access_token_ttl_secs,
+        iat=now,
+        nonce=nonce,
+        at_hash=_half_hash(access_token),
+    )
+    if code is not None:
+        id_claims.c_hash = _half_hash(code)
+    if user is not None:
+        if "email" in scope_set:
+            id_claims.email = user.email
+        if "profile" in scope_set:
+            id_claims.preferred_username = user.username
+    return encode_id_token(id_claims, config.jwt_secret, config=config)
+
+
 @router.post("/token")
 async def token(request: Request) -> ORJSONResponse:
     form = dict(await request.form())
     storage = request.app.state.storage
     config = request.app.state.config
+    keyset = request.app.state.keyset
 
     try:
         client = await ClientService(storage).authenticate(
@@ -63,12 +111,13 @@ async def token(request: Request) -> ORJSONResponse:
 
         requested_scope = form.get("scope") or ""
         if requested_scope:
-            client_scopes = set(client.scope.split())
-            scope = " ".join(s for s in requested_scope.split() if s in client_scopes)
+            if not scope_is_subset(requested_scope, client.scope):
+                return oauth_error("invalid_scope", "requested scope exceeds client scope")
+            scope = requested_scope
         else:
             scope = client.scope
 
-        token_response = await TokenService(storage, config).issue(
+        token_response = await TokenService(storage, config, keyset).issue(
             client, None, scope, with_refresh=False
         )
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
@@ -76,6 +125,11 @@ async def token(request: Request) -> ORJSONResponse:
         return response
 
     if grant_type == "authorization_code":
+        if "authorization_code" not in client.grant_type_list():
+            return oauth_error(
+                "unauthorized_client", "client is not authorized for this grant type"
+            )
+
         code_value = form.get("code")
         auth_code = await storage.get_authorization_code(code_value) if code_value else None
         if auth_code is None:
@@ -116,7 +170,7 @@ async def token(request: Request) -> ORJSONResponse:
                 await storage.revoke_token_family(auth_code.token_family)
             return oauth_error("invalid_grant", "authorization code has already been used")
 
-        token_response = await TokenService(storage, config).issue(
+        token_response = await TokenService(storage, config, keyset).issue(
             client,
             auth_code.user_id,
             auth_code.scope,
@@ -126,31 +180,31 @@ async def token(request: Request) -> ORJSONResponse:
 
         scope_set = set(auth_code.scope.split())
         if "openid" in scope_set:
-            now = int(datetime.now(timezone.utc).timestamp())
-            id_claims = IdTokenClaims(
-                iss=config.issuer,
-                sub=auth_code.user_id,
-                aud=client.client_id,
-                exp=now + config.access_token_ttl_secs,
-                iat=now,
-                nonce=auth_code.nonce,
-                c_hash=_half_hash(auth_code.code),
-                at_hash=_half_hash(token_response.access_token),
-            )
-            if "email" in scope_set or "profile" in scope_set:
-                user = await storage.get_user_by_id(auth_code.user_id)
-                if user is not None:
-                    if "email" in scope_set:
-                        id_claims.email = user.email
-                    if "profile" in scope_set:
-                        id_claims.preferred_username = user.username
-            token_response.id_token = encode_id_token(id_claims, config.jwt_secret)
+            user = await storage.get_user_by_id(auth_code.user_id)
+            try:
+                token_response.id_token = _mint_id_token(
+                    config,
+                    client,
+                    auth_code.user_id,
+                    user,
+                    auth_code.scope,
+                    token_response.access_token,
+                    nonce=auth_code.nonce,
+                    code=auth_code.code,
+                )
+            except ValueError as exc:
+                return oauth_error("server_error", str(exc), status=500)
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
         return response
 
     if grant_type == "refresh_token":
+        if "refresh_token" not in client.grant_type_list():
+            return oauth_error(
+                "unauthorized_client", "client is not authorized for this grant type"
+            )
+
         refresh_token_value = form.get("refresh_token")
         old_token = (
             await storage.get_token_by_refresh_token(refresh_token_value)
@@ -170,6 +224,10 @@ async def token(request: Request) -> ORJSONResponse:
                 await storage.revoke_token_family(old_token.token_family)
             return oauth_error("invalid_grant", "refresh token has been revoked")
 
+        refresh_deadline = old_token.created_at + timedelta(seconds=config.refresh_token_ttl_secs)
+        if datetime.now(timezone.utc) >= refresh_deadline:
+            return oauth_error("invalid_grant", "refresh token has expired")
+
         requested_scope = form.get("scope")
         if requested_scope:
             if not scope_is_subset(requested_scope, old_token.scope):
@@ -181,14 +239,30 @@ async def token(request: Request) -> ORJSONResponse:
         family = old_token.token_family or uuid.uuid4().hex
         await storage.revoke_token(old_token.access_token)
 
-        token_response = await TokenService(storage, config).issue(
+        token_response = await TokenService(storage, config, keyset).issue(
             client, old_token.user_id, scope, with_refresh=True, token_family=family
         )
+
+        scope_set = set(scope.split())
+        if "openid" in scope_set and old_token.user_id:
+            user = await storage.get_user_by_id(old_token.user_id)
+            try:
+                token_response.id_token = _mint_id_token(
+                    config, client, old_token.user_id, user, scope, token_response.access_token
+                )
+            except ValueError as exc:
+                return oauth_error("server_error", str(exc), status=500)
+
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
         return response
 
     if grant_type == "urn:ietf:params:oauth:grant-type:device_code":
+        if grant_type not in client.grant_type_list():
+            return oauth_error(
+                "unauthorized_client", "client is not authorized for this grant type"
+            )
+
         device_code = form.get("device_code")
         device = (
             await storage.get_device_authorization_by_device_code(device_code)
@@ -215,13 +289,24 @@ async def token(request: Request) -> ORJSONResponse:
             # Lost the race to a concurrent request that already claimed this code.
             return oauth_error("invalid_grant", "device_code has already been redeemed")
 
-        token_response = await TokenService(storage, config).issue(
+        token_response = await TokenService(storage, config, keyset).issue(
             client,
             device.user_id,
             device.scope,
             with_refresh=True,
             token_family=uuid.uuid4().hex,
         )
+
+        scope_set = set(device.scope.split())
+        if "openid" in scope_set and device.user_id:
+            user = await storage.get_user_by_id(device.user_id)
+            try:
+                token_response.id_token = _mint_id_token(
+                    config, client, device.user_id, user, device.scope, token_response.access_token
+                )
+            except ValueError as exc:
+                return oauth_error("server_error", str(exc), status=500)
+
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
         return response

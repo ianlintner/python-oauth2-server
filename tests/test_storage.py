@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from oauth2_server.config import Config
 from oauth2_server.models import AuthorizationCode, Client, DeviceAuthorization, Token, User
 from oauth2_server.storage.sql import SqlStorage
+from tests.helpers import make_storage
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations" / "sql"
 
@@ -100,6 +102,52 @@ async def test_mark_device_authorization_used_is_single_claim(storage):
     await storage.save_device_authorization(d)
     assert await storage.mark_device_authorization_used("dc-race") == 1
     assert await storage.mark_device_authorization_used("dc-race") == 0
+
+
+async def test_expire_device_authorization_expires_row(storage):
+    await storage.save_client(_client())
+    d = DeviceAuthorization(
+        id=uuid.uuid4().hex,
+        device_code="dc-expire",
+        user_code="UC-EXPIRE",
+        client_id="client1",
+        scope="read",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    await storage.save_device_authorization(d)
+
+    await storage.expire_device_authorization("dc-expire")
+
+    got = await storage.get_device_authorization_by_device_code("dc-expire")
+    assert got.expires_at < datetime.now(timezone.utc)
+
+
+async def test_seed_admin_user_creates_admin_once():
+    from oauth2_server.bootstrap import seed_admin_user
+
+    storage = await make_storage()
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+        seed_password="seed-password-123",
+    )
+    assert await seed_admin_user(storage, config) is True
+    user = await storage.get_user_by_username("admin")
+    assert user is not None and user.role == "admin"
+    assert user.password_hash.startswith("$argon2")
+    assert await seed_admin_user(storage, config) is False  # idempotent
+
+
+async def test_seed_admin_user_skipped_without_password():
+    from oauth2_server.bootstrap import seed_admin_user
+
+    storage = await make_storage()
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+    )
+    assert await seed_admin_user(storage, config) is False
+    assert await storage.get_user_by_username("admin") is None
 
 
 def _client() -> Client:

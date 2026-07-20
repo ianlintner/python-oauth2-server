@@ -1,11 +1,13 @@
 import base64
 import hashlib
 import secrets
+import uuid
+from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 import jwt
 
-from tests.helpers import login_session, post_token, seed_client
+from tests.helpers import login_session, post_token, reseed_client, seed_client
 
 JWT_SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
 
@@ -277,3 +279,111 @@ async def test_id_token_echoes_nonce(client_app):
     id_token = resp.json()["id_token"]
     claims = jwt.decode(id_token, JWT_SECRET, algorithms=["HS256"], audience="client1")
     assert claims["nonce"] == "nonce-value-123"
+
+
+async def test_expired_refresh_token_rejected(client_app):
+    resp, _ = await run_code_flow(client_app, scope="read")
+    refresh = resp.json()["refresh_token"]
+    # Age the token row past the refresh TTL directly in storage.
+    row = await client_app.storage.get_token_by_refresh_token(refresh)
+    aged = row.model_copy(update={"created_at": row.created_at - timedelta(seconds=86400 + 60)})
+    await client_app.storage.revoke_token(row.access_token)
+    await client_app.storage.save_token(
+        aged.model_copy(
+            update={"id": uuid.uuid4().hex, "access_token": "at-aged", "refresh_token": "rt-aged"}
+        )
+    )
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": "rt-aged"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp2.status_code == 400
+    body = resp2.json()
+    assert body["error"] == "invalid_grant"
+    assert "expired" in body["error_description"]
+
+
+async def test_refresh_reissues_id_token_for_openid_scope(client_app):
+    resp, _ = await run_code_flow(client_app, scope="openid email")
+    refresh = resp.json()["refresh_token"]
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": refresh},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp2.status_code == 200
+    body = resp2.json()
+    assert body.get("id_token")
+    claims = jwt.decode(body["id_token"], options={"verify_signature": False})
+    assert claims["sub"] == "u1"
+    assert "nonce" not in claims  # OIDC Core §12.2: no nonce on refresh
+    assert claims["aud"] == "client1"
+    assert claims["email"] == "user_rfc@example.test"
+    # OIDC Core §3.3.2.11: at_hash = base64url-no-pad(left-half(SHA-256(access_token))),
+    # computed here the same way the implementation does, against the NEW access token.
+    expected_at_hash = (
+        base64.urlsafe_b64encode(hashlib.sha256(body["access_token"].encode()).digest()[:16])
+        .rstrip(b"=")
+        .decode()
+    )
+    assert claims["at_hash"] == expected_at_hash
+
+
+async def test_refresh_without_openid_scope_has_no_id_token(client_app):
+    resp, _ = await run_code_flow(client_app, scope="read")
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": resp.json()["refresh_token"]},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp2.json().get("id_token") is None
+
+
+# --- grant-type allow-list enforcement (Task 4) -------------------------------
+
+
+async def test_auth_code_grant_requires_allowlist(client_app):
+    await reseed_client(client_app, grant_types=["client_credentials"])
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "authorization_code",
+            "code": "x",
+            "redirect_uri": "https://a.example/cb",
+        },
+        basic_auth=("client1", "s3cret"),
+    )
+    assert (resp.status_code, resp.json()["error"]) == (400, "unauthorized_client")
+
+
+async def test_refresh_grant_requires_allowlist(client_app):
+    await reseed_client(client_app, grant_types=["client_credentials"])
+    resp = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": "x"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert (resp.status_code, resp.json()["error"]) == (400, "unauthorized_client")
+
+
+async def test_device_grant_requires_allowlist(client_app):
+    await reseed_client(client_app, grant_types=["client_credentials"])
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": "x",
+        },
+        basic_auth=("client1", "s3cret"),
+    )
+    assert (resp.status_code, resp.json()["error"]) == (400, "unauthorized_client")
+
+
+async def test_client_credentials_excess_scope_rejected(client_app):
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials", "scope": "read admin:everything"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert (resp.status_code, resp.json()["error"]) == (400, "invalid_scope")
