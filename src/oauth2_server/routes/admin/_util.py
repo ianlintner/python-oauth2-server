@@ -48,4 +48,16 @@ async def _parse_body(
         model = model_cls.model_validate(raw)
     except ValidationError as exc:
         return None, _validation_error_response(exc)
+    # `None` is only ever the "not provided" default in these models — no
+    # PUT-able column is nullable. An EXPLICIT JSON null would otherwise
+    # count as "provided" via model_fields_set and either violate a NOT NULL
+    # constraint (500) or, worse, be serialized into the row (e.g.
+    # json.dumps(None) -> the string "null" in clients.redirect_uris, which
+    # breaks /oauth/authorize for that client). Reject it up front.
+    for field in model.model_fields_set:
+        if getattr(model, field) is None:
+            return None, ORJSONResponse(
+                {"error": "invalid_request", "error_description": f"{field} must not be null"},
+                status_code=400,
+            )
     return model, None

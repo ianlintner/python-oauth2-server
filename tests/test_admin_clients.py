@@ -265,6 +265,37 @@ async def test_update_client_404_for_missing():
         assert resp.status_code == 404
 
 
+async def test_put_client_rejects_explicit_null_redirect_uris():
+    """Before the _parse_body null guard, an explicit null was 'provided' and
+    json.dumps(None) persisted the literal string "null" into
+    clients.redirect_uris — after which every /oauth/authorize for the client
+    500'd. Pin the 400 and that the row (and authorize) stay intact."""
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+
+        resp = await client.put(f"/admin/api/clients/{seeded.id}", json={"redirect_uris": None})
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_request"
+        assert "must not be null" in resp.json()["error_description"]
+
+        reloaded = await client.storage.get_client("client1")
+        assert reloaded.redirect_uri_list() == ["https://a.example/cb"]
+
+        # The production OAuth path is unharmed: authorize still redirects to
+        # the login page rather than erroring on a poisoned redirect_uris row.
+        authz = await client.get(
+            "/oauth/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "client1",
+                "redirect_uri": "https://a.example/cb",
+                "scope": "read",
+            },
+        )
+        assert authz.status_code == 302
+
+
 async def test_put_client_enabled_false_revokes_tokens():
     async with build_client_app() as client:
         await _login(client)
