@@ -20,12 +20,13 @@ async def start_device_flow(client_app, *, client_id="client1", client_secret="s
 
 
 async def poll_device_token(
-    client_app, device_code: str, *, client_id="client1", client_secret="s3cret"
+    client_app, device_code: str, *, client_id="client1", client_secret="s3cret", headers=None
 ):
     return await post_token(
         client_app,
         {"grant_type": "urn:ietf:params:oauth:grant-type:device_code", "device_code": device_code},
         basic_auth=(client_id, client_secret),
+        headers=headers,
     )
 
 

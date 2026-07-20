@@ -19,6 +19,13 @@ source this is ported from):
   requires valid UTF-8) does. To reproduce that check, `_read_dpop_header`
   below reads `request.headers.raw` directly and UTF-8-decodes the value
   itself instead of going through `.get`.
+- **Client auth runs BEFORE DPoP proof validation** (Rust validates the
+  proof first). Deliberate ordering divergence: an unauthenticated caller
+  can neither burn replay-store jti entries nor farm nonces here, closing a
+  DoS surface the Rust ordering exposes. Observable consequence: a request
+  with both a bad client secret and a bad/replayed proof gets 401
+  `invalid_client` (Rust: 400 `invalid_dpop_proof`) and its jti is NOT
+  recorded.
 """
 
 from __future__ import annotations

@@ -177,6 +177,24 @@ async def test_no_proof_issues_plain_bearer(client_app):
     assert "cnf" not in claims
 
 
+async def test_device_grant_never_binds_cnf(client_app):
+    """Rust parity: the device_code grant hardcodes cnf=None — a valid DPoP
+    proof on the redemption poll still yields an unbound Bearer token."""
+    from tests.test_device_flow import poll_device_token, start_device_flow
+
+    device = (await start_device_flow(client_app)).json()
+    await client_app.storage.approve_device_authorization(device["user_code"], "u1")
+
+    proof, _pub_jwk = make_dpop_proof(TOKEN_URL, "POST")
+    resp = await poll_device_token(client_app, device["device_code"], headers={"DPoP": proof})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["token_type"] == "Bearer"
+    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
+    assert "cnf" not in claims
+
+
 async def test_opaque_mode_drops_cnf_silently(client_app):
     # Additional coverage beyond the 8 named tests: opaque access tokens
     # (Config(access_tokens_opaque=True)) have nowhere to carry a `cnf`
