@@ -32,6 +32,7 @@ import hmac
 import logging
 import secrets
 import uuid
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import ORJSONResponse, PlainTextResponse, RedirectResponse
@@ -45,6 +46,7 @@ from oauth2_server.services.social import (
     OAUTH_PROVIDERS,
     STUB_PROVIDERS,
     ProviderError,
+    SocialUserInfo,
     build_authorize_url,
     exchange_code,
     fetch_userinfo,
@@ -52,6 +54,10 @@ from oauth2_server.services.social import (
     resolve_provider_config,
 )
 from oauth2_server.sessions import set_login
+
+if TYPE_CHECKING:
+    from oauth2_server.config import Config
+    from oauth2_server.storage.base import Storage
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +123,84 @@ async def social_login(provider: str, request: Request):
     return RedirectResponse(build_authorize_url(rc, state, code_challenge), status_code=302)
 
 
+def _fold_email(email: str) -> str:
+    """The single normalization used on BOTH sides of an account-linking
+    comparison: strip surrounding whitespace, then `casefold()`. Never
+    `lower()` — `casefold` is the Unicode-correct case-insensitive form."""
+    return email.strip().casefold()
+
+
+async def _link_by_verified_email(
+    config: "Config", storage: "Storage", userinfo: SocialUserInfo
+) -> User | None:
+    """The existing local user this social login may be linked to, or
+    `None` to provision a fresh `provider:id` account as before
+    (divergence 56).
+
+    Linking is IMPLICIT — the matched row is reused exactly as it is: its
+    username, role and password hash are untouched and no link record is
+    written, so the only effect is which row the session points at. That
+    makes a wrong "yes" here an account takeover, so this fails closed
+    unless ALL FOUR of the following hold:
+
+    1. `config.social_link_by_verified_email` is on (default OFF).
+    2. The provider VERIFIED the address (`services/social.py` sets
+       `email_verified` only where it enforced verification itself —
+       Microsoft/Azure never do, so they never link).
+    3. Exactly ONE local row folds to the same address. Zero matches means
+       nothing to link; two or more are ambiguous and are refused rather
+       than resolved by picking one. `storage.get_users_by_email` is a
+       candidate prefilter whose case semantics belong to the database, so
+       every candidate is re-checked here against `_fold_email` before it
+       counts.
+    4. The candidate is neither privileged nor disabled: not
+       `role == "admin"`, not an address in `config.admin_emails` (already
+       lowercased by its validator — an admin-by-email account is exactly
+       the row an attacker who can assert an address at a provider would
+       want), and `enabled` is True. The `enabled` check matters HERE
+       specifically: `routes/login.py` is the only other place that
+       enforces it and nothing downstream of `set_login` re-checks it, so
+       without it a DISABLED account could be signed back in by whoever
+       controls its address at a provider.
+    """
+    if not config.social_link_by_verified_email or not userinfo.email_verified:
+        return None
+    folded = _fold_email(userinfo.email)
+    if not folded:
+        return None
+    candidates = [
+        u for u in await storage.get_users_by_email(folded) if _fold_email(u.email) == folded
+    ]
+    if len(candidates) != 1:
+        if candidates:
+            logger.warning(
+                "social login email %r matches %d local accounts; refusing to link",
+                folded,
+                len(candidates),
+            )
+        return None
+    candidate = candidates[0]
+    # Both normalizations are checked against `admin_emails`: `casefold()`
+    # is the strictly-safer Unicode form, while `lower()` is exactly what
+    # `routes/admin/guard.py` will apply to `session["email"]` (i.e. to
+    # this row's address) when deciding whether the session is an admin —
+    # a row that the guard would treat as admin must never be linkable,
+    # even where the two normalizations disagree.
+    lowered = candidate.email.strip().lower()
+    if (
+        candidate.role == "admin"
+        or folded in config.admin_emails
+        or lowered in config.admin_emails
+        or not candidate.enabled
+    ):
+        logger.warning(
+            "refusing to link social login to privileged or disabled account %r",
+            candidate.username,
+        )
+        return None
+    return candidate
+
+
 @router.get("/callback/{provider}")
 async def social_callback(provider: str, request: Request):
     params = request.query_params
@@ -180,6 +264,8 @@ async def social_callback(provider: str, request: Request):
     username = f"{provider}:{userinfo.provider_user_id}"
     user = await storage.get_user_by_username(username)
     if user is None:
+        user = await _link_by_verified_email(config, storage, userinfo)
+    if user is None:
         # Placeholder password: an Argon2id hash of a random UUIDv4, never
         # logged or returned — social users authenticate solely via the
         # provider, this hash just satisfies the User model's required
@@ -202,7 +288,7 @@ async def social_callback(provider: str, request: Request):
     set_login(
         request,
         user,
-        acr=request.app.state.config.default_acr,
+        acr=config.default_acr,
         amr=["fed"],
     )
 

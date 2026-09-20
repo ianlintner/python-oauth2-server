@@ -33,6 +33,7 @@ this driver stack.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -279,6 +280,27 @@ class MongoStorage:
     async def get_user_by_id(self, user_id: str) -> User | None:
         doc = await self.users.find_one({"id": user_id})
         return _from_doc(User, doc)
+
+    async def get_users_by_email(self, email: str) -> list[User]:
+        r"""Mongo half of `get_users_by_email` (see `storage/sql.py` for the
+        contract). Mongo has no `lower()`/`trim()` expression usable in a
+        plain `find` filter, so the case-insensitive exact match is done
+        with an ANCHORED regex over `re.escape`d input plus `$options: "i"`
+        — `^\s*<escaped>\s*$`, which also absorbs whitespace around the
+        stored value the way SQL's `trim()` does. Escaping is what keeps a
+        provider-supplied address an equality test: without it, `.`/`+`
+        in an email would be regex metacharacters (a `$regex` value is
+        still data, never executable server code, but an unescaped pattern
+        would silently match rows it must not).
+
+        Note: `$options: "i"` folds ASCII only, so a non-ASCII address that
+        SQL's `lower()` would match here may return no candidate — this
+        fails CLOSED (no link, a new `provider:id` account is provisioned)
+        rather than over-matching.
+        """
+        folded = re.escape(email.strip().lower())
+        cursor = self.users.find({"email": {"$regex": f"^\\s*{folded}\\s*$", "$options": "i"}})
+        return [_from_doc(User, doc) async for doc in cursor]
 
     async def update_user(self, user: User) -> None:
         await self.users.update_one(

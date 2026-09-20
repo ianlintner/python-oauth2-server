@@ -31,12 +31,14 @@ class TokenService:
         authorization_details: list[dict] | None = None,
         act: dict | None = None,
         resource: str | None = None,
+        audience: list[str] | None = None,
     ) -> TokenResponse:
         """Issue an access (+ optional refresh) token.
 
-        `cnf` is the RFC 9449 §6.1 confirmation claim (`{"jkt": ...}`) to
-        bind onto the access token — see `routes/token.py` for which grants
-        pass a real value. **Opaque mode drops it silently**: an opaque
+        `cnf` is the confirmation claim to bind onto the access token —
+        either RFC 9449 §6.1 DPoP (`{"jkt": ...}`) or RFC 8705 §3.1
+        certificate binding (`{"x5t#S256": ...}`) — see `routes/token.py`
+        for which grants pass a real value. **Opaque mode drops it silently**: an opaque
         access token is a bare random string with nowhere to carry a `cnf`
         claim, so `cnf` here only ever reaches the issued token when
         `config.access_tokens_opaque` is False (Rust parity: the Rust server
@@ -44,7 +46,8 @@ class TokenService:
         The stored `Token` row's `token_type` always stays the model default
         "Bearer" regardless of `cnf` — only the `TokenResponse` returned here
         says "DPoP" (research-dpop.md `key_behaviors`: "the persisted Token
-        row keeps token_type 'Bearer'").
+        row keeps token_type 'Bearer'"), and only for a `jkt` binding: a
+        certificate-bound (`x5t#S256`) token is still a Bearer token.
 
         `authorization_details` (RFC 9396) follows the same opaque-mode
         drop rule as `cnf` — an opaque token has nowhere to carry it as a
@@ -65,6 +68,11 @@ class TokenService:
         claims above: an opaque token is a bare random string with no `aud`
         to bind. The stored `Token` row is unaffected either way — the
         audience lives only in the JWT.
+
+        `audience` sets `aud` verbatim and takes precedence over `resource`.
+        Its one caller is the refresh grant (divergence 60), which carries
+        the audience set the grant was originally issued for forward when the
+        refresh request names no `resource` of its own.
         """
         config = self._config
         subject = user_id or client.client_id
@@ -85,6 +93,7 @@ class TokenService:
                 authorization_details=bound_details,
                 act=bound_act,
                 resource=resource,
+                audience=audience,
             )
             # Prefer the current RS256 key so access+refresh tokens follow
             # RS256 rotation automatically whenever one is configured; fall
@@ -119,7 +128,11 @@ class TokenService:
         return TokenResponse(
             access_token=access_token,
             refresh_token=refresh_token,
-            token_type="DPoP" if bound_cnf is not None else "Bearer",
+            # RFC 9449 §5: only a DPoP (`jkt`) binding makes this a "DPoP"
+            # token. A certificate binding (RFC 8705 `x5t#S256`) stays
+            # "Bearer" — the token is still presented with the `Bearer`
+            # scheme, the certificate is the second factor.
+            token_type="DPoP" if bound_cnf and bound_cnf.get("jkt") else "Bearer",
             expires_in=config.access_token_ttl_secs,
             scope=scope,
             authorization_details=bound_details,

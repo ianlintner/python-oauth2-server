@@ -32,6 +32,33 @@ _UNKNOWN_OR_DISABLED_CLIENT_MESSAGE = "unknown or disabled client"
 # present, so a JWT client cannot fall back to `client_secret_basic`.
 _JWT_AUTH_METHODS = frozenset({"client_secret_jwt", "private_key_jwt"})
 
+# RFC 8705 certificate-bound auth methods, dispatched the same way: on the
+# REGISTERED method, never on what the request presents. A form/Basic
+# `client_secret` therefore NEVER substitutes for a certificate on these —
+# the secret-comparison branch below is unreachable for them.
+TLS_CLIENT_AUTH = "tls_client_auth"
+SELF_SIGNED_TLS_CLIENT_AUTH = "self_signed_tls_client_auth"
+
+# Fixed descriptions, reproduced from the Rust implementation. None of them
+# echoes the presented Subject DN or thumbprint back to the caller: an
+# unauthenticated caller must not be able to use the error text to confirm
+# what it just sent (or, for the DN, to probe the registered value).
+_TLS_NO_CERT_MESSAGE = (
+    "tls_client_auth requires a TLS client certificate (X-Client-Cert-Thumbprint header missing)"
+)
+_TLS_NO_DN_HEADER_MESSAGE = (
+    "tls_client_auth requires X-SSL-Client-S-DN header when Subject DN is configured"
+)
+_TLS_DN_MISMATCH_MESSAGE = "tls_client_auth: client certificate Subject DN does not match"
+_SELF_SIGNED_NO_CERT_MESSAGE = (
+    "self_signed_tls_client_auth requires a TLS client certificate "
+    "(X-Client-Cert-Thumbprint header missing)"
+)
+_SELF_SIGNED_NO_MATCH_MESSAGE = (
+    "self_signed_tls_client_auth: certificate does not match a registered JWK"
+)
+SELF_SIGNED_REQUIRES_JWKS_ERROR = "self_signed_tls_client_auth requires jwks or jwks_uri"
+
 # Every `token_endpoint_auth_method` this server accepts at registration. It
 # lives here rather than in `routes/register.py` because BOTH intake paths —
 # RFC 7591 dynamic registration and the admin JSON API
@@ -43,11 +70,27 @@ VALID_AUTH_METHODS = frozenset(
         "client_secret_post",
         "client_secret_jwt",
         "private_key_jwt",
+        TLS_CLIENT_AUTH,
+        SELF_SIGNED_TLS_CLIENT_AUTH,
         "none",
     }
 )
 
 JWKS_URI_ERROR = "jwks_uri must be an absolute https URL"
+
+
+def is_valid_redirect_uri(uri: str) -> bool:
+    """Whether `uri` is acceptable as a client `redirect_uri`.
+
+    Moved here verbatim from `routes/register.py` so every client-intake
+    path — RFC 7591 dynamic registration and the admin JSON API — validates
+    redirect URIs identically, the same reason `VALID_AUTH_METHODS` and
+    `is_valid_jwks_uri` live in this module rather than in a route.
+    """
+    parsed = urlparse(uri)
+    # RFC 6749 §3.1.2 forbids fragments in redirect URIs
+    has_fragment = bool(parsed.fragment) or uri.endswith("#")
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc) and not has_fragment
 
 
 def is_valid_jwks_uri(uri: str) -> bool:
@@ -58,9 +101,9 @@ def is_valid_jwks_uri(uri: str) -> bool:
     (`services/jwks_cache.py`), so an unvalidated value is a server-side
     request forgery primitive: a registrant could aim it at an internal
     service or walk it across ports. The rule is an https-only variant of
-    `routes/register.py::_is_valid_redirect_uri` — absolute, `https`, a real
-    netloc, no fragment — plus a rejection of hosts that resolve to the
-    server's own machine or its link-local metadata range:
+    `is_valid_redirect_uri` above — absolute, `https`, a real netloc, no
+    fragment — plus a rejection of hosts that resolve to the server's own
+    machine or its link-local metadata range:
 
     * `localhost` (and any `*.localhost` name, which RFC 6761 §6.3 reserves
       for the loopback interface),
@@ -165,6 +208,11 @@ class ClientService:
         self._issuer = issuer
         self._jwks_cache = jwks_cache
         self._jti_guard = jti_guard
+        # Set per `authenticate()` call from the proxy's mTLS headers and
+        # read by the RFC 8705 branches of `authenticate()` — see that
+        # method — which dispatch on the client's registered
+        # `token_endpoint_auth_method`.
+        self._mtls: tuple[str | None, str | None] | None = None
 
     @classmethod
     def from_app(cls, state) -> ClientService:
@@ -198,7 +246,28 @@ class ClientService:
             metadata={"success": "true" if success else "false"},
         )
 
-    async def authenticate(self, request_form: dict, authorization_header: str | None) -> Client:
+    async def authenticate(
+        self,
+        request_form: dict,
+        authorization_header: str | None,
+        *,
+        mtls: tuple[str | None, str | None] | None = None,
+    ) -> Client:
+        """Authenticate the client behind a request.
+
+        `mtls` is the `(thumbprint, subject_dn)` pair read off the proxy's
+        client-certificate headers by `services/mtls.py::mtls_headers` — it
+        is `(None, None)` unless `trust_proxy_headers` is set (divergence
+        47). It is recorded on the service and consumed by the RFC 8705
+        branches below: a client registered `tls_client_auth` is
+        authenticated by `_authenticate_tls_client_auth` (Subject DN) and one
+        registered `self_signed_tls_client_auth` by
+        `_authenticate_self_signed_tls_client_auth` (certificate thumbprint
+        against the registered JWKS). For every other registered method the
+        pair is ignored, so passing it changes nothing for secret- or
+        JWT-authenticated clients.
+        """
+        self._mtls = mtls
         basic = _parse_basic_auth(authorization_header)
         form_client_id = request_form.get("client_id")
         form_client_secret = request_form.get("client_secret")
@@ -254,6 +323,17 @@ class ClientService:
             await self._authenticate_jwt(client, request_form)
             return client
 
+        # RFC 8705 §2: certificate-bound methods. Reached before the secret
+        # comparison below and returning unconditionally, so a presented
+        # `client_secret` can never stand in for the certificate.
+        thumbprint, subject_dn = self._mtls or (None, None)
+        if client.token_endpoint_auth_method == TLS_CLIENT_AUTH:
+            _authenticate_tls_client_auth(client, thumbprint, subject_dn)
+            return client
+        if client.token_endpoint_auth_method == SELF_SIGNED_TLS_CLIENT_AUTH:
+            await self._authenticate_self_signed_tls(client, thumbprint)
+            return client
+
         if not client_secret or not _secrets_equal(client_secret, client.client_secret):
             self._emit_client_validated(client.client_id, success=False)
             raise OAuthError("invalid_client", "invalid client secret")
@@ -294,6 +374,70 @@ class ClientService:
             jwks=jwks,
             guard=self._jti_guard,
         )
+
+    async def _authenticate_self_signed_tls(self, client: Client, thumbprint: str | None) -> None:
+        """RFC 8705 §2.2 `self_signed_tls_client_auth`.
+
+        **Divergence 48.** Rust accepts any certificate the proxy vouched
+        for once the client is registered with this method — it checks that
+        a thumbprint is present and nothing more, so every self-signed
+        client shares one credential: "the proxy said a certificate was
+        used". Here the thumbprint must additionally match the `x5t#S256`
+        member of one of the client's REGISTERED JWKs (inline `jwks` or the
+        cached `jwks_uri` document), which is what RFC 8705 §2.2 actually
+        binds. Registration and the admin API both refuse to store this
+        method without key material, so the only rows that can reach the
+        no-JWKS path are legacy ones; they collapse into the same fixed
+        "does not match" message rather than a distinguishable one.
+        """
+        if thumbprint is None:
+            raise OAuthError("invalid_client", _SELF_SIGNED_NO_CERT_MESSAGE)
+
+        if not (client.jwks or "").strip() and not (client.jwks_uri or "").strip():
+            raise OAuthError("invalid_client", _SELF_SIGNED_NO_MATCH_MESSAGE)
+
+        jwks = await resolve_client_jwks(
+            client, self._jwks_cache, methods=(SELF_SIGNED_TLS_CLIENT_AUTH,)
+        )
+        for key in (jwks or {}).get("keys") or []:
+            registered = key.get("x5t#S256") if isinstance(key, dict) else None
+            # Constant-time, and over every key rather than short-circuiting
+            # on the first mismatch, so the comparison leaks neither the
+            # matching prefix length nor which key matched.
+            if isinstance(registered, str) and _secrets_equal(registered, thumbprint):
+                return
+        raise OAuthError("invalid_client", _SELF_SIGNED_NO_MATCH_MESSAGE)
+
+
+def _authenticate_tls_client_auth(
+    client: Client, thumbprint: str | None, subject_dn: str | None
+) -> None:
+    """RFC 8705 §2.1 `tls_client_auth` — PKI-issued certificate, identified
+    by its Subject DN.
+
+    Rust's outcomes are kept verbatim, including the permissive one: a
+    client registered with an EMPTY `tls_client_certificate_subject_dn`
+    authenticates on the mere presence of a certificate. The DN comparison
+    is byte-exact (no DN normalization, no case folding) — matching Rust,
+    and deliberately strict, since a lenient parser here would be a
+    client-impersonation surface.
+    """
+    if thumbprint is None:
+        raise OAuthError("invalid_client", _TLS_NO_CERT_MESSAGE)
+
+    # NOT trimmed: only an EXACTLY empty registered DN is the permissive
+    # "any certificate" case. Trimming first would turn a whitespace-only
+    # stored DN into that wildcard — a fail-open that lets any certificate
+    # the proxy vouched for authenticate this client. Registration and the
+    # admin API refuse blank DNs outright, and this is the backstop for rows
+    # written before that rule.
+    configured_dn = client.tls_client_certificate_subject_dn or ""
+    if not configured_dn:
+        return
+    if subject_dn is None:
+        raise OAuthError("invalid_client", _TLS_NO_DN_HEADER_MESSAGE)
+    if subject_dn != configured_dn:
+        raise OAuthError("invalid_client", _TLS_DN_MISMATCH_MESSAGE)
 
 
 def _parse_basic_auth(authorization_header: str | None) -> tuple[str, str] | None:

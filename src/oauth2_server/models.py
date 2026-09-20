@@ -202,6 +202,17 @@ class Claims(BaseModel):
     # present — see research-rar-token-exchange.md gotchas); this port fixes
     # the JWT gap while keeping the response-body member Rust-conditional
     # (routes/token.py's token-exchange branch).
+    #
+    # Nested chains (divergence 55): when the token being exchanged was
+    # itself produced by a prior exchange (its own `act` claim is a dict),
+    # that prior `act` nests one level deeper: `{"sub": <this exchanging
+    # client_id>, "act": <prior act>}` — a re-exchange chain reads as a
+    # delegation history, most recent actor outermost. A client
+    # re-exchanging a token it already stamped (`prior["sub"]` equal to its
+    # own `client_id`) does NOT nest — the chain stays flat. Chains deeper
+    # than 10 levels are rejected (`invalid_request`) rather than embedded;
+    # see `services/limits.py::check_depth` and `routes/token.py`'s
+    # token-exchange branch for both rules.
     act: dict | None = None
 
     @classmethod
@@ -217,6 +228,7 @@ class Claims(BaseModel):
         authorization_details: list[dict] | None = None,
         act: dict | None = None,
         resource: str | None = None,
+        audience: list[str] | None = None,
     ) -> "Claims":
         """Build access-token claims.
 
@@ -224,12 +236,17 @@ class Claims(BaseModel):
         REPLACES `client_id` as the audience, so the token is only accepted
         by the resource server it was requested for. Absent, `aud` stays
         `[client_id]` (Rust parity — see `services/resource.py`).
+
+        `audience` is an explicit audience LIST and wins over `resource`: it
+        is how the refresh grant carries an already-granted audience set
+        forward (divergence 60) rather than re-deriving it from a single
+        resource indicator.
         """
         iat = int(_now().timestamp())
         return cls(
             sub=subject,
             iss=issuer,
-            aud=[resource] if resource else [client_id],
+            aud=audience or ([resource] if resource else [client_id]),
             exp=iat + duration_seconds,
             iat=iat,
             scope=scope,
@@ -310,6 +327,10 @@ class ClientRegistration(BaseModel):
     tos_uri: str | None = None
     jwks: dict | None = None
     jwks_uri: str | None = None
+    # RFC 8705 §2.1.2: the expected certificate Subject DN for a
+    # `tls_client_auth` client. Persisted to the existing
+    # `Client.tls_client_certificate_subject_dn` column.
+    tls_client_certificate_subject_dn: str | None = None
     backchannel_logout_uri: str | None = None
     backchannel_logout_session_required: bool = False
     frontchannel_logout_uri: str | None = None
@@ -365,6 +386,7 @@ class ClientRegistrationResponse(BaseModel):
     # (`model_dump(exclude_none=True)` drops them otherwise).
     jwks: dict | None = None
     jwks_uri: str | None = None
+    tls_client_certificate_subject_dn: str | None = None
     backchannel_logout_uri: str | None = None
     backchannel_logout_session_required: bool = False
     frontchannel_logout_uri: str | None = None

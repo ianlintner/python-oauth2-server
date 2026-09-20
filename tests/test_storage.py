@@ -222,3 +222,33 @@ def _token(at: str, family: str | None = None) -> Token:
         expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
         token_family=family,
     )
+
+
+async def test_get_users_by_email_case_insensitive(storage):
+    """`get_users_by_email` is the lookup social account linking
+    (divergence 56) hangs off, so its contract is security-relevant: an
+    exact, case-insensitive EQUALITY match, never a pattern match, and it
+    returns every matching row so an ambiguous match can be refused."""
+    await storage.save_user(
+        User(id="e1", username="e_one", password_hash="x", email="Mixed@Example.Test")
+    )
+    await storage.save_user(
+        User(id="e2", username="e_two", password_hash="x", email="other@example.test")
+    )
+    assert [u.id for u in await storage.get_users_by_email("mixed@example.test")] == ["e1"]
+    assert await storage.get_users_by_email("nobody@example.test") == []
+
+    # Regex/LIKE metacharacters in the (provider-supplied) address are
+    # matched literally — `.` must not match an arbitrary character.
+    await storage.save_user(
+        User(id="e3", username="e_three", password_hash="x", email="a.b+c@example.test")
+    )
+    assert [u.id for u in await storage.get_users_by_email("a.b+c@example.test")] == ["e3"]
+    assert await storage.get_users_by_email("axb+c@example.test") == []
+
+    # Rows differing only by case are BOTH returned (the caller refuses an
+    # ambiguous match rather than picking one).
+    await storage.save_user(
+        User(id="e4", username="e_four", password_hash="x", email="MIXED@example.test")
+    )
+    assert {u.id for u in await storage.get_users_by_email("mixed@example.test")} == {"e1", "e4"}

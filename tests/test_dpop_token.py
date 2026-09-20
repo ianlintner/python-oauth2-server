@@ -22,7 +22,13 @@ from starlette.requests import Request
 from oauth2_server.routes.token import _read_dpop_header
 from oauth2_server.services.dpop import DpopError, jwk_thumbprint
 from tests.conftest import build_client_app
-from tests.helpers import generate_dpop_key, make_dpop_proof, post_token, seed_client
+from tests.helpers import (
+    generate_dpop_key,
+    make_dpop_proof,
+    post_token,
+    reseed_client,
+    seed_client,
+)
 from tests.test_token_endpoint import run_code_flow
 
 TOKEN_URL = "https://auth.example.com/oauth/token"
@@ -162,7 +168,7 @@ async def test_non_string_nonce_rejected_400_not_500(client_app):
     assert resp.json()["error"] == "invalid_dpop_proof"
 
 
-async def test_refresh_carries_cnf_forward(client_app):
+async def test_confidential_refresh_carries_cnf_forward(client_app):
     proof, pub_jwk = make_dpop_proof(TOKEN_URL, "POST")
     resp, _code = await run_code_flow(client_app, headers={"DPoP": proof})
     assert resp.status_code == 200, resp.text
@@ -182,6 +188,116 @@ async def test_refresh_carries_cnf_forward(client_app):
     assert refresh_body["token_type"] == "DPoP"
     new_claims = jwt.decode(refresh_body["access_token"], options={"verify_signature": False})
     assert new_claims["cnf"]["jkt"] == jwk_thumbprint(pub_jwk)
+
+
+# --- divergence 54: public-client refresh of a jkt-bound token ---------------
+
+
+async def _public_bound_refresh(client_app, key):
+    """Reseed `client1` as a public (`none`) client, run the code flow with a
+    DPoP proof from `key`, and return the resulting refresh token."""
+    await reseed_client(client_app, token_endpoint_auth_method="none", client_secret="")
+    proof, _pub = make_dpop_proof(TOKEN_URL, "POST", key)
+    resp, _code = await run_code_flow(client_app, client_secret=None, headers={"DPoP": proof})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["token_type"] == "DPoP"
+    return body["refresh_token"]
+
+
+async def test_public_client_refresh_without_proof_invalid_grant(client_app):
+    key = generate_dpop_key()
+    refresh_token = await _public_bound_refresh(client_app, key)
+
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": "client1",
+        },
+    )
+
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["error"] == "invalid_grant"
+    assert body["error_description"] == (
+        "refresh token is bound to a DPoP key; present a proof with the same key"
+    )
+
+
+async def test_public_client_refresh_wrong_key_invalid_grant_and_family_survives(client_app):
+    key = generate_dpop_key()
+    refresh_token = await _public_bound_refresh(client_app, key)
+
+    wrong_proof, _pub = make_dpop_proof(TOKEN_URL, "POST")
+    rejected = await post_token(
+        client_app,
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": "client1",
+        },
+        headers={"DPoP": wrong_proof},
+    )
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["error"] == "invalid_grant"
+
+    # The check runs BEFORE `revoke_token`, so neither the old token nor its
+    # family was revoked: the correct key still refreshes.
+    good_proof, _pub2 = make_dpop_proof(TOKEN_URL, "POST", key)
+    retry = await post_token(
+        client_app,
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": "client1",
+        },
+        headers={"DPoP": good_proof},
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["token_type"] == "DPoP"
+
+
+async def test_public_client_refresh_with_same_key_succeeds(client_app):
+    key = generate_dpop_key()
+    refresh_token = await _public_bound_refresh(client_app, key)
+
+    proof, pub_jwk = make_dpop_proof(TOKEN_URL, "POST", key)
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": "client1",
+        },
+        headers={"DPoP": proof},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["token_type"] == "DPoP"
+    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
+    assert claims["cnf"]["jkt"] == jwk_thumbprint(pub_jwk)
+
+
+async def test_public_client_refresh_of_unbound_token_needs_no_proof(client_app):
+    """Only a `jkt`-bound refresh demands a proof — an unbound public-client
+    token refreshes exactly as before."""
+    await reseed_client(client_app, token_endpoint_auth_method="none", client_secret="")
+    resp, _code = await run_code_flow(client_app, client_secret=None)
+    assert resp.status_code == 200, resp.text
+
+    refresh_resp = await post_token(
+        client_app,
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": resp.json()["refresh_token"],
+            "client_id": "client1",
+        },
+    )
+    assert refresh_resp.status_code == 200, refresh_resp.text
+    assert refresh_resp.json()["token_type"] == "Bearer"
 
 
 async def test_no_proof_issues_plain_bearer(client_app):

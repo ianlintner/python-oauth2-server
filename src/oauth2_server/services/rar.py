@@ -17,6 +17,11 @@ from __future__ import annotations
 
 import json
 
+from oauth2_server.services.limits import LimitError, check_json_param
+
+_MAX_LEN = 16384
+_MAX_DEPTH = 10
+
 
 class RarError(Exception):
     """Raised by `validate_authorization_details` to signal an RFC 9396
@@ -34,6 +39,8 @@ def validate_authorization_details(raw: str, allowed_types: list[str]) -> list[d
     RFC 9396 §2: `authorization_details` MUST be a JSON array of objects,
     each carrying a `type` member identifying the authorization data type.
     Raises `RarError` (error="invalid_authorization_details") on:
+      - over 16384 characters / nested deeper than 10 (divergence 57), with
+        the limits helper's wording — checked BEFORE `json.loads` runs
       - malformed JSON -> "authorization_details is not valid JSON"
       - not a non-empty JSON array of objects ->
         "authorization_details must be a JSON array of objects"
@@ -45,7 +52,11 @@ def validate_authorization_details(raw: str, allowed_types: list[str]) -> list[d
     Returns the parsed list of dicts on success.
     """
     try:
-        parsed = json.loads(raw)
+        parsed = check_json_param(
+            raw, name="authorization_details", max_len=_MAX_LEN, max_depth=_MAX_DEPTH
+        )
+    except LimitError as exc:
+        raise RarError(exc.description) from None
     except (json.JSONDecodeError, TypeError):
         raise RarError("authorization_details is not valid JSON") from None
 

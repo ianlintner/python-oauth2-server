@@ -33,6 +33,17 @@ async def test_discovery_includes_iss_parameter_supported(client_app):
     assert resp.json()["authorization_response_iss_parameter_supported"] is True
 
 
+async def test_discovery_omits_claims_parameter_supported(client_app):
+    """Divergence 59: the `claims` request parameter is parsed and honored
+    for `id_token` claims, but the OIDC Core `claims_parameter_supported`
+    metadata flag is deliberately NOT advertised (Rust parity) — support is
+    partial, and advertising it would promise `userinfo` handling too."""
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "claims_parameter_supported" not in body
+
+
 async def test_discovery_advertises_none_auth_method(client_app):
     resp = await client_app.get("/.well-known/openid-configuration")
     assert resp.status_code == 200
@@ -48,6 +59,8 @@ async def test_discovery_advertises_jwt_auth_methods(client_app):
         "client_secret_post",
         "client_secret_jwt",
         "private_key_jwt",
+        "tls_client_auth",
+        "self_signed_tls_client_auth",
         "none",
     ]
     assert body["introspection_endpoint_auth_methods_supported"] == [
@@ -55,12 +68,16 @@ async def test_discovery_advertises_jwt_auth_methods(client_app):
         "client_secret_post",
         "client_secret_jwt",
         "private_key_jwt",
+        "tls_client_auth",
+        "self_signed_tls_client_auth",
     ]
     assert body["revocation_endpoint_auth_methods_supported"] == [
         "client_secret_basic",
         "client_secret_post",
         "client_secret_jwt",
         "private_key_jwt",
+        "tls_client_auth",
+        "self_signed_tls_client_auth",
     ]
 
 
@@ -207,8 +224,8 @@ async def test_protected_resource_metadata_is_cacheable(client_app):
         "token_introspection_endpoint": "https://auth.example.com/oauth/introspect",
         "jwks_uri": "https://auth.example.com/.well-known/jwks.json",
         "scopes_supported": SCOPES_SUPPORTED,
+        "tls_client_certificate_bound_access_tokens": True,
     }
-    assert "tls_client_certificate_bound_access_tokens" not in body
 
 
 async def test_wave4_token_status_list_returns_200(client_app):
@@ -345,3 +362,26 @@ async def test_discovery_advertises_rs256_introspection_signing_when_keyset_has_
         resp = await client.get("/.well-known/openid-configuration")
         assert resp.status_code == 200
         assert resp.json()["introspection_signing_alg_values_supported"] == ["RS256", "HS256"]
+
+
+async def test_wave4_rfc8705_mtls_advertised_in_discovery(client_app):
+    """RFC 8705 §3.3: both mTLS client-authentication methods appear on all
+    three auth-method lists, and certificate-bound access tokens are
+    advertised (divergence 33 retired — mTLS is implemented now)."""
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    body = resp.json()
+    for field in (
+        "token_endpoint_auth_methods_supported",
+        "introspection_endpoint_auth_methods_supported",
+        "revocation_endpoint_auth_methods_supported",
+    ):
+        assert "tls_client_auth" in body[field], field
+        assert "self_signed_tls_client_auth" in body[field], field
+    assert body["tls_client_certificate_bound_access_tokens"] is True
+
+
+async def test_protected_resource_metadata_advertises_mtls_binding(client_app):
+    resp = await client_app.get("/.well-known/oauth-protected-resource")
+    assert resp.status_code == 200
+    assert resp.json()["tls_client_certificate_bound_access_tokens"] is True

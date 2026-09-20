@@ -170,6 +170,43 @@ async def test_wave2_c1_public_client_jar_rejects_nonempty_signature_with_alg_no
     assert body["error_description"] == "JAR with alg=none must have an empty signature"
 
 
+def _raw_unsigned_jar(payload_json: str) -> str:
+    """`make_unsigned_jar` but with the payload handed over as raw JSON text —
+    a payload too deeply nested for `json.dumps` to serialize."""
+    header_b64 = _b64u(json.dumps({"alg": "none", "typ": "JWT"}).encode())
+    return f"{header_b64}.{_b64u(payload_json.encode())}."
+
+
+@pytest.mark.parametrize(
+    "nesting",
+    [
+        # Deep enough that CPython's JSON scanner blows the interpreter stack
+        # and raises `RecursionError` rather than a decode error. Still far
+        # below any request-line cap, so the request really reaches the parser.
+        pytest.param(2000, id="recursion_error_in_json_loads"),
+        # Shallow enough to parse, deep enough for the explicit depth guard.
+        pytest.param(50, id="depth_guard"),
+    ],
+)
+async def test_unsigned_jar_deeply_nested_payload_is_400_not_500(client_app, nesting):
+    """A nested-array bomb in an unsigned JAR payload must be a structural
+    `invalid_request`, never an unhandled `RecursionError` 500."""
+    await reseed_client(client_app, token_endpoint_auth_method="none", client_secret="")
+    await login_session(client_app)
+    payload_json = '{"scope": ' + "[" * nesting + "]" * nesting + "}"
+    resp = await _authorize(
+        client_app,
+        response_type="code",
+        client_id="client1",
+        redirect_uri=REDIRECT_URI,
+        request=_raw_unsigned_jar(payload_json),
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["error"] == "invalid_request"
+    assert body["error_description"] == "JAR JWT payload is not valid JSON"
+
+
 async def test_jar_not_a_jwt_is_rejected(client_app):
     await login_session(client_app)
     resp = await _authorize(

@@ -11,6 +11,7 @@ route by URL to canned token/userinfo responses.
 
 from __future__ import annotations
 
+import uuid
 from urllib.parse import parse_qsl, urlparse
 
 import httpx
@@ -18,6 +19,8 @@ import pytest
 from fastapi import Request
 from fastapi.responses import ORJSONResponse
 
+from oauth2_server import security
+from oauth2_server.models import User
 from oauth2_server.services.auth import is_safe_redirect
 from tests.conftest import build_client_app
 
@@ -578,3 +581,250 @@ async def test_azure_unconfigured_without_microsoft_fallback_400(client_app):
         "error": "provider_not_configured",
         "error_description": "Azure login not configured",
     }
+
+
+# ---------------------------------------------------------------------------
+# Opt-in social account linking by provider-verified email (divergence 56).
+#
+# Security-sensitive: linking reuses an EXISTING local row for a social
+# login, so every one of the four axes below must hold or the callback
+# falls back to provisioning a fresh `provider:id` account exactly as
+# before. See `routes/social.py`'s linking branch.
+# ---------------------------------------------------------------------------
+
+
+LINK_ON = {
+    "google_client_id": "g-id",
+    "google_client_secret": "g-secret",
+    "social_link_by_verified_email": True,
+}
+
+
+def _google_handler(user_id: str, email: str, verified: bool = True):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "oauth2.googleapis.com":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if request.url.host == "www.googleapis.com":
+            return httpx.Response(
+                200, json={"id": user_id, "email": email, "verified_email": verified}
+            )
+        return httpx.Response(404)
+
+    return handler
+
+
+def _github_handler(user_id: int, email: str):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "github.com":
+            return httpx.Response(200, json={"access_token": "gh-tok"})
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"id": user_id, "name": "GH"})
+        if request.url.path == "/user/emails":
+            return httpx.Response(200, json=[{"email": email, "primary": True, "verified": True}])
+        return httpx.Response(404)
+
+    return handler
+
+
+def _microsoft_handler(user_id: str, upn: str):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "login.microsoftonline.com":
+            return httpx.Response(200, json={"access_token": "ms-tok"})
+        if request.url.host == "graph.microsoft.com":
+            return httpx.Response(
+                200, json={"id": user_id, "userPrincipalName": upn, "displayName": "MS"}
+            )
+        return httpx.Response(404)
+
+    return handler
+
+
+def _install_session_probe(client) -> None:
+    @client.app.get("/__test_session")
+    async def _probe(request: Request) -> ORJSONResponse:  # pragma: no cover - test route
+        return ORJSONResponse(dict(request.session))
+
+
+async def _seed_local_user(
+    client,
+    *,
+    email: str,
+    username: str = "local_user",
+    role: str = "user",
+    enabled: bool = True,
+):
+    user = User(
+        id=uuid.uuid4().hex,
+        username=username,
+        email=email,
+        password_hash=security.hash_password("password123"),
+        role=role,
+        enabled=enabled,
+    )
+    await client.storage.save_user(user)
+    return user
+
+
+async def _run_callback(client, provider: str, handler, code: str = "c"):
+    client.app.state.http_client = _mock_transport(handler)
+    login_resp = await client.get(f"/auth/login/{provider}", follow_redirects=False)
+    state = _state_from_location(login_resp.headers["location"])
+    return await client.get(
+        f"/auth/callback/{provider}",
+        params={"state": state, "code": code},
+        follow_redirects=False,
+    )
+
+
+async def test_linking_off_by_default_creates_new_account():
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as client:
+        local = await _seed_local_user(client, email="alice@example.com")
+        resp = await _run_callback(client, "google", _google_handler("1", "alice@example.com"))
+        assert resp.status_code == 302, resp.text
+
+        social = await client.storage.get_user_by_username("google:1")
+        assert social is not None
+        assert social.id != local.id
+
+
+async def test_google_verified_matching_email_links():
+    async with build_client_app(LINK_ON) as client:
+        local = await _seed_local_user(client, email="alice@example.com")
+        _install_session_probe(client)
+
+        resp = await _run_callback(client, "google", _google_handler("1", "alice@example.com"))
+        assert resp.status_code == 302, resp.text
+
+        # No namespaced row was provisioned; the existing row is reused as-is.
+        assert await client.storage.get_user_by_username("google:1") is None
+        reread = await client.storage.get_user_by_id(local.id)
+        assert reread.username == "local_user"
+
+        session = (await client.get("/__test_session")).json()
+        assert session["user_id"] == local.id
+        assert session["username"] == "local_user"
+
+
+async def test_github_verified_matching_email_links():
+    async with build_client_app(
+        {
+            "github_client_id": "gh-id",
+            "github_client_secret": "gh-secret",
+            "social_link_by_verified_email": True,
+        }
+    ) as client:
+        local = await _seed_local_user(client, email="bob@example.com")
+        _install_session_probe(client)
+
+        resp = await _run_callback(client, "github", _github_handler(555, "bob@example.com"))
+        assert resp.status_code == 302, resp.text
+
+        assert await client.storage.get_user_by_username("github:555") is None
+        session = (await client.get("/__test_session")).json()
+        assert session["user_id"] == local.id
+
+
+async def test_microsoft_never_links():
+    """Graph's `/me` exposes no email-verification signal, so the Microsoft
+    (and Azure) mapping reports `email_verified=False` and can never link,
+    even with the feature switched on."""
+    async with build_client_app(
+        {
+            "microsoft_client_id": "ms-id",
+            "microsoft_client_secret": "ms-secret",
+            "social_link_by_verified_email": True,
+        }
+    ) as client:
+        local = await _seed_local_user(client, email="carol@contoso.com")
+
+        resp = await _run_callback(
+            client, "microsoft", _microsoft_handler("ms-1", "carol@contoso.com")
+        )
+        assert resp.status_code == 302, resp.text
+
+        social = await client.storage.get_user_by_username("microsoft:ms-1")
+        assert social is not None
+        assert social.id != local.id
+
+
+async def test_admin_role_candidate_refused():
+    async with build_client_app(LINK_ON) as client:
+        admin = await _seed_local_user(
+            client, email="root@example.com", username="root", role="admin"
+        )
+        resp = await _run_callback(client, "google", _google_handler("2", "root@example.com"))
+        assert resp.status_code == 302, resp.text
+
+        social = await client.storage.get_user_by_username("google:2")
+        assert social is not None
+        assert social.id != admin.id
+        assert social.role == "user"
+
+
+async def test_admin_emails_candidate_refused():
+    async with build_client_app({**LINK_ON, "admin_emails": ["Boss@Example.com"]}) as client:
+        boss = await _seed_local_user(client, email="boss@example.com", username="boss")
+        resp = await _run_callback(client, "google", _google_handler("3", "boss@example.com"))
+        assert resp.status_code == 302, resp.text
+
+        social = await client.storage.get_user_by_username("google:3")
+        assert social is not None
+        assert social.id != boss.id
+
+
+async def test_disabled_candidate_refused():
+    """A disabled local account must not be reachable through a provider
+    that asserts its address. `enabled` is enforced only by
+    `routes/login.py` and nothing downstream of `set_login` re-checks it,
+    so linking is the one place that has to refuse the row itself."""
+    async with build_client_app(LINK_ON) as client:
+        disabled = await _seed_local_user(
+            client, email="gail@example.com", username="gail", enabled=False
+        )
+        resp = await _run_callback(client, "google", _google_handler("7", "gail@example.com"))
+        assert resp.status_code == 302, resp.text
+
+        social = await client.storage.get_user_by_username("google:7")
+        assert social is not None
+        assert social.id != disabled.id
+        assert social.enabled is True
+
+
+async def test_ambiguous_email_refused():
+    async with build_client_app(LINK_ON) as client:
+        await _seed_local_user(client, email="dup@example.com", username="dup_a")
+        await _seed_local_user(client, email="DUP@example.com", username="dup_b")
+
+        resp = await _run_callback(client, "google", _google_handler("4", "dup@example.com"))
+        assert resp.status_code == 302, resp.text
+
+        social = await client.storage.get_user_by_username("google:4")
+        assert social is not None
+
+
+async def test_email_folding_case_and_whitespace():
+    async with build_client_app(LINK_ON) as client:
+        local = await _seed_local_user(client, email="  Erin@Example.COM ", username="erin")
+        _install_session_probe(client)
+
+        resp = await _run_callback(client, "google", _google_handler("5", "ERIN@example.com "))
+        assert resp.status_code == 302, resp.text
+
+        assert await client.storage.get_user_by_username("google:5") is None
+        session = (await client.get("/__test_session")).json()
+        assert session["user_id"] == local.id
+
+
+async def test_linked_login_amr_is_fed():
+    async with build_client_app(LINK_ON) as client:
+        local = await _seed_local_user(client, email="frank@example.com", username="frank")
+        _install_session_probe(client)
+
+        resp = await _run_callback(client, "google", _google_handler("6", "frank@example.com"))
+        assert resp.status_code == 302, resp.text
+
+        session = (await client.get("/__test_session")).json()
+        assert session["user_id"] == local.id
+        assert session["amr"] == ["fed"]

@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import logging
 import struct
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -31,6 +32,15 @@ from oauth2_server.services.dpop_nonce import (
     enforce_dpop_nonce,
     use_dpop_nonce_response,
 )
+from tests.helpers import (
+    generate_dpop_key,
+    login_session,
+    make_dpop_proof,
+    post_token,
+    seed_client,
+)
+from tests.test_token_endpoint import _pkce_pair, run_code_flow
+from tests.test_userinfo_dpop import ath_for
 
 SECRET_A = b"\x01" * 32
 SECRET_B = b"\x02" * 32
@@ -271,3 +281,173 @@ def test_issue_encodes_current_bucket_as_big_endian_u64(monkeypatch):
     assert len(raw) == 24
     (bucket_id,) = struct.unpack(">Q", raw[:8])
     assert bucket_id == int(now) // lifetime
+
+
+# --- divergence 53: DPoP-Nonce on SUCCESSFUL responses ------------------------
+#
+# RFC 9449 §8 lets the AS hand out a fresh nonce on any response, not only on
+# the `use_dpop_nonce` challenge. Rust (and Python through phase 4b) only ever
+# set the header on the 400 challenge, so a client that got one nonce had to
+# wait for it to go stale and eat a 400 to get the next one. Every 2xx token
+# response — and userinfo — now carries a fresh nonce whenever the client has
+# `dpop_nonce_required` AND presented a valid proof.
+
+TOKEN_URL = "https://auth.example.com/oauth/token"
+USERINFO_URL = "https://auth.example.com/oauth/userinfo"
+NONCE_CLIENT = ("nonce-client", "nonce-secret")
+
+
+async def _seed_nonce_client(client_app, **overrides):
+
+    fields = dict(
+        client_id=NONCE_CLIENT[0],
+        client_secret=NONCE_CLIENT[1],
+        dpop_nonce_required=True,
+        redirect_uris='["https://a.example/cb"]',
+        scope="read openid email profile",
+    )
+    fields.update(overrides)
+    return await seed_client(client_app.storage, **fields)
+
+
+async def _bootstrap_nonce(client_app, key) -> str:
+    """Burn one `use_dpop_nonce` challenge to obtain a fresh server nonce."""
+
+    proof, _pub = make_dpop_proof(TOKEN_URL, "POST", key)
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials"},
+        basic_auth=NONCE_CLIENT,
+        headers={"DPoP": proof},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "use_dpop_nonce"
+    return resp.headers["dpop-nonce"]
+
+
+async def test_dpop_nonce_header_on_successful_token_response(client_app):
+
+    await _seed_nonce_client(client_app)
+    key = generate_dpop_key()
+    nonce = await _bootstrap_nonce(client_app, key)
+
+    proof, _pub = make_dpop_proof(TOKEN_URL, "POST", key, nonce=nonce)
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials"},
+        basic_auth=NONCE_CLIENT,
+        headers={"DPoP": proof},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["token_type"] == "DPoP"
+    fresh = resp.headers["dpop-nonce"]
+    # A genuine, currently-valid nonce — not an echo of the one presented.
+    client_app.app.state.dpop_nonce_issuer.verify(fresh)
+
+
+async def test_dpop_nonce_absent_when_not_required(client_app):
+    """`client1` does not require nonces: a perfectly valid proof still gets
+    no `DPoP-Nonce` header (issuing one would invite clients to start
+    sending nonces the AS never asked for)."""
+
+    proof, _pub = make_dpop_proof(TOKEN_URL, "POST")
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials"},
+        basic_auth=("client1", "s3cret"),
+        headers={"DPoP": proof},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "dpop-nonce" not in resp.headers
+
+
+async def test_dpop_nonce_absent_without_a_proof(client_app):
+    """A nonce-requiring client that presents NO proof gets a plain Bearer
+    token and no nonce — the header must never be emitted for a request that
+    was not proof-of-possession at all."""
+
+    await _seed_nonce_client(client_app)
+    resp = await post_token(
+        client_app, {"grant_type": "client_credentials"}, basic_auth=NONCE_CLIENT
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["token_type"] == "Bearer"
+    assert "dpop-nonce" not in resp.headers
+
+
+async def test_dpop_nonce_on_successful_userinfo(client_app):
+    await _seed_nonce_client(client_app)
+    key = generate_dpop_key()
+    nonce = await _bootstrap_nonce(client_app, key)
+
+    await login_session(client_app)
+    verifier, challenge = _pkce_pair()
+    authorize = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": NONCE_CLIENT[0],
+            "redirect_uri": "https://a.example/cb",
+            "scope": "openid email",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        },
+    )
+    assert authorize.status_code == 302, authorize.text
+    code = _query_param(authorize.headers["location"], "code")
+
+    proof, _pub = make_dpop_proof(TOKEN_URL, "POST", key, nonce=nonce)
+    token_resp = await post_token(
+        client_app,
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "https://a.example/cb",
+            "client_id": NONCE_CLIENT[0],
+            "code_verifier": verifier,
+        },
+        basic_auth=NONCE_CLIENT,
+        headers={"DPoP": proof},
+    )
+    assert token_resp.status_code == 200, token_resp.text
+    access_token = token_resp.json()["access_token"]
+
+    # The resource-server proof needs `ath` (divergence 50) but NOT a nonce —
+    # userinfo does not gate on one; it only hands a fresh one back.
+    resource_proof, _pub2 = make_dpop_proof(
+        USERINFO_URL, "GET", key, extra_claims={"ath": ath_for(access_token)}
+    )
+    userinfo = await client_app.get(
+        "/oauth/userinfo",
+        headers={"Authorization": f"DPoP {access_token}", "DPoP": resource_proof},
+    )
+
+    assert userinfo.status_code == 200, userinfo.text
+    client_app.app.state.dpop_nonce_issuer.verify(userinfo.headers["dpop-nonce"])
+
+
+async def test_no_dpop_nonce_on_unbound_userinfo(client_app):
+    """A Bearer (unbound) token at userinfo never triggers a nonce, whatever
+    the client's `dpop_nonce_required` setting — there is no proof."""
+    await _seed_nonce_client(client_app)
+    resp, _code = await run_code_flow(
+        client_app,
+        client_id=NONCE_CLIENT[0],
+        client_secret=NONCE_CLIENT[1],
+        scope="openid email",
+    )
+    assert resp.status_code == 200, resp.text
+
+    userinfo = await client_app.get(
+        "/oauth/userinfo",
+        headers={"Authorization": f"Bearer {resp.json()['access_token']}"},
+    )
+    assert userinfo.status_code == 200, userinfo.text
+    assert "dpop-nonce" not in userinfo.headers
+
+
+def _query_param(location: str, name: str) -> str:
+    return parse_qs(urlsplit(location).query)[name][0]

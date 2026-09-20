@@ -22,6 +22,7 @@ from fastapi.responses import ORJSONResponse
 
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.services.clients import ClientService
+from oauth2_server.services.mtls import mtls_headers
 
 router = APIRouter()
 
@@ -66,7 +67,9 @@ async def par(request: Request) -> ORJSONResponse:
 
     try:
         await ClientService.from_app(request.app.state).authenticate(
-            params, request.headers.get("authorization")
+            params,
+            request.headers.get("authorization"),
+            mtls=mtls_headers(request, request.app.state.config),
         )
     except OAuthError as exc:
         return oauth_error(exc.error, exc.description, exc.status)

@@ -263,3 +263,44 @@ async def test_malformed_claims_rejected_via_redirect(app_with_session):
         assert q["error"] == ["invalid_request"]
         assert q["error_description"] == ["claims must be a JSON object"]
         assert q["state"] == ["xyz"]
+
+
+async def test_oversized_claims_rejected_via_redirect(app_with_session):
+    """Divergence 57: `claims` is length-checked BEFORE `json.loads` sees it."""
+    await login_session(app_with_session)
+    oversized = json.dumps({"id_token": {"email": {"value": "x" * 9000}}})
+    assert len(oversized) > 8192
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "claims": oversized,
+        },
+    )
+    assert resp.status_code == 302, resp.text
+    q = parse_qs(urlparse(resp.headers["location"]).query)
+    assert q["error"] == ["invalid_request"]
+    assert "exceeds the maximum length of 8192" in q["error_description"][0]
+    assert "code" not in q
+
+
+async def test_over_nested_claims_no_500(app_with_session):
+    """A deeply nested `claims` is an `invalid_request` redirect, never a 500."""
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "claims": "[" * 50 + "]" * 50,
+        },
+    )
+    assert resp.status_code == 302, resp.text
+    q = parse_qs(urlparse(resp.headers["location"]).query)
+    assert q["error"] == ["invalid_request"]
+    assert "exceeds the maximum nesting depth of 10" in q["error_description"][0]

@@ -91,6 +91,15 @@ class SocialUserInfo:
     email: str
     name: str | None = None
     picture: str | None = None
+    # True only when the provider asserted, and this module ENFORCED, that
+    # the address is verified (Google's `verified_email`, GitHub's
+    # `/user/emails` primary+verified). Microsoft/Azure set False — Graph's
+    # `/me` exposes no verification signal for `userPrincipalName` — and the
+    # Okta/Auth0 stubs never build a `SocialUserInfo` at all. Account
+    # linking (divergence 56) reads this flag and fails closed on the
+    # default, so a new provider mapping that forgets to set it can never
+    # link by accident.
+    email_verified: bool = False
 
 
 def _redirect_uri(config: "Config", provider: str, configured: str | None) -> str:
@@ -300,6 +309,8 @@ async def _fetch_google_userinfo(
         email=email,
         name=data.get("name"),
         picture=data.get("picture"),
+        # Reached only past the `verified_email is True` gate above.
+        email_verified=True,
     )
 
 
@@ -329,6 +340,10 @@ async def _fetch_microsoft_userinfo(
         email=email,
         name=data.get("displayName"),
         picture=None,
+        # Explicit: Graph gives no verification signal for a UPN, so
+        # Microsoft/Azure logins can never link to an existing local
+        # account (divergence 56).
+        email_verified=False,
     )
 
 
@@ -371,6 +386,8 @@ async def _fetch_github_userinfo(
         email=primary,
         name=data.get("name"),
         picture=data.get("avatar_url"),
+        # `primary` alone is not enough — `primary` AND `verified` above.
+        email_verified=True,
     )
 
 

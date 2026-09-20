@@ -94,6 +94,7 @@ def _build_proof(
     url: str = DEFAULT_URL,
     iat: float | None = None,
     jti: str = "proof-jti",
+    extra_claims: dict | None = None,
 ) -> str:
     claims = {
         "htm": method,
@@ -101,6 +102,8 @@ def _build_proof(
         "iat": int(iat if iat is not None else time.time()),
         "jti": jti,
     }
+    if extra_claims:
+        claims.update(extra_claims)
     headers = {"typ": typ, "jwk": public_jwk}
     return jwt.encode(claims, private_key_pem, algorithm=alg, headers=headers)
 
@@ -374,3 +377,107 @@ def test_replayed_jti_rejected_on_second_proof():
     with pytest.raises(DpopError) as exc_info:
         validate_dpop_proof(replay_proof, DEFAULT_METHOD, DEFAULT_URL, store)
     assert "replay" in exc_info.value.description
+
+
+# --- ath (RFC 9449 §4.3 step 11 / §7.1) ----------------------------------
+#
+# Divergence 50: `ath` is required only where the proof is presented
+# ALONGSIDE an access token, i.e. at the protected resource
+# (`/oauth/userinfo`, Task 4). The token and introspection endpoints call
+# `validate_dpop_proof` without `access_token=`, so a proof carrying no
+# `ath` (or a bogus one) stays acceptable there — Rust parity.
+
+
+def _expected_ath(access_token: str) -> str:
+    digest = hashlib.sha256(access_token.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def test_ath_required_when_access_token_given():
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    proof = _build_proof(priv_pem, pub_jwk, jti="ath-missing-jti")
+
+    with pytest.raises(DpopError) as exc_info:
+        validate_dpop_proof(
+            proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore(), access_token="the-token"
+        )
+    assert exc_info.value.error == "invalid_dpop_proof"
+    assert exc_info.value.description == "DPoP proof ath does not match the presented access token"
+
+
+def test_ath_mismatch_rejected():
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    proof = _build_proof(
+        priv_pem,
+        pub_jwk,
+        jti="ath-mismatch-jti",
+        extra_claims={"ath": _expected_ath("some-other-token")},
+    )
+
+    with pytest.raises(DpopError) as exc_info:
+        validate_dpop_proof(
+            proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore(), access_token="the-token"
+        )
+    assert exc_info.value.description == "DPoP proof ath does not match the presented access token"
+
+
+def test_ath_non_string_rejected():
+    """The `ath` claim comes off a JSON payload, so it need not be a string;
+    a numeric `ath` must be rejected, not crash `hmac.compare_digest`."""
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    proof = _build_proof(priv_pem, pub_jwk, jti="ath-nonstr-jti", extra_claims={"ath": 12345})
+
+    with pytest.raises(DpopError) as exc_info:
+        validate_dpop_proof(
+            proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore(), access_token="the-token"
+        )
+    assert exc_info.value.description == "DPoP proof ath does not match the presented access token"
+
+
+def test_matching_ath_accepted_and_exposed():
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    ath = _expected_ath("the-token")
+    proof = _build_proof(priv_pem, pub_jwk, jti="ath-ok-jti", extra_claims={"ath": ath})
+
+    result = validate_dpop_proof(
+        proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore(), access_token="the-token"
+    )
+
+    assert result.jkt == jwk_thumbprint(pub_jwk)
+    assert result.ath == ath
+
+
+def test_ath_ignored_when_no_access_token():
+    """Divergence 50: the token/introspection endpoints pass no
+    `access_token`, so a bogus `ath` is simply carried through."""
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    proof = _build_proof(
+        priv_pem, pub_jwk, jti="ath-ignored-jti", extra_claims={"ath": "totally-bogus"}
+    )
+
+    result = validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
+
+    assert result.jkt == jwk_thumbprint(pub_jwk)
+    assert result.ath == "totally-bogus"
+
+
+def test_ath_absent_is_none_when_no_access_token():
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    proof = _build_proof(priv_pem, pub_jwk, jti="ath-none-jti")
+
+    assert validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore()).ath is None
+
+
+def test_ath_failure_does_not_consume_jti():
+    """An `ath` rejection must happen BEFORE the replay store insert, so a
+    failed resource request doesn't burn the jti of a proof the client
+    never got to use."""
+    priv_pem, pub_jwk = _generate_ec_keypair()
+    store = DpopReplayStore()
+    proof = _build_proof(priv_pem, pub_jwk, jti="ath-unconsumed-jti")
+
+    with pytest.raises(DpopError):
+        validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, store, access_token="the-token")
+
+    # The same jti is still usable (here without an access token).
+    assert validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, store).ath is None

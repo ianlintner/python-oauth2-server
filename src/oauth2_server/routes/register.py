@@ -6,14 +6,19 @@ import json
 import secrets
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 from pydantic import ValidationError
 
 from oauth2_server.models import Client, ClientRegistration, ClientRegistrationResponse
-from oauth2_server.services.clients import JWKS_URI_ERROR, VALID_AUTH_METHODS, is_valid_jwks_uri
+from oauth2_server.services.clients import (
+    JWKS_URI_ERROR,
+    SELF_SIGNED_REQUIRES_JWKS_ERROR,
+    VALID_AUTH_METHODS,
+    is_valid_jwks_uri,
+    is_valid_redirect_uri,
+)
 from oauth2_server.services.events_bus import emit_event
 
 router = APIRouter()
@@ -27,11 +32,9 @@ def _registration_error(description: str) -> ORJSONResponse:
     )
 
 
-def _is_valid_redirect_uri(uri: str) -> bool:
-    parsed = urlparse(uri)
-    # RFC 6749 §3.1.2 forbids fragments in redirect URIs
-    has_fragment = bool(parsed.fragment) or uri.endswith("#")
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc) and not has_fragment
+# Moved to `services/clients.py` so the admin client API can share it; the
+# module-local name stays as the call sites (and tests) already spell it.
+_is_valid_redirect_uri = is_valid_redirect_uri
 
 
 @router.post("/register")
@@ -93,8 +96,28 @@ async def register_client(request: Request) -> ORJSONResponse:
     ):
         return _registration_error("private_key_jwt requires jwks or jwks_uri")
 
+    # RFC 8705 §2.2 (divergence 48): a self-signed-certificate client is
+    # authenticated by matching the certificate thumbprint against a
+    # registered JWK's `x5t#S256`, so registering the method without any key
+    # material would leave the client permanently unauthenticatable.
+    if (
+        reg.token_endpoint_auth_method == "self_signed_tls_client_auth"
+        and reg.jwks is None
+        and not reg.jwks_uri
+    ):
+        return _registration_error(SELF_SIGNED_REQUIRES_JWKS_ERROR)
+
     if reg.jwks is not None and reg.jwks_uri:
         return _registration_error("jwks and jwks_uri are mutually exclusive")
+
+    # An EXACTLY empty registered Subject DN is the RFC 8705 "any certificate
+    # the proxy vouched for" wildcard (`services/clients.py`). A
+    # whitespace-only one is a registrant mistake that reads like a real DN,
+    # so refuse it rather than storing a row one stray `.strip()` away from
+    # authenticating every certificate.
+    subject_dn = reg.tls_client_certificate_subject_dn
+    if subject_dn and not subject_dn.strip():
+        return _registration_error("tls_client_certificate_subject_dn must not be blank")
 
     # `jwks_uri` is the one registrant-supplied URL this server dereferences
     # itself, so it gets a stricter rule than the redirect URIs above — see
@@ -135,6 +158,7 @@ async def register_client(request: Request) -> ORJSONResponse:
         post_logout_redirect_uris=json.dumps(reg.post_logout_redirect_uris),
         jwks=json.dumps(reg.jwks) if reg.jwks else "",
         jwks_uri=reg.jwks_uri or "",
+        tls_client_certificate_subject_dn=reg.tls_client_certificate_subject_dn or "",
         enabled=True,
     )
     await storage.save_client(client)
@@ -160,6 +184,7 @@ async def register_client(request: Request) -> ORJSONResponse:
         scope=reg.scope,
         jwks=reg.jwks,
         jwks_uri=reg.jwks_uri,
+        tls_client_certificate_subject_dn=reg.tls_client_certificate_subject_dn,
         backchannel_logout_uri=reg.backchannel_logout_uri,
         backchannel_logout_session_required=reg.backchannel_logout_session_required,
         frontchannel_logout_uri=reg.frontchannel_logout_uri,

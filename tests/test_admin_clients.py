@@ -636,3 +636,200 @@ async def test_update_rejects_unknown_auth_method():
         )
         assert resp.status_code == 400, resp.text
         assert "token_endpoint_auth_method" in resp.json()["error_description"]
+
+
+# --- RFC 8705 mTLS client metadata ---
+
+
+async def test_admin_create_and_update_persist_subject_dn():
+    async with build_client_app() as client:
+        await _login(client)
+        create = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "mTLS Client",
+                "client_id": "admin-mtls",
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_certificate_subject_dn": "CN=svc,O=Example",
+            },
+        )
+        assert create.status_code == 201, create.text
+        assert create.json()["tls_client_certificate_subject_dn"] == "CN=svc,O=Example"
+
+        stored = await client.storage.get_client("admin-mtls")
+        assert stored.tls_client_certificate_subject_dn == "CN=svc,O=Example"
+
+        detail = await client.get(f"/admin/api/clients/{stored.id}")
+        assert detail.json()["tls_client_certificate_subject_dn"] == "CN=svc,O=Example"
+
+        update = await client.put(
+            f"/admin/api/clients/{stored.id}",
+            json={"tls_client_certificate_subject_dn": "CN=rotated,O=Example"},
+        )
+        assert update.status_code == 200, update.text
+        reloaded = await client.storage.get_client("admin-mtls")
+        assert reloaded.tls_client_certificate_subject_dn == "CN=rotated,O=Example"
+        assert reloaded.token_endpoint_auth_method == "tls_client_auth"
+
+
+async def test_admin_create_rejects_blank_subject_dn():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Blank DN",
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_certificate_subject_dn": "   ",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "tls_client_certificate_subject_dn must not be blank",
+        }
+
+
+async def test_admin_update_rejects_blank_subject_dn():
+    async with build_client_app() as client:
+        await _login(client)
+        create = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "mTLS Client",
+                "client_id": "admin-mtls-blank",
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_certificate_subject_dn": "CN=svc,O=Example",
+            },
+        )
+        assert create.status_code == 201, create.text
+        stored = await client.storage.get_client("admin-mtls-blank")
+
+        resp = await client.put(
+            f"/admin/api/clients/{stored.id}",
+            json={"tls_client_certificate_subject_dn": " "},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error_description"] == (
+            "tls_client_certificate_subject_dn must not be blank"
+        )
+        reloaded = await client.storage.get_client("admin-mtls-blank")
+        assert reloaded.tls_client_certificate_subject_dn == "CN=svc,O=Example"
+
+
+async def test_admin_create_self_signed_without_keys_rejected():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Keyless mTLS",
+                "token_endpoint_auth_method": "self_signed_tls_client_auth",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "self_signed_tls_client_auth requires jwks or jwks_uri",
+        }
+
+
+async def test_admin_update_to_self_signed_without_keys_rejected():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+        resp = await client.put(
+            f"/admin/api/clients/{seeded.id}",
+            json={"token_endpoint_auth_method": "self_signed_tls_client_auth"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error_description"] == (
+            "self_signed_tls_client_auth requires jwks or jwks_uri"
+        )
+
+
+# --- Divergence 58: redirect / logout URI validation ---
+
+
+async def test_admin_create_rejects_fragment_redirect_uri():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={"name": "Bad Redirect", "redirect_uris": ["https://a.example/cb#frag"]},
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["error"] == "invalid_request"
+        assert "redirect_uris" in body["error_description"]
+
+
+async def test_admin_create_rejects_non_http_redirect_uri():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={"name": "Bad Scheme", "redirect_uris": ["javascript:alert(1)"]},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_request"
+
+
+async def test_admin_create_allows_empty_redirect_uris():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post("/admin/api/clients", json={"name": "No Redirects"})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["redirect_uris"] == []
+
+
+async def test_admin_update_rejects_bad_redirect_uri():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+        resp = await client.put(
+            f"/admin/api/clients/{seeded.id}", json={"redirect_uris": ["/relative/cb"]}
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_request"
+        reloaded = await client.storage.get_client("client1")
+        assert reloaded.redirect_uri_list() == ["https://a.example/cb"]
+
+
+async def test_admin_update_rejects_bad_logout_uri():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+
+        for field, value in (
+            ("backchannel_logout_uri", "not-a-url"),
+            ("frontchannel_logout_uri", "https://a.example/fc#frag"),
+            ("post_logout_redirect_uris", ["https://ok.example/out", "ftp://bad.example/out"]),
+        ):
+            resp = await client.put(f"/admin/api/clients/{seeded.id}", json={field: value})
+            assert resp.status_code == 400, (field, resp.text)
+            assert resp.json()["error"] == "invalid_request"
+            assert field in resp.json()["error_description"]
+
+        reloaded = await client.storage.get_client("client1")
+        assert reloaded.backchannel_logout_uri == ""
+        assert reloaded.frontchannel_logout_uri == ""
+
+
+async def test_admin_update_accepts_valid_logout_uris():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+        resp = await client.put(
+            f"/admin/api/clients/{seeded.id}",
+            json={
+                "backchannel_logout_uri": "https://a.example/bc",
+                "frontchannel_logout_uri": "https://a.example/fc",
+                "post_logout_redirect_uris": ["https://a.example/out"],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        reloaded = await client.storage.get_client("client1")
+        assert reloaded.backchannel_logout_uri == "https://a.example/bc"
+        assert reloaded.frontchannel_logout_uri == "https://a.example/fc"
+        assert reloaded.get_post_logout_redirect_uris() == ["https://a.example/out"]

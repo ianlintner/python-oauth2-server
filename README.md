@@ -278,6 +278,32 @@ does not expose a verification flag for it). Operators who list any address in
 confirm that provider actually verifies email ownership before granting the OAuth app access to
 production.
 
+**Account linking by verified email** (`OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL`, default `false` —
+divergence 56) is the opt-in counterpart. With it off (the default), every social login provisions
+its own `provider:id` user row, so a social identity can never reach an existing password account.
+With it on, a callback whose email matches an existing local user signs that user in directly,
+reusing the row exactly as it is — same username, same role, no link record, `amr` still `["fed"]`.
+
+Because a wrong match here is an account takeover, linking happens only when **every one** of the
+following holds, and falls back to provisioning a new account otherwise:
+
+1. `OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL=true`.
+2. The provider **verified** the address, and this server enforced that itself: Google
+   (`verified_email: true`) and GitHub (`primary` + `verified` from `/user/emails`) qualify.
+   **Microsoft and Azure never link** — Graph's `/me` exposes no verification signal for
+   `userPrincipalName` — and the Okta/Auth0 stubs never reach the callback at all.
+3. Exactly **one** local user matches after folding both addresses (`strip()` + `casefold()`).
+   No match means there is nothing to link; two or more are ambiguous and are refused rather than
+   resolved by picking one.
+4. The matched account is **not privileged**: its role is not `admin` and its address is not in
+   `OAUTH2_ADMIN_EMAILS`.
+5. The matched account is **enabled**. A disabled local row is refused outright rather than
+   revived through a social callback (the disabled row is never reused; the callback provisions a separate
+   `provider:id` account instead).
+
+Leave it off unless every provider you have configured is one whose email verification you trust
+for the accounts in your user table.
+
 ## Phase 3d: MongoDB Backend
 
 Phase 3d (see `docs/plans/2026-07-20-python-oauth2-port-phase-3d.md` and `docs/PHASE2-BACKLOG.md` →
@@ -557,6 +583,107 @@ existing session store, and the JAR processor reuses Phase 4a's `jwks_cache`.
   this deployment can attest to (like `OAUTH2_RAR_TYPES_SUPPORTED`). Default:
   `urn:mace:incommon:iap:bronze`. `[0]` is the value login stamps on the session
   (`config.default_acr`); the full list is advertised as discovery's `acr_values_supported`.
+
+## Phase 4c: mTLS, DPoP hardening, delegation chains, account linking
+
+Phase 4c (see `docs/plans/2026-09-20-python-oauth2-port-phase-4c.md` and `docs/PHASE2-BACKLOG.md` →
+"Accepted divergences" 47–60) closes the last Rust-parity feature — RFC 8705 mutual-TLS client
+authentication and certificate-bound tokens — together with the DPoP, delegation, linking and
+input-validation gaps the Phase 3b/4a/4b backlogs recorded:
+
+- **RFC 8705 mTLS client authentication** — `tls_client_auth` and `self_signed_tls_client_auth`
+  join the single client-auth funnel (`services/clients.py::ClientService.authenticate`), so every
+  endpoint that authenticates a client (token, introspect, revoke, PAR, device) accepts them at
+  once. TLS terminates at the proxy: the certificate reaches the app as
+  `X-Client-Cert-Thumbprint` (base64url SHA-256 of the DER certificate) and `X-SSL-Client-S-DN`.
+  `tls_client_auth` compares the presented Subject DN byte-exactly against the client's registered
+  `tls_client_certificate_subject_dn` (an empty registered DN accepts any certificate the proxy
+  vouched for); `self_signed_tls_client_auth` requires the thumbprint to match a key in the
+  client's registered JWKS — a JWK whose `x5t#S256` member equals the header value (divergence 48;
+  Rust accepts any thumbprint, which makes that method authenticate nothing). Both methods are
+  settable through dynamic registration and the admin API, and discovery advertises
+  `tls_client_certificate_bound_access_tokens: true`. There are no `mtls_endpoint_aliases`
+  (Rust parity).
+- **Certificate-bound access tokens, enforced** — a token issued to an mTLS-authenticated client
+  carries `cnf.x5t#S256`, and that binding is CHECKED at `/oauth/introspect` and
+  `/oauth/userinfo`: the request must present a matching `X-Client-Cert-Thumbprint` (divergence 49
+  — Rust binds but never enforces). DPoP `jkt` still wins over `x5t#S256` when a client somehow
+  has both; only a `jkt` binding makes the response `token_type: DPoP`.
+- **DPoP hardening (RFC 9449)** — `/oauth/userinfo` now accepts `Authorization: DPoP <token>` and
+  enforces `cnf.jkt`, and proofs presented there must carry `ath` = base64url(SHA-256(access
+  token)) (divergences 50/51); `dpop_jkt` is accepted at authorize (query, PAR or JAR), bound to
+  the issued code, and enforced at redemption (divergence 52); `DPoP-Nonce` is now also returned
+  on SUCCESSFUL token/userinfo responses for clients with `dpop_nonce_required`, not only on the
+  `use_dpop_nonce` challenge (divergence 53); and a PUBLIC client refreshing a `jkt`-bound token
+  must present a fresh proof with the same key, checked BEFORE the old token is revoked so a
+  rejected refresh never looks like refresh-token reuse (divergence 54).
+- **Nested RFC 8693 `act` delegation chains** — exchanging a subject token that already carries
+  `act` NESTS the prior actor (`{"sub": <exchanging client>, "act": <prior act>}`) instead of
+  flattening it; the same client re-exchanging collapses rather than nesting, and a chain deeper
+  than 10 is `invalid_request` (divergence 55). The JWT claim and the response-body `act` agree.
+- **Verified-email social account linking** — opt-in (`OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL`,
+  default false). A social login links to an existing LOCAL account only when the provider asserts
+  a verified email (Google, GitHub — never Microsoft/Azure, which does not), the folded addresses
+  match exactly, exactly one local row matches, that row is neither `role == "admin"` nor listed
+  in `OAUTH2_ADMIN_EMAILS`, and the account is enabled (divergence 56). Off, a social login keeps
+  provisioning a separate `provider:id` account. A wrong "yes" here is an account takeover — read
+  "Security note: admin-by-email and social login" above before enabling it.
+- **Input size and nesting caps** — every client-supplied JSON parameter is bounded before it is
+  parsed (`services/limits.py`, divergence 57): `claims` ≤ 8192 characters, `authorization_details`
+  ≤ 16384, both ≤ 10 levels of nesting, and `resource` ≤ 2048 characters. Violations come back
+  through each parameter's existing error channel (`invalid_request` redirect,
+  `invalid_authorization_details`, `invalid_target`), so a deeply nested body can no longer turn
+  into an unhandled `RecursionError`.
+- **Admin redirect-URI validation** — `POST`/`PUT /admin/api/clients` validate every
+  `redirect_uris` element, plus `backchannel_logout_uri`, `frontchannel_logout_uri` and
+  `post_logout_redirect_uris`, with the same rule RFC 7591 registration uses: absolute `http(s)`,
+  a real authority, no fragment (divergence 58). An empty admin `redirect_uris` list stays allowed
+  (that is how client_credentials/device clients are created).
+- **`claims` honored in the id_token** — the `claims` request stored on the authorization code is
+  read back when the id_token is minted (`services/claims_request.py`, divergence 59). The
+  semantics are deliberately narrow: a requested claim is delivered only when the granted SCOPE
+  already permits it (`claims` can never widen a grant), a `value`/`values` constraint the actual
+  value does not satisfy omits the claim, and an unsatisfiable `essential` claim is a DEBUG log,
+  not an error. `acr`/`auth_time` stay absent at code redemption (the token endpoint has no
+  session to attest to them). The `userinfo` member is still not honored, so
+  `claims_parameter_supported` remains unadvertised.
+- **RFC 8707 refresh audience subset** — refreshing with a `resource` that is not among the
+  audiences the grant was originally issued for is now `invalid_target`, rejected before any
+  revocation; refreshing with NO `resource` carries the old `aud` forward instead of widening it
+  back to `[client_id]` (divergence 60). Opaque access tokens carry no readable `aud`, so they
+  keep the previous pass-through behavior.
+
+### New environment variables (Phase 4c)
+
+- `OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL` — `true` lets a social login attach to an existing local
+  account whose verified email matches (see divergence 56 above for the full condition list).
+  Default `false`.
+
+mTLS additionally requires `OAUTH2_SERVER_TRUST_PROXY_HEADERS=true`: `X-Client-Cert-Thumbprint`
+and `X-SSL-Client-S-DN` are honored ONLY when that flag is set, and are treated as absent
+otherwise (divergence 47 — Rust reads them unconditionally, so anyone who can reach the app
+directly could forge client authentication and a `cnf` binding). Set it only when a
+terminating proxy strips both headers from inbound requests and re-adds them itself.
+
+### Single-process state caveats (Phase 4c)
+
+- `app.state.dpop_code_bindings` — the `dpop_jkt` → authorization-code binding (divergence 52)
+  lives in the same in-process store style as the PAR/replay/nonce stores, because
+  `authorization_codes` has no `dpop_jkt` column and the SQL schema is owned by the Rust repo
+  (zero migrations here). A code redeemed on a DIFFERENT instance from the one that issued it
+  skips the binding check rather than failing. The follow-up is a Rust-side `V22` migration adding
+  the column; until then, either run a single instance or pin the authorize/token pair to one
+  instance if you depend on `dpop_jkt`.
+
+### Design note: introspection of certificate-bound tokens
+
+At `/oauth/introspect` the `X-Client-Cert-Thumbprint` header does double duty — it authenticates
+the CALLER (for the mTLS auth methods) and it proves possession of a certificate-bound token
+(divergence 49). The two cannot be told apart from a single header, so a resource server
+authenticating with its OWN certificate cannot introspect a token bound to a DIFFERENT client's
+certificate: the binding check fails and the response is `{"active": false}`. For that topology,
+give the resource server an introspection client that authenticates with a secret or a JWT
+assertion, so the thumbprint header is free to carry the token's binding.
 
 ## Running
 

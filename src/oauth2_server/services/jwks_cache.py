@@ -132,12 +132,23 @@ class JwksCache:
         return document, ttl
 
 
-async def resolve_client_jwks(client: Client, cache: JwksCache | None) -> dict | None:
-    """Resolve the JWKS a `private_key_jwt` client's assertions are verified
-    against: `None` for every other auth method (no fetch needed), the
-    inline `jwks` column when set (no network), else the cached `jwks_uri`
-    document."""
-    if client.token_endpoint_auth_method != "private_key_jwt":
+async def resolve_client_jwks(
+    client: Client,
+    cache: JwksCache | None,
+    *,
+    methods: tuple[str, ...] = ("private_key_jwt",),
+) -> dict | None:
+    """Resolve the JWKS a client's credentials are verified against: `None`
+    for every auth method outside `methods` (no fetch needed), the inline
+    `jwks` column when set (no network), else the cached `jwks_uri`
+    document.
+
+    `methods` defaults to `private_key_jwt` (RFC 7523 §3 assertions) and is
+    passed as `("self_signed_tls_client_auth",)` by the RFC 8705 §2.2 path
+    in `services/clients.py`, which resolves the same key material to match
+    a certificate thumbprint against `x5t#S256`.
+    """
+    if client.token_endpoint_auth_method not in methods:
         return None
 
     inline = (client.jwks or "").strip()
@@ -156,4 +167,7 @@ async def resolve_client_jwks(client: Client, cache: JwksCache | None) -> dict |
             )
         return await cache.fetch(uri)
 
-    raise OAuthError("invalid_client", "Client must register jwks or jwks_uri for private_key_jwt")
+    raise OAuthError(
+        "invalid_client",
+        f"Client must register jwks or jwks_uri for {client.token_endpoint_auth_method}",
+    )

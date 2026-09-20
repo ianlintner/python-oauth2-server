@@ -5,11 +5,15 @@
 - `GET /.well-known/jwks.json` — publishes every active RS256 key in
   `app.state.keyset` (Task 13); `{"keys": []}` when only HS256 keys exist
   (HS256 secrets are never published).
-- `GET|POST /oauth/userinfo` (OIDC Core §5.3)
+- `GET|POST /oauth/userinfo` (OIDC Core §5.3), including resource-side
+  proof-of-possession enforcement: a DPoP-bound (`cnf.jkt`) or
+  certificate-bound (`cnf["x5t#S256"]`) access token is only accepted when
+  the request re-demonstrates that binding (divergences 49/51).
 """
 
 from __future__ import annotations
 
+import hmac
 from datetime import datetime, timezone
 
 import jwt
@@ -18,7 +22,14 @@ from fastapi.responses import ORJSONResponse
 from pydantic import ValidationError
 
 from oauth2_server.keys import SigningKey, jwk_from_rs256_key
-from oauth2_server.security import decode_access_token
+from oauth2_server.security import decode_access_token, decode_unverified_claims
+from oauth2_server.services.dpop import (
+    DpopError,
+    DpopValidated,
+    read_dpop_header,
+    validate_dpop_proof,
+)
+from oauth2_server.services.mtls import mtls_headers
 
 router = APIRouter()
 
@@ -30,6 +41,10 @@ _CONFIDENTIAL_AUTH_METHODS = [
     "client_secret_post",
     "client_secret_jwt",
     "private_key_jwt",
+    # RFC 8705 §3.3 — implemented in `services/clients.py` and gated on
+    # `trust_proxy_headers` (divergence 47).
+    "tls_client_auth",
+    "self_signed_tls_client_auth",
 ]
 
 # Shared between the discovery document's `scopes_supported` and the RFC
@@ -99,13 +114,11 @@ def _discovery_document(
         "response_types_supported": ["code", "code id_token"],
         "response_modes_supported": ["query", "form_post", "fragment"],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": [
-            "client_secret_basic",
-            "client_secret_post",
-            "client_secret_jwt",
-            "private_key_jwt",
-            "none",
-        ],
+        "token_endpoint_auth_methods_supported": [*_CONFIDENTIAL_AUTH_METHODS, "none"],
+        # RFC 8705 §3.3: the token endpoint binds `cnf["x5t#S256"]` onto
+        # access tokens issued over mTLS, and introspection enforces it
+        # (divergence 49).
+        "tls_client_certificate_bound_access_tokens": True,
         # RFC 8414 §2: introspection/revocation accept the same client-auth
         # methods as the token endpoint, minus `none` — those endpoints
         # always require an authenticated client.
@@ -216,11 +229,7 @@ async def jwks(request: Request) -> ORJSONResponse:
 
 @router.get("/.well-known/oauth-protected-resource")
 async def protected_resource_metadata(request: Request) -> ORJSONResponse:
-    """RFC 9728 OAuth 2.0 Protected Resource Metadata.
-
-    Divergence 33: `tls_client_certificate_bound_access_tokens` is omitted —
-    mTLS (RFC 8705) is not implemented by this server.
-    """
+    """RFC 9728 OAuth 2.0 Protected Resource Metadata."""
     config = request.app.state.config
     base = config.issuer.rstrip("/")
     response = ORJSONResponse(
@@ -232,6 +241,7 @@ async def protected_resource_metadata(request: Request) -> ORJSONResponse:
             "token_introspection_endpoint": f"{base}/oauth/introspect",
             "jwks_uri": f"{base}/.well-known/jwks.json",
             "scopes_supported": SCOPES_SUPPORTED,
+            "tls_client_certificate_bound_access_tokens": True,
         }
     )
     response.headers["Cache-Control"] = "public, max-age=3600"
@@ -272,13 +282,135 @@ def _invalid_token_response(description: str) -> ORJSONResponse:
     )
 
 
+def _dpop_invalid_token_response(description: str) -> ORJSONResponse:
+    """RFC 9449 §7.1: a DPoP-bound token's failures are challenged with the
+    `DPoP` scheme, so a client knows to retry with a proof rather than
+    re-sending the same Bearer request."""
+    return ORJSONResponse(
+        {"error": "invalid_token", "error_description": description},
+        status_code=401,
+        headers={"WWW-Authenticate": 'DPoP error="invalid_token"'},
+    )
+
+
+# Authorization schemes `/oauth/userinfo` understands, compared ASCII
+# case-insensitively (RFC 9110 §11.1: the scheme token is case-insensitive;
+# Rust matches `"Bearer "` exactly — divergence 51).
+_USERINFO_AUTH_SCHEMES = frozenset({"bearer", "dpop"})
+
+
+def _enforce_token_binding(
+    request: Request, config, token_str: str
+) -> tuple[ORJSONResponse | None, DpopValidated | None]:
+    """Divergences 49/51: enforce an access token's `cnf` confirmation at the
+    resource endpoint. Returns `(failure, dpop_validated)` — a 401 response on
+    failure and `None` for the proof, or `(None, proof_or_None)` on success
+    (including the no-`cnf` case, which is every token this server issued
+    before phase 4b/4c and every token issued without a proof or a client
+    certificate).
+
+    `cnf` is read with `decode_unverified_claims` — the storage row, not the
+    signature, is userinfo's authority for whether a token is valid at all
+    (see `userinfo` below), and this only reads a binding back out of a token
+    that already passed that gate. Opaque tokens decode to no claims and so
+    carry no binding, exactly as at introspection.
+
+    Each failure carries a DISTINCT `error_description`. That is deliberate
+    and safe here: unlike introspection (an unauthenticated-ish oracle that
+    collapses everything to `{"active": false}`), reaching this code already
+    required presenting a live access token, so the caller learns nothing
+    about a token they do not already hold. The descriptions never echo the
+    expected `jkt`/thumbprint.
+    """
+    cnf = decode_unverified_claims(token_str).get("cnf")
+    if not isinstance(cnf, dict):
+        return None, None
+
+    # The validated proof, carried back out so the caller can decide whether
+    # a `DPoP-Nonce` belongs on the successful response (divergence 53).
+    validated: DpopValidated | None = None
+
+    # `isinstance` guards throughout: these claims come from an UNVERIFIED
+    # decode, so they need not be strings at all.
+    jkt = cnf.get("jkt")
+    if isinstance(jkt, str) and jkt:
+        scheme = request.headers.get("authorization", "").partition(" ")[0].lower()
+        if scheme != "dpop":
+            return (
+                _dpop_invalid_token_response(
+                    "DPoP-bound access token must be presented with the DPoP scheme"
+                ),
+                None,
+            )
+
+        try:
+            proof = read_dpop_header(request)
+        except DpopError:
+            # Non-UTF-8 DPoP header; at the token endpoint this is a 400
+            # `invalid_request`, but here it is simply an unusable proof.
+            proof = None
+        if proof is None:
+            return (
+                _dpop_invalid_token_response("DPoP proof required for this access token"),
+                None,
+            )
+
+        try:
+            validated = validate_dpop_proof(
+                proof,
+                request.method,
+                config.issuer.rstrip("/") + "/oauth/userinfo",
+                # The SHARED per-app replay store (`app.state.dpop_replay`),
+                # the same one the token and introspection endpoints use, so
+                # a proof is single-use across every endpoint.
+                request.app.state.dpop_replay,
+                # Divergence 50: `ath` is required here, bound to the token
+                # exactly AS PRESENTED in the Authorization header.
+                access_token=token_str,
+            )
+        except DpopError:
+            return _dpop_invalid_token_response("DPoP proof validation failed"), None
+
+        # Compare UTF-8 bytes: `jkt` came off an unverified decode and may be
+        # non-ASCII, which makes `hmac.compare_digest` raise TypeError on
+        # `str` — same hazard/fix as `routes/introspect.py` (Task 3).
+        if not hmac.compare_digest(validated.jkt.encode("utf-8"), jkt.encode("utf-8")):
+            return (
+                _dpop_invalid_token_response(
+                    "DPoP proof key does not match the access token binding"
+                ),
+                None,
+            )
+
+    thumb = cnf.get("x5t#S256")
+    if isinstance(thumb, str) and thumb:
+        # Divergence 49: the presented thumbprint comes from `mtls_headers`,
+        # which returns `None` unless `trust_proxy_headers` is set
+        # (divergence 47) — a forged header behind an untrusted proxy reads
+        # as MISSING, not as a match. Certificate binding keeps the `Bearer`
+        # challenge: there is no proof for the client to add.
+        presented = mtls_headers(request, config)[0]
+        if presented is None or not hmac.compare_digest(
+            presented.encode("utf-8"), thumb.encode("utf-8")
+        ):
+            return (
+                _invalid_token_response(
+                    "Certificate-bound access token requires a matching client certificate"
+                ),
+                None,
+            )
+
+    return None, validated
+
+
 @router.get("/oauth/userinfo")
 @router.post("/oauth/userinfo")
 async def userinfo(request: Request) -> ORJSONResponse:
     auth_header = request.headers.get("authorization", "")
+    scheme, _, rest = auth_header.partition(" ")
     token_str = None
-    if auth_header.startswith("Bearer "):
-        candidate = auth_header[len("Bearer ") :].strip()
+    if scheme.lower() in _USERINFO_AUTH_SCHEMES:
+        candidate = rest.strip()
         if candidate:
             token_str = candidate
 
@@ -302,6 +434,10 @@ async def userinfo(request: Request) -> ORJSONResponse:
     if row is None or row.revoked or row.expires_at <= datetime.now(timezone.utc):
         return _invalid_token_response("Invalid or expired access token")
 
+    binding_failure, dpop_validated = _enforce_token_binding(request, config, token_str)
+    if binding_failure is not None:
+        return binding_failure
+
     subject = row.user_id
     if subject is None:
         return _invalid_token_response("Access token does not represent an authenticated user")
@@ -316,4 +452,13 @@ async def userinfo(request: Request) -> ORJSONResponse:
         if "profile" in scopes:
             response["preferred_username"] = user.username
 
-    return ORJSONResponse(response)
+    result = ORJSONResponse(response)
+    if dpop_validated is not None:
+        # Divergence 53: userinfo has no client row of its own — look one up
+        # only on the proof path (at most once per request) so a nonce-
+        # requiring client gets a fresh `DPoP-Nonce` here too, not just from
+        # the token endpoint. A deleted client simply yields no header.
+        token_client = await storage.get_client(row.client_id)
+        if token_client is not None and token_client.dpop_nonce_required:
+            result.headers["DPoP-Nonce"] = request.app.state.dpop_nonce_issuer.issue()
+    return result

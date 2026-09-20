@@ -13,8 +13,10 @@ from __future__ import annotations
 from urllib.parse import urlsplit
 
 from oauth2_server.errors import OAuthError
+from oauth2_server.services.limits import LimitError, check_len
 
 _INVALID_TARGET_DESCRIPTION = "resource must be an absolute URI without a fragment"
+_MAX_RESOURCE_LEN = 2048
 
 
 def validate_resource(value: str | None) -> str | None:
@@ -31,9 +33,17 @@ def validate_resource(value: str | None) -> str | None:
     authority-less scheme (`mailto:`, `tag:`, ...). What is rejected is a
     relative reference (no scheme, e.g. `/api/orders`) and a scheme with
     nothing after it (`https:`), which name nothing.
+
+    Divergence 57: the raw value is length-capped at 2048 characters BEFORE
+    it is parsed, so an oversized indicator is rejected (`invalid_target`)
+    rather than copied into a token claim and every log line downstream.
     """
     if value is None:
         return None
+    try:
+        check_len(value, name="resource", max_len=_MAX_RESOURCE_LEN)
+    except LimitError as exc:
+        raise OAuthError("invalid_target", exc.description, 400) from None
     split = urlsplit(value)
     # urlsplit puts an authority-less hier-part entirely in `path`, so the
     # "names something" check is netloc/path/query rather than netloc alone.

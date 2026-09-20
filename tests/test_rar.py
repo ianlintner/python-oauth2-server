@@ -329,3 +329,42 @@ async def test_opaque_mode_drops_authorization_details(client_app):
         # The bare opaque access token is not a JWT.
         with pytest.raises(jwt.PyJWTError):
             jwt.decode(body["access_token"], options={"verify_signature": False})
+
+
+# --- Divergence 57: input caps -----------------------------------------------
+
+
+async def test_oversized_authorization_details_rejected(client_app):
+    """`authorization_details` over 16384 characters never reaches `json.loads`."""
+    await login_session(client_app)
+    oversized = json.dumps([{"type": "openid", "actions": ["x" * 17000]}])
+    assert len(oversized) > 16384
+    resp = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "client_id": "client1",
+            "response_type": "code",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "authorization_details": oversized,
+        },
+    )
+    assert resp.status_code == 302, resp.text
+    q = parse_qs(urlparse(resp.headers["location"]).query)
+    assert q["error"] == ["invalid_authorization_details"]
+    assert "exceeds the maximum length of 16384" in q["error_description"][0]
+
+
+async def test_over_nested_authorization_details_at_token_endpoint_no_500(client_app):
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "client_credentials",
+            "authorization_details": "[" * 60 + "]" * 60,
+        },
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["error"] == "invalid_authorization_details"
+    assert "exceeds the maximum nesting depth of 10" in body["error_description"]

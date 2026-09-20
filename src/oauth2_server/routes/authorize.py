@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from urllib.parse import parse_qsl, urlencode
 
@@ -89,6 +90,7 @@ from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.jar import process_jar
 from oauth2_server.services.rar import RarError, validate_authorization_details
+from oauth2_server.services.limits import LimitError, check_json_param
 from oauth2_server.services.resource import validate_resource
 from oauth2_server.sessions import current_acr, current_amr, current_user_id
 
@@ -120,7 +122,13 @@ _PAR_MERGE_KEYS = (
     "authorization_details",
     "claims",
     "acr_values",
+    "dpop_jkt",
 )
+
+# A base64url-no-pad SHA-256 thumbprint: 32 bytes -> exactly 43 characters of
+# the RFC 4648 §5 alphabet. Padding (`=`), the standard-base64 `+`/`/` and any
+# other length are all rejected (divergence 52).
+_DPOP_JKT_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 def _strip_reauth_params(query: str) -> str:
@@ -402,12 +410,26 @@ async def authorize(request: Request):
     # or JAR-overlaid value) must parse as a JSON *object* — an array,
     # string, number or malformed JSON is an `invalid_request` redirect. The
     # raw string (not the parsed dict) is what gets stored on the
-    # authorization code below; nothing downstream reads it yet, and
+    # authorization code below, where `services/claims_request.py` reads it
+    # back when the id_token is minted (divergence 59, id_token member only);
     # `claims_parameter_supported` is deliberately not advertised.
     claims_request = merged.get("claims")
     if claims_request is not None:
         try:
-            parsed_claims = json.loads(claims_request)
+            parsed_claims = check_json_param(
+                claims_request, name="claims", max_len=8192, max_depth=10
+            )
+        except LimitError as exc:
+            # Divergence 57: over-long / over-nested input is rejected through
+            # the same redirect channel, with the limits helper's wording.
+            return _deliver_error(
+                response_mode,
+                redirect_uri,
+                "invalid_request",
+                exc.description,
+                state,
+                config.issuer,
+            )
         except json.JSONDecodeError:
             parsed_claims = None
         if not isinstance(parsed_claims, dict):
@@ -419,6 +441,25 @@ async def authorize(request: Request):
                 state,
                 config.issuer,
             )
+
+    # RFC 9449 §10 / divergence 52: `dpop_jkt` (query param, PAR-merged or
+    # JAR-overlaid) pre-binds the authorization code to a DPoP key, closing
+    # the window between the code landing at the client and the proof being
+    # presented at the token endpoint. The value is a JWK SHA-256 thumbprint:
+    # base64url (RFC 4648 §5, no padding) of 32 bytes, hence exactly 43
+    # characters. Like `resource`/`claims` above, a bad value is delivered
+    # through the now-trusted redirect channel, never a raw 400. The binding
+    # itself is recorded against the issued code below.
+    dpop_jkt = merged.get("dpop_jkt")
+    if dpop_jkt is not None and not _DPOP_JKT_RE.fullmatch(dpop_jkt):
+        return _deliver_error(
+            response_mode,
+            redirect_uri,
+            "invalid_request",
+            "dpop_jkt must be a base64url-encoded SHA-256 JWK thumbprint",
+            state,
+            config.issuer,
+        )
 
     # --- 5. Require an authenticated session ---
     # OIDC Core §3.1.2.1: `prompt` is a space-delimited list of values.
@@ -513,6 +554,10 @@ async def authorize(request: Request):
         resource=resource,
         claims_request=claims_request,
     )
+    if dpop_jkt is not None:
+        # Divergence 52: in-process only — `AuthorizationCode` is a Rust-owned
+        # table and may not grow a column for this (services/dpop_bindings.py).
+        request.app.state.dpop_code_bindings.bind(auth_code.code, dpop_jkt)
     request.app.state.metrics.oauth_authorization_codes_issued.inc()
     emit_event(
         request.app.state.event_bus,
