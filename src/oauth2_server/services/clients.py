@@ -106,6 +106,12 @@ def is_valid_jwks_uri(uri: str) -> bool:
             # A registered name, not an IP literal in any spelling — nothing
             # more to check here.
             return True
+    # Unwrap IPv4-mapped IPv6 (`::ffff:127.0.0.1`) explicitly: `is_loopback`
+    # on the mapped form only became True in CPython 3.12.4+/3.13, so older
+    # 3.12 patch releases (as on CI) would let it through.
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
     return not (address.is_loopback or address.is_link_local or address.is_unspecified)
 
 
