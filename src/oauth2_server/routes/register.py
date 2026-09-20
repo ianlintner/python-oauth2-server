@@ -110,6 +110,15 @@ async def register_client(request: Request) -> ORJSONResponse:
     if reg.jwks is not None and reg.jwks_uri:
         return _registration_error("jwks and jwks_uri are mutually exclusive")
 
+    # An EXACTLY empty registered Subject DN is the RFC 8705 "any certificate
+    # the proxy vouched for" wildcard (`services/clients.py`). A
+    # whitespace-only one is a registrant mistake that reads like a real DN,
+    # so refuse it rather than storing a row one stray `.strip()` away from
+    # authenticating every certificate.
+    subject_dn = reg.tls_client_certificate_subject_dn
+    if subject_dn and not subject_dn.strip():
+        return _registration_error("tls_client_certificate_subject_dn must not be blank")
+
     # `jwks_uri` is the one registrant-supplied URL this server dereferences
     # itself, so it gets a stricter rule than the redirect URIs above — see
     # `services/clients.py::is_valid_jwks_uri`.

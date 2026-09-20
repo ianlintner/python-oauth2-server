@@ -208,8 +208,10 @@ class ClientService:
         self._issuer = issuer
         self._jwks_cache = jwks_cache
         self._jti_guard = jti_guard
-        # Set per `authenticate()` call from the proxy's mTLS headers; see
-        # that method. Never read as part of an auth decision yet.
+        # Set per `authenticate()` call from the proxy's mTLS headers and
+        # read by the RFC 8705 branches of `authenticate()` — see that
+        # method — which dispatch on the client's registered
+        # `token_endpoint_auth_method`.
         self._mtls: tuple[str | None, str | None] | None = None
 
     @classmethod
@@ -256,9 +258,14 @@ class ClientService:
         `mtls` is the `(thumbprint, subject_dn)` pair read off the proxy's
         client-certificate headers by `services/mtls.py::mtls_headers` — it
         is `(None, None)` unless `trust_proxy_headers` is set (divergence
-        47). It is recorded on the service for the RFC 8705 certificate-bound
-        auth methods to consume; no authentication decision depends on it
-        yet, so passing it changes nothing for existing clients.
+        47). It is recorded on the service and consumed by the RFC 8705
+        branches below: a client registered `tls_client_auth` is
+        authenticated by `_authenticate_tls_client_auth` (Subject DN) and one
+        registered `self_signed_tls_client_auth` by
+        `_authenticate_self_signed_tls_client_auth` (certificate thumbprint
+        against the registered JWKS). For every other registered method the
+        pair is ignored, so passing it changes nothing for secret- or
+        JWT-authenticated clients.
         """
         self._mtls = mtls
         basic = _parse_basic_auth(authorization_header)
@@ -418,7 +425,13 @@ def _authenticate_tls_client_auth(
     if thumbprint is None:
         raise OAuthError("invalid_client", _TLS_NO_CERT_MESSAGE)
 
-    configured_dn = (client.tls_client_certificate_subject_dn or "").strip()
+    # NOT trimmed: only an EXACTLY empty registered DN is the permissive
+    # "any certificate" case. Trimming first would turn a whitespace-only
+    # stored DN into that wildcard — a fail-open that lets any certificate
+    # the proxy vouched for authenticate this client. Registration and the
+    # admin API refuse blank DNs outright, and this is the backstop for rows
+    # written before that rule.
+    configured_dn = client.tls_client_certificate_subject_dn or ""
     if not configured_dn:
         return
     if subject_dn is None:

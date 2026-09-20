@@ -226,6 +226,30 @@ async def test_dpop_jkt_binding_consumed_once(client_app):
     assert second.json()["error_description"] == "authorization code has already been used"
 
 
+async def test_pkce_mismatch_leaves_dpop_jkt_binding_unconsumed(client_app):
+    """A PKCE failure must not spend the `dpop_jkt` binding.
+
+    The PKCE check runs before the binding is taken, so a wrong
+    `code_verifier` is rejected without consuming it — otherwise an attacker
+    holding a stolen code could burn the binding with a junk verifier and
+    then redeem the code with no DPoP proof at all.
+    """
+    key = generate_dpop_key()
+    code, verifier = await _authorize_code(client_app, dpop_jkt=jwk_thumbprint(key[1]))
+
+    wrong = await _redeem(client_app, code, "a" * len(verifier))
+    assert wrong.status_code == 400, wrong.text
+    assert wrong.json()["error"] == "invalid_grant"
+    assert wrong.json()["error_description"] == "code_verifier does not match code_challenge"
+
+    # Binding survived: the correct verifier with NO proof still fails on it.
+    second = await _redeem(client_app, code, verifier)
+    assert second.status_code == 400, second.text
+    assert second.json()["error_description"] == (
+        "authorization code is bound to a different DPoP key"
+    )
+
+
 # --- validation --------------------------------------------------------------
 
 

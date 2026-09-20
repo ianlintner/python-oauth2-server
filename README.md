@@ -284,8 +284,8 @@ its own `provider:id` user row, so a social identity can never reach an existing
 With it on, a callback whose email matches an existing local user signs that user in directly,
 reusing the row exactly as it is — same username, same role, no link record, `amr` still `["fed"]`.
 
-Because a wrong match here is an account takeover, linking happens only when **all four** of the
-following hold, and falls back to provisioning a new account otherwise:
+Because a wrong match here is an account takeover, linking happens only when **every one** of the
+following holds, and falls back to provisioning a new account otherwise:
 
 1. `OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL=true`.
 2. The provider **verified** the address, and this server enforced that itself: Google
@@ -297,6 +297,9 @@ following hold, and falls back to provisioning a new account otherwise:
    resolved by picking one.
 4. The matched account is **not privileged**: its role is not `admin` and its address is not in
    `OAUTH2_ADMIN_EMAILS`.
+5. The matched account is **enabled**. A disabled local row is refused outright rather than
+   revived through a social callback (and linking does not fall back to provisioning a fresh
+   account in that case).
 
 Leave it off unless every provider you have configured is one whose email verification you trust
 for the accounts in your user table.

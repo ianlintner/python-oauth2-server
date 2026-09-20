@@ -672,6 +672,51 @@ async def test_admin_create_and_update_persist_subject_dn():
         assert reloaded.token_endpoint_auth_method == "tls_client_auth"
 
 
+async def test_admin_create_rejects_blank_subject_dn():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Blank DN",
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_certificate_subject_dn": "   ",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "tls_client_certificate_subject_dn must not be blank",
+        }
+
+
+async def test_admin_update_rejects_blank_subject_dn():
+    async with build_client_app() as client:
+        await _login(client)
+        create = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "mTLS Client",
+                "client_id": "admin-mtls-blank",
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_certificate_subject_dn": "CN=svc,O=Example",
+            },
+        )
+        assert create.status_code == 201, create.text
+        stored = await client.storage.get_client("admin-mtls-blank")
+
+        resp = await client.put(
+            f"/admin/api/clients/{stored.id}",
+            json={"tls_client_certificate_subject_dn": " "},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error_description"] == (
+            "tls_client_certificate_subject_dn must not be blank"
+        )
+        reloaded = await client.storage.get_client("admin-mtls-blank")
+        assert reloaded.tls_client_certificate_subject_dn == "CN=svc,O=Example"
+
+
 async def test_admin_create_self_signed_without_keys_rejected():
     async with build_client_app() as client:
         await _login(client)

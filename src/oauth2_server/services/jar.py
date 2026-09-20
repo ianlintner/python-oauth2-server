@@ -44,6 +44,15 @@ from oauth2_server.errors import OAuthError
 from oauth2_server.models import Client
 from oauth2_server.services.client_assertion import rsa_key_from_jwks
 from oauth2_server.services.jwks_cache import JwksCache, resolve_client_jwks
+from oauth2_server.services.limits import LimitError, check_depth
+
+# Nesting budget for an UNSIGNED JAR payload. A JAR carries flat request
+# parameters, so anything deeper is a nesting bomb rather than a request; the
+# signed path never reaches this because PyJWT rejects the signature first.
+_MAX_UNSIGNED_JAR_DEPTH = 10
+
+_HEADER_JSON_ERROR = "JAR JWT header is not valid JSON"
+_PAYLOAD_JSON_ERROR = "JAR JWT payload is not valid JSON"
 
 # The authorization-request parameters a JAR payload may supply. `client_id`
 # is deliberately absent: it always comes from the query string (it is what
@@ -166,8 +175,13 @@ def _decode_unsigned_jar(parts: list[str]) -> dict:
     header_bytes = _b64url_decode(parts[0], "header")
     try:
         header = json.loads(header_bytes)
-    except ValueError as exc:
-        raise OAuthError("invalid_request", "JAR JWT header is not valid JSON") from exc
+    # `RecursionError` alongside `ValueError`: CPython's JSON scanner recurses
+    # per nesting level, so a deeply nested segment blows the interpreter
+    # stack instead of failing to decode. Unhandled that is a 500 — an
+    # unauthenticated DoS/error-oracle on the authorize endpoint — and it IS
+    # a malformed-JSON case, so it is reported as one.
+    except (ValueError, RecursionError) as exc:
+        raise OAuthError("invalid_request", _HEADER_JSON_ERROR) from exc
     if not isinstance(header, dict) or header.get("alg") != "none":
         raise OAuthError(
             "invalid_request",
@@ -181,10 +195,18 @@ def _decode_unsigned_jar(parts: list[str]) -> dict:
     payload_bytes = _b64url_decode(parts[1], "payload")
     try:
         payload = json.loads(payload_bytes)
-    except ValueError as exc:
-        raise OAuthError("invalid_request", "JAR JWT payload is not valid JSON") from exc
+    except (ValueError, RecursionError) as exc:  # see the header decode above
+        raise OAuthError("invalid_request", _PAYLOAD_JSON_ERROR) from exc
     if not isinstance(payload, dict):
-        raise OAuthError("invalid_request", "JAR JWT payload is not valid JSON")
+        raise OAuthError("invalid_request", _PAYLOAD_JSON_ERROR)
+    # Parsing succeeded, but the structure can still be deep enough to blow
+    # the stack in a later recursive walk (overlay, serialization, logging).
+    # `check_depth` is an explicit-stack walk, so the guard is not itself the
+    # overflow it prevents.
+    try:
+        check_depth(payload, name="request", max_depth=_MAX_UNSIGNED_JAR_DEPTH)
+    except LimitError as exc:
+        raise OAuthError("invalid_request", _PAYLOAD_JSON_ERROR) from exc
     return payload
 
 

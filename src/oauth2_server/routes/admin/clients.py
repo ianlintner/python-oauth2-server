@@ -87,6 +87,9 @@ def _client_not_found() -> ORJSONResponse:
     return ORJSONResponse({"error": "client not found"}, status_code=404)
 
 
+_BLANK_SUBJECT_DN_ERROR = "tls_client_certificate_subject_dn must not be blank"
+
+
 def _bad_request(description: str) -> ORJSONResponse:
     return ORJSONResponse(
         {"error": "invalid_request", "error_description": description}, status_code=400
@@ -273,6 +276,10 @@ async def create_client(
     subject_dn = body.get("tls_client_certificate_subject_dn") or ""
     if not isinstance(subject_dn, str):
         return _bad_request("tls_client_certificate_subject_dn must be a string")
+    # Only the exactly-empty DN is the "any certificate" wildcard; see
+    # `routes/register.py` and `services/clients.py`.
+    if subject_dn and not subject_dn.strip():
+        return _bad_request(_BLANK_SUBJECT_DN_ERROR)
 
     invalid = _validate_key_material(auth_method, jwks_json, jwks_uri)
     if invalid is not None:
@@ -399,7 +406,10 @@ async def update_client(
     if "jwks_uri" in fields_set:
         updates["jwks_uri"] = body_model.jwks_uri
     if "tls_client_certificate_subject_dn" in fields_set:
-        updates["tls_client_certificate_subject_dn"] = body_model.tls_client_certificate_subject_dn
+        submitted_dn = body_model.tls_client_certificate_subject_dn
+        if submitted_dn and not submitted_dn.strip():
+            return _bad_request(_BLANK_SUBJECT_DN_ERROR)
+        updates["tls_client_certificate_subject_dn"] = submitted_dn
     if "backchannel_logout_uri" in fields_set:
         updates["backchannel_logout_uri"] = body_model.backchannel_logout_uri
     if "frontchannel_logout_uri" in fields_set:

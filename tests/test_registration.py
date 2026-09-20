@@ -245,6 +245,40 @@ async def test_registration_accepts_tls_client_auth_with_subject_dn(client):
     assert stored.tls_client_certificate_subject_dn == "CN=svc,O=Example"
 
 
+@pytest.mark.parametrize("blank", ["   ", "\t", "\n "])
+async def test_registration_rejects_blank_subject_dn(client, blank):
+    """An exactly-empty registered DN is the documented "any certificate"
+    wildcard; a whitespace-only one is almost certainly a mistake, and would
+    read as that wildcard if anything ever trimmed it. Refuse it at the door."""
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "token_endpoint_auth_method": "tls_client_auth",
+            "tls_client_certificate_subject_dn": blank,
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json() == {
+        "error": "invalid_client_metadata",
+        "error_description": "tls_client_certificate_subject_dn must not be blank",
+    }
+
+
+async def test_registration_allows_empty_subject_dn(client):
+    """The empty string stays legal — it is the RFC 8705 "any certificate the
+    proxy vouched for" registration."""
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "token_endpoint_auth_method": "tls_client_auth",
+            "tls_client_certificate_subject_dn": "",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+
+
 async def test_registration_self_signed_requires_jwks(client):
     resp = await client.post(
         "/connect/register",

@@ -486,11 +486,25 @@ async def token(request: Request) -> ORJSONResponse:
             except RarError as exc:
                 return oauth_error(exc.error, exc.description)
 
+        claimed = await storage.mark_authorization_code_used(auth_code.code)
+        if claimed == 0:
+            # Lost the race to a concurrent request that already claimed this code.
+            if auth_code.token_family:
+                await storage.revoke_token_family(auth_code.token_family)
+            return oauth_error("invalid_grant", "authorization code has already been used")
+
         # RFC 9449 §10 / divergence 52: enforce the `dpop_jkt` the client
-        # pre-bound this code to at /oauth/authorize. `take` is destructive —
-        # a redemption attempt is the one chance to prove possession of that
-        # key — and a mismatch also burns the code below, so an attacker who
-        # stole the code cannot simply retry it once the binding is spent.
+        # pre-bound this code to at /oauth/authorize.
+        #
+        # Deliberately AFTER the atomic `mark_authorization_code_used` claim
+        # above: `take` is destructive (a redemption attempt is the one chance
+        # to prove possession of that key), so running it first would let a
+        # concurrent redemption that LOSES the code race still consume the
+        # binding — and the winner would then sail through unbound. Only the
+        # request that actually claimed the code gets to spend the binding.
+        # A mismatch here needs no extra burn: the code is already used, so it
+        # cannot be retried with a different key.
+        #
         # An absent binding means "never bound" OR "bound on another
         # instance" (the store is per-process; see services/dpop_bindings.py),
         # and skips the check.
@@ -506,17 +520,9 @@ async def token(request: Request) -> ORJSONResponse:
                 dpop_validated.jkt.encode("utf-8"), expected_jkt.encode("utf-8")
             )
         ):
-            await storage.mark_authorization_code_used(auth_code.code)
             return oauth_error(
                 "invalid_grant", "authorization code is bound to a different DPoP key"
             )
-
-        claimed = await storage.mark_authorization_code_used(auth_code.code)
-        if claimed == 0:
-            # Lost the race to a concurrent request that already claimed this code.
-            if auth_code.token_family:
-                await storage.revoke_token_family(auth_code.token_family)
-            return oauth_error("invalid_grant", "authorization code has already been used")
 
         emit_event(
             event_bus,

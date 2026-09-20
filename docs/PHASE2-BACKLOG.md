@@ -400,8 +400,12 @@ not as bugs introduced by the port:
   `User` rows.
   **Done (4c):** (opt-in) Task 7 (commits `aa8b469`, `c4c3861`, `12e7ea5`, divergence 56) — with
   `OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL=true`, a provider-verified email links to a single
-  matching, non-admin, enabled local account. Default false; provider-to-provider linking still
-  creates independent rows.
+  matching, non-admin, enabled local account. Default false. Provider-to-provider convergence
+  follows from the same rule rather than being special-cased: with the flag ON, the first login
+  provisions a `github:<id>` row carrying the verified email, and a later Google login asserting
+  that same verified email matches that single row and signs into it — so two providers converge
+  on one account. With the flag OFF, each provider keeps its own independent
+  `{provider}:{provider_user_id}` row.
 - **No `id_token`/nonce validation for social providers** — identity is established purely via
   each provider's authenticated userinfo REST endpoint (Google `/oauth2/v2/userinfo`, Microsoft/
   Azure Graph `/me`, GitHub `/user` + `/user/emails`), never by validating a provider-issued

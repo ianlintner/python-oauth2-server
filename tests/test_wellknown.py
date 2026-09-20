@@ -33,6 +33,17 @@ async def test_discovery_includes_iss_parameter_supported(client_app):
     assert resp.json()["authorization_response_iss_parameter_supported"] is True
 
 
+async def test_discovery_omits_claims_parameter_supported(client_app):
+    """Divergence 59: the `claims` request parameter is parsed and honored
+    for `id_token` claims, but the OIDC Core `claims_parameter_supported`
+    metadata flag is deliberately NOT advertised (Rust parity) — support is
+    partial, and advertising it would promise `userinfo` handling too."""
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "claims_parameter_supported" not in body
+
+
 async def test_discovery_advertises_none_auth_method(client_app):
     resp = await client_app.get("/.well-known/openid-configuration")
     assert resp.status_code == 200

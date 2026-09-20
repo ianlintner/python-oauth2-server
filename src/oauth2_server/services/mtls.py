@@ -33,24 +33,39 @@ class _HasHeaders(Protocol):
     def headers(self) -> Mapping[str, str]: ...
 
 
-def _header(request: _HasHeaders, name: str) -> str | None:
-    # Starlette header lookups are case-insensitive; an empty or
-    # whitespace-only value is treated as absent so a proxy that always sets
-    # the header (blank for non-mTLS connections) doesn't look like a
-    # certificate-bearing request.
-    value = request.headers.get(name)
+def _thumbprint_header(request: _HasHeaders) -> str | None:
+    # Starlette header lookups are case-insensitive. The thumbprint is an
+    # opaque base64url token, so surrounding whitespace is proxy formatting
+    # and is trimmed; an empty or whitespace-only value is treated as absent
+    # so a proxy that always sets the header (blank for non-mTLS
+    # connections) doesn't look like a certificate-bearing request.
+    value = request.headers.get(THUMBPRINT_HEADER)
     if value is None:
         return None
-    value = value.strip()
-    return value or None
+    return value.strip() or None
+
+
+def _subject_dn_header(request: _HasHeaders) -> str | None:
+    # The DN, by contrast, is passed through VERBATIM: `tls_client_auth`
+    # compares it byte-exactly against the registered
+    # `tls_client_certificate_subject_dn` (no DN normalization, no case
+    # folding), and trimming here would quietly make that compare lenient.
+    # Only the exactly-empty header reads as "no DN presented" — the blank
+    # value an always-setting proxy emits for a non-mTLS connection.
+    value = request.headers.get(SUBJECT_DN_HEADER)
+    if value is None or value == "":
+        return None
+    return value
 
 
 def mtls_headers(request: _HasHeaders, config: Config) -> tuple[str | None, str | None]:
     """Return `(thumbprint, subject_dn)` from the proxy's mTLS headers.
 
     Both are `None` unless `config.trust_proxy_headers` is true (divergence
-    47), and an empty/whitespace-only header value reads as `None`.
+    47). An empty or whitespace-only thumbprint reads as `None`; the DN is
+    returned verbatim and only an exactly-empty value reads as `None`, so the
+    Subject DN comparison stays byte-exact.
     """
     if not config.trust_proxy_headers:
         return (None, None)
-    return (_header(request, THUMBPRINT_HEADER), _header(request, SUBJECT_DN_HEADER))
+    return (_thumbprint_header(request), _subject_dn_header(request))

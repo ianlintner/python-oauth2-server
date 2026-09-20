@@ -66,8 +66,21 @@ def test_mtls_headers_read_with_trust_proxy():
 
 def test_mtls_headers_empty_values_are_none():
     config = _config(trust_proxy_headers=True)
-    headers = {"X-Client-Cert-Thumbprint": "", "X-SSL-Client-S-DN": "   "}
+    headers = {"X-Client-Cert-Thumbprint": "", "X-SSL-Client-S-DN": ""}
     assert mtls_headers(_request(headers), config) == (None, None)
+
+
+def test_mtls_headers_thumbprint_is_trimmed_but_dn_is_verbatim():
+    """The DN is compared BYTE-EXACTLY against the registered value, so this
+    module must not silently normalize it: only an exactly-empty DN header
+    reads as absent. The thumbprint is an opaque base64url token, so trimming
+    the proxy's padding whitespace there is safe."""
+    config = _config(trust_proxy_headers=True)
+    headers = {"X-Client-Cert-Thumbprint": "  abc123  ", "X-SSL-Client-S-DN": "  CN=a,O=b  "}
+    assert mtls_headers(_request(headers), config) == ("abc123", "  CN=a,O=b  ")
+
+    blank_thumbprint = {"X-Client-Cert-Thumbprint": "   ", "X-SSL-Client-S-DN": "   "}
+    assert mtls_headers(_request(blank_thumbprint), config) == (None, "   ")
 
 
 def test_mtls_headers_absent_headers_are_none():
@@ -222,6 +235,56 @@ async def test_tls_client_auth_dn_configured_header_missing_rejected():
         assert resp.status_code == 401, resp.text
         assert resp.json()["error_description"] == (
             "tls_client_auth requires X-SSL-Client-S-DN header when Subject DN is configured"
+        )
+
+
+async def test_tls_client_auth_whitespace_only_dn_does_not_accept_any_certificate():
+    """A whitespace-only registered DN must NOT fail open.
+
+    Only an EXACTLY empty `tls_client_certificate_subject_dn` means "any
+    certificate the proxy vouched for" (Rust parity). Trimming the configured
+    value first would turn a DN of spaces into that wildcard, so any client
+    certificate would authenticate this client.
+    """
+    async with _trusting_app() as client_app:
+        await reseed_client(
+            client_app,
+            token_endpoint_auth_method="tls_client_auth",
+            tls_client_certificate_subject_dn="   ",
+            client_secret="",
+        )
+        resp = await post_token(
+            client_app,
+            {**CLIENT_CREDENTIALS, "client_id": "client1"},
+            headers=_cert_headers(),
+        )
+        assert resp.status_code == 401, resp.text
+        assert resp.json() == {
+            "error": "invalid_client",
+            "error_description": (
+                "tls_client_auth requires X-SSL-Client-S-DN header when Subject DN is configured"
+            ),
+        }
+
+
+async def test_tls_client_auth_dn_comparison_is_byte_exact_about_whitespace():
+    """A presented DN that differs from the registered one only by
+    surrounding whitespace is a mismatch — the compare is byte-exact."""
+    async with _trusting_app() as client_app:
+        await reseed_client(
+            client_app,
+            token_endpoint_auth_method="tls_client_auth",
+            tls_client_certificate_subject_dn=CLIENT_DN,
+            client_secret="",
+        )
+        resp = await post_token(
+            client_app,
+            {**CLIENT_CREDENTIALS, "client_id": "client1"},
+            headers=_cert_headers(dn=f"  {CLIENT_DN}  "),
+        )
+        assert resp.status_code == 401, resp.text
+        assert resp.json()["error_description"] == (
+            "tls_client_auth: client certificate Subject DN does not match"
         )
 
 
