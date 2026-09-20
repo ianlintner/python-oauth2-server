@@ -3,8 +3,20 @@ client's JWKS document so `private_key_jwt` validation does not hit the
 client's key endpoint on every token request.
 
 Ported from `crates/oauth2-actix/src/handlers/jwks_cache.rs`; the TTL
-constants, clamping rule and `invalid_client` descriptions are reproduced
-verbatim.
+constants and clamping rule are reproduced verbatim.
+
+**Divergence from Rust — fetch failures say nothing about the fetch.**
+Rust folds the URL, the upstream status code and the transport error text
+into the `invalid_client` description it returns to the caller. Since
+`jwks_uri` is registrant-controlled and this server dereferences it, that
+turns the token endpoint into an SSRF / port-scan oracle: "connection
+refused" vs. "HTTP 401" vs. "invalid JSON" distinguishes a closed port from
+an open one from a real service, for any host the registrant cares to
+point at. Every failure here therefore collapses to one of two fixed
+strings (`_FETCH_FAILED_MESSAGE`, `_INVALID_DOCUMENT_MESSAGE`) carrying no
+URL, status or exception text, and the detail is `logger.warning`-ed
+server-side instead. Registration additionally refuses to store an unsafe
+`jwks_uri` at all (`services/clients.py::is_valid_jwks_uri`).
 
 **Single-process only** — a plain `dict` on the instance, one instance per
 app (`app.state.jwks_cache`), like the Rust `Arc<Mutex<HashMap>>`
@@ -14,6 +26,7 @@ registered once as actix `app_data`.
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 import httpx
@@ -38,6 +51,13 @@ MAX_TTL_SECS = 86_400
 JWKS_FETCH_TIMEOUT_SECS = 10
 
 _MAX_AGE_PREFIX = "max-age="
+
+logger = logging.getLogger(__name__)
+
+# The only two fetch-failure descriptions a client is ever shown. See the
+# module docstring for why they carry no detail.
+_FETCH_FAILED_MESSAGE = "Failed to fetch jwks_uri"
+_INVALID_DOCUMENT_MESSAGE = "jwks_uri returned an invalid JWKS document"
 
 
 def parse_cache_control_max_age(headers: httpx.Headers) -> int:
@@ -78,6 +98,12 @@ class JwksCache:
         return document
 
     async def _fetch_from_url(self, url: str) -> tuple[dict, int]:
+        """Fetch and validate the JWKS at `url`.
+
+        Every failure raises `invalid_client` with a fixed, detail-free
+        description; the URL, status and exception text go to the log
+        instead (module docstring).
+        """
         try:
             response = await self._http_client.get(
                 url,
@@ -85,26 +111,24 @@ class JwksCache:
                 timeout=JWKS_FETCH_TIMEOUT_SECS,
             )
         except httpx.HTTPError as exc:
-            raise OAuthError("invalid_client", f"Failed to fetch jwks_uri '{url}': {exc}") from exc
+            logger.warning("failed to fetch jwks_uri %s: %s", url, exc)
+            raise OAuthError("invalid_client", _FETCH_FAILED_MESSAGE) from exc
 
         if not response.is_success:
-            raise OAuthError(
-                "invalid_client", f"jwks_uri '{url}' returned HTTP {response.status_code}"
-            )
+            logger.warning("jwks_uri %s returned HTTP %s", url, response.status_code)
+            raise OAuthError("invalid_client", _FETCH_FAILED_MESSAGE)
 
         ttl = parse_cache_control_max_age(response.headers)
 
         try:
             document = json.loads(response.text)
         except ValueError as exc:
-            raise OAuthError(
-                "invalid_client", f"jwks_uri '{url}' returned invalid JSON: {exc}"
-            ) from exc
+            logger.warning("jwks_uri %s returned invalid JSON: %s", url, exc)
+            raise OAuthError("invalid_client", _INVALID_DOCUMENT_MESSAGE) from exc
 
         if not isinstance(document, dict) or not isinstance(document.get("keys"), list):
-            raise OAuthError(
-                "invalid_client", f"jwks_uri '{url}' JWKS document missing 'keys' array"
-            )
+            logger.warning("jwks_uri %s returned a document with no 'keys' array", url)
+            raise OAuthError("invalid_client", _INVALID_DOCUMENT_MESSAGE)
         return document, ttl
 
 

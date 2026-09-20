@@ -13,17 +13,10 @@ from fastapi.responses import ORJSONResponse
 from pydantic import ValidationError
 
 from oauth2_server.models import Client, ClientRegistration, ClientRegistrationResponse
+from oauth2_server.services.clients import JWKS_URI_ERROR, VALID_AUTH_METHODS, is_valid_jwks_uri
 from oauth2_server.services.events_bus import emit_event
 
 router = APIRouter()
-
-_VALID_AUTH_METHODS = {
-    "client_secret_basic",
-    "client_secret_post",
-    "client_secret_jwt",
-    "private_key_jwt",
-    "none",
-}
 
 
 def _registration_error(description: str) -> ORJSONResponse:
@@ -86,9 +79,9 @@ async def register_client(request: Request) -> ORJSONResponse:
             "post_logout_redirect_uris must be a list of absolute http(s) URLs without fragment"
         )
 
-    if reg.token_endpoint_auth_method not in _VALID_AUTH_METHODS:
+    if reg.token_endpoint_auth_method not in VALID_AUTH_METHODS:
         return _registration_error(
-            f"token_endpoint_auth_method must be one of {sorted(_VALID_AUTH_METHODS)}"
+            f"token_endpoint_auth_method must be one of {sorted(VALID_AUTH_METHODS)}"
         )
 
     # RFC 7523 §3 / RFC 7591 §2: a private_key_jwt client's assertions can
@@ -102,6 +95,12 @@ async def register_client(request: Request) -> ORJSONResponse:
 
     if reg.jwks is not None and reg.jwks_uri:
         return _registration_error("jwks and jwks_uri are mutually exclusive")
+
+    # `jwks_uri` is the one registrant-supplied URL this server dereferences
+    # itself, so it gets a stricter rule than the redirect URIs above — see
+    # `services/clients.py::is_valid_jwks_uri`.
+    if reg.jwks_uri and not is_valid_jwks_uri(reg.jwks_uri):
+        return _registration_error(JWKS_URI_ERROR)
 
     is_public = reg.token_endpoint_auth_method == "none"
     if is_public and "client_credentials" in reg.grant_types:

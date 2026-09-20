@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import logging
 import secrets
-from urllib.parse import unquote_plus
+from urllib.parse import unquote_plus, urlparse
 
 from oauth2_server.errors import OAuthError
 from oauth2_server.middleware import check_subject_denylisted
@@ -29,6 +30,72 @@ _UNKNOWN_OR_DISABLED_CLIENT_MESSAGE = "unknown or disabled client"
 # `token_endpoint_auth_method` — never on what the request happens to
 # present, so a JWT client cannot fall back to `client_secret_basic`.
 _JWT_AUTH_METHODS = frozenset({"client_secret_jwt", "private_key_jwt"})
+
+# Every `token_endpoint_auth_method` this server accepts at registration. It
+# lives here rather than in `routes/register.py` because BOTH intake paths —
+# RFC 7591 dynamic registration and the admin JSON API
+# (`routes/admin/clients.py`) — must validate against exactly the same set,
+# and a route module is an awkward thing for another route module to import.
+VALID_AUTH_METHODS = frozenset(
+    {
+        "client_secret_basic",
+        "client_secret_post",
+        "client_secret_jwt",
+        "private_key_jwt",
+        "none",
+    }
+)
+
+JWKS_URI_ERROR = "jwks_uri must be an absolute https URL"
+
+
+def is_valid_jwks_uri(uri: str) -> bool:
+    """Whether `uri` is safe for this server to dereference as a client's
+    JWKS endpoint.
+
+    `jwks_uri` is the only client-supplied URL the server fetches itself
+    (`services/jwks_cache.py`), so an unvalidated value is a server-side
+    request forgery primitive: a registrant could aim it at an internal
+    service or walk it across ports. The rule is an https-only variant of
+    `routes/register.py::_is_valid_redirect_uri` — absolute, `https`, a real
+    netloc, no fragment — plus a rejection of hosts that resolve to the
+    server's own machine or its link-local metadata range:
+
+    * `localhost` (and any `*.localhost` name, which RFC 6761 §6.3 reserves
+      for the loopback interface),
+    * loopback literals (`127.0.0.0/8`, `::1`),
+    * link-local literals (`169.254.0.0/16`, `fe80::/10`), and
+    * the unspecified addresses (`0.0.0.0`, `::`).
+
+    This is a registration-time guard, not a complete SSRF defense: a
+    hostname that only resolves to a private address at fetch time still
+    passes. It removes the trivially-exploitable cases; DNS-rebinding-proof
+    egress filtering belongs at the network layer.
+    """
+    parsed = urlparse(uri)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return False
+    if parsed.fragment or uri.endswith("#"):
+        return False
+
+    try:
+        # `.hostname` lowercases and strips the brackets off an IPv6 literal;
+        # it raises on a malformed port (e.g. "https://h:notaport/").
+        host = parsed.hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # A registered name, not an IP literal — nothing more to check here.
+        return True
+    return not (address.is_loopback or address.is_link_local or address.is_unspecified)
 
 
 def _secrets_equal(a: str, b: str) -> bool:
