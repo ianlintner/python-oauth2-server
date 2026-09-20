@@ -49,7 +49,13 @@ _DPOP_SIGNING_ALG_VALUES_SUPPORTED = ["ES256", "RS256"]
 _STATUS_LIST_STUB = {"bits": 1, "lst": "eNrb2FgAAQABAAE"}
 
 
-def _discovery_document(issuer: str, id_token_alg: str, rar_types_supported: list[str]) -> dict:
+def _discovery_document(
+    issuer: str,
+    id_token_alg: str,
+    rar_types_supported: list[str],
+    *,
+    has_rs256_key: bool,
+) -> dict:
     base = issuer.rstrip("/")
     return {
         "issuer": base,
@@ -106,10 +112,14 @@ def _discovery_document(issuer: str, id_token_alg: str, rar_types_supported: lis
         "scopes_supported": SCOPES_SUPPORTED,
         "subject_types_supported": ["public"],
         # RFC 9701 §7: the algorithms a JWT-secured introspection response
-        # may be signed with. RS256 (the JWKS-published keyset key) when the
-        # server has one, else HS256 under the requesting client's own
-        # secret — see `security.py::encode_introspection_jwt`.
-        "introspection_signing_alg_values_supported": ["RS256", "HS256"],
+        # may actually be signed with here — RS256 (the JWKS-published
+        # keyset key) is only advertised when the keyset holds one, because
+        # without it `security.py::encode_introspection_jwt` can never
+        # produce RS256; every response then falls to HS256 under the
+        # requesting client's own secret.
+        "introspection_signing_alg_values_supported": (
+            ["RS256", "HS256"] if has_rs256_key else ["HS256"]
+        ),
         "id_token_signing_alg_values_supported": (
             ["RS256"] if id_token_alg == "RS256" else ["HS256"]
         ),
@@ -144,8 +154,14 @@ def _discovery_document(issuer: str, id_token_alg: str, rar_types_supported: lis
 @router.get("/.well-known/oauth-authorization-server")
 async def openid_configuration(request: Request) -> ORJSONResponse:
     config = request.app.state.config
+    keyset = request.app.state.keyset
     return ORJSONResponse(
-        _discovery_document(config.issuer, config.id_token_alg, config.rar_types_supported)
+        _discovery_document(
+            config.issuer,
+            config.id_token_alg,
+            config.rar_types_supported,
+            has_rs256_key=keyset.current_for_alg("RS256") is not None,
+        )
     )
 
 

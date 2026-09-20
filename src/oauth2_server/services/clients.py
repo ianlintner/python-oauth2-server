@@ -79,11 +79,10 @@ def is_valid_jwks_uri(uri: str) -> bool:
     if parsed.fragment or uri.endswith("#"):
         return False
 
+    # `.hostname` lowercases and strips the brackets off an IPv6 literal. It
+    # does not raise on CPython (only `.port` parses an int); the guard is
+    # defensive against a stricter urllib.
     try:
-        # `.hostname` lowercases and strips the brackets off an IPv6 literal.
-        # It is `.port` that raises on a malformed port (e.g.
-        # "https://h:notaport/"), but urlsplit caches the parse, so reading
-        # `.hostname` on such a URL can surface that same ValueError.
         host = parsed.hostname
     except ValueError:
         return False
@@ -91,6 +90,12 @@ def is_valid_jwks_uri(uri: str) -> bool:
         return False
 
     if host == "localhost" or host.endswith(".localhost"):
+        return False
+
+    # Belt and braces: an all-numeric-label host cannot be a legitimate
+    # registered name, so refuse it whether or not it parses as an address
+    # (e.g. an out-of-range integer that no normalizer below accepts).
+    if host.replace(".", "").isdigit():
         return False
 
     try:
@@ -106,30 +111,21 @@ def is_valid_jwks_uri(uri: str) -> bool:
 
 def _loose_ipv4(host: str) -> ipaddress.IPv4Address | None:
     """Parse the legacy IPv4 spellings `ipaddress` refuses but resolvers
-    accept, so the blocked-range check below sees the real address.
+    accept, so the blocked-range check above sees the real address. Returns
+    `None` for anything that is not an IPv4 address in some spelling.
 
     `ipaddress.ip_address` takes only dotted-quad decimal, so
     `https://2130706433/`, `https://0177.0.0.1/` and `https://127.1/` all
     slipped through as "registered names" while `getaddrinfo` (and every
-    HTTP client on top of it) resolves each of them to 127.0.0.1 —
-    a loopback-guard bypass. `inet_aton` implements exactly the historical
+    HTTP client on top of it) resolves each of them to 127.0.0.1 — a
+    loopback-guard bypass. `inet_aton` implements exactly the historical
     grammar those clients use (decimal/octal/hex, 1-to-4 parts), so it is
     the right normalizer here.
-
-    Returns `None` for anything that is not an IPv4 address in any
-    spelling. An all-numeric-label host is rejected as an address regardless
-    (belt and braces): it cannot be a legitimate registered name, and
-    treating it as one is precisely the bug above.
     """
     try:
         return ipaddress.IPv4Address(socket.inet_ntoa(socket.inet_aton(host)))
     except OSError:
-        pass
-    if host.replace(".", "").isdigit():
-        # Numeric-only but not parseable as an address (e.g. an out-of-range
-        # integer): not a registered name either, so refuse it.
-        return ipaddress.IPv4Address("127.0.0.1")
-    return None
+        return None
 
 
 def _secrets_equal(a: str, b: str) -> bool:

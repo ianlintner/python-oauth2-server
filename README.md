@@ -448,7 +448,8 @@ earlier phases deliberately left open:
   published in JWKS — else HS256 under that client's own `client_secret` (OIDC Core §10.1), never
   the server's `jwt_secret`. A public client with no RS256 key available gets `invalid_request`
   400 instead of a silent downgrade to unauthenticated JSON. Discovery advertises
-  `introspection_signing_alg_values_supported: ["RS256", "HS256"]` (RFC 9701 §7).
+  `introspection_signing_alg_values_supported` (RFC 9701 §7): `["RS256", "HS256"]` when the
+  keyset holds an RS256 key, else `["HS256"]`.
 - **RFC 8628 §3.5 `slow_down`** — `services/device_poll.py::DevicePollTracker` tracks the most
   recent poll time and currently-required interval per `device_code`; a poll that arrives sooner
   than that interval gets `slow_down` back with the interval grown by 5 seconds (uncapped,

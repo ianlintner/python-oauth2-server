@@ -1,4 +1,3 @@
-import logging
 from typing import TYPE_CHECKING
 
 import anyio.to_thread
@@ -11,8 +10,6 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from oauth2_server.errors import OAuthError
 from oauth2_server.keys import KeySet, SigningKey, rsa_public_key
 from oauth2_server.models import Claims, Client, IdTokenClaims
-
-logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from oauth2_server.config import Config
@@ -133,11 +130,18 @@ def encode_introspection_jwt(payload: dict, *, keyset: KeySet | None, client: Cl
        (OIDC Core §10.1: the symmetric signing key is the client secret).
        Only the server and that client hold it, and `aud` is that client, so
        the response is both verifiable and unforgeable by third parties.
-    3. A public client with no RS256 key holds no key at all. There is no
-       verifiable JWT to produce, and silently answering in JSON instead
-       would hand a JWT-negotiating caller an unauthenticated result it
-       cannot distinguish from a downgrade attack — so this raises
-       `OAuthError` and the caller turns it into a 400.
+    3. A public client holds no key at all, so with no RS256 key there is no
+       verifiable JWT to produce. Silently answering in JSON instead would
+       hand a JWT-negotiating caller an unauthenticated result it cannot
+       distinguish from a downgrade attack — so this raises `OAuthError` and
+       the caller turns it into a 400.
+
+    Step 2 dispatches on `client.is_public()` (the REGISTERED
+    `token_endpoint_auth_method`), the same predicate client authentication
+    uses, rather than on whether the secret column happens to be non-empty:
+    a confidential row with an empty secret is a misconfiguration, and
+    HMAC-signing under an empty key would be the worst possible answer to
+    it. Such a row raises here too, which the error description covers.
     """
     signing_key = keyset.current_for_alg("RS256") if keyset is not None else None
     if signing_key is not None:
@@ -147,7 +151,7 @@ def encode_introspection_jwt(payload: dict, *, keyset: KeySet | None, client: Cl
             algorithm="RS256",
             headers={"typ": INTROSPECTION_JWT_TYP, "kid": signing_key.kid},
         )
-    if client.client_secret:
+    if not client.is_public() and client.client_secret:
         return jwt.encode(
             payload,
             client.client_secret,
@@ -156,7 +160,7 @@ def encode_introspection_jwt(payload: dict, *, keyset: KeySet | None, client: Cl
         )
     raise OAuthError(
         "invalid_request",
-        "JWT introspection responses require an RS256 signing key for public clients",
+        "JWT introspection responses require an RS256 signing key or a client secret",
         400,
     )
 

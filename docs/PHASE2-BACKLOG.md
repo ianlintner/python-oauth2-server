@@ -560,9 +560,13 @@ Out of scope for all of Phase 4 (unchanged from earlier phases): Redis/Kafka/Rab
 backends, bulkheads, OTel span export, multi-instance persistence of in-process stores,
 admin-session server-side revocation.
 
-
 ### Residuals from the Phase 4a final review (parked, non-blocking)
 
+- Neither `POST /admin/api/clients` nor dynamic registration enforces a minimum
+  `client_secret` length, so an admin-created client can carry a short secret — which is now
+  also the HMAC key for that client's RFC 9701 introspection JWTs (divergence 34). PyJWT only
+  warns (`InsecureKeyLengthWarning`) and still signs. A generated-secret floor (or rejecting
+  short operator-supplied secrets) is a zero-migration Phase 4b/4c item.
 - Admin `POST /admin/api/clients` echoes `jwks` as the submitted object while `GET` returns the raw
   stored JSON string (module convention) — shapes disagree between create and detail.
 - Admin `PUT` now validates `token_endpoint_auth_method` against the merged row, so a legacy row with

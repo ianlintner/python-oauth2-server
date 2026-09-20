@@ -1,6 +1,11 @@
 import base64
 
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
 from oauth2_server.routes.wellknown import SCOPES_SUPPORTED
+from tests.test_jwks_rs256 import _rs256_app
 from tests.test_token_endpoint import run_code_flow
 
 
@@ -267,9 +272,28 @@ async def test_userinfo_includes_iss_and_aud(client_app):
     assert body["sub"] == "u1"
 
 
-async def test_discovery_advertises_introspection_signing_algs(client_app):
+async def test_discovery_advertises_introspection_signing_algs_without_rs256(client_app):
     """RFC 9701 §7: a client that may negotiate a JWT-secured introspection
-    response needs to know which algorithms it must be able to verify."""
+    response needs to know which algorithms it must be able to verify — and
+    with no RS256 key in the keyset, HS256 (the client's own secret) is the
+    only one this server can produce."""
     resp = await client_app.get("/.well-known/openid-configuration")
     assert resp.status_code == 200
-    assert resp.json()["introspection_signing_alg_values_supported"] == ["RS256", "HS256"]
+    assert resp.json()["introspection_signing_alg_values_supported"] == ["HS256"]
+
+
+@pytest.fixture(scope="module")
+def rsa_pem() -> str:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+
+async def test_discovery_advertises_rs256_introspection_signing_when_keyset_has_a_key(rsa_pem):
+    async with _rs256_app(rsa_pem) as client:
+        resp = await client.get("/.well-known/openid-configuration")
+        assert resp.status_code == 200
+        assert resp.json()["introspection_signing_alg_values_supported"] == ["RS256", "HS256"]
