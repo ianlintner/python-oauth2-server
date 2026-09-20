@@ -149,11 +149,19 @@ async def introspect(request: Request) -> ORJSONResponse:
         username = user.username if user else None
 
     jti = row.id
+    # RFC 8707: when the access token carries a resource-bound `aud`, report
+    # THAT audience rather than the client_id — the same verified decode that
+    # supplies `jti`. Anything that doesn't verify (an opaque token, a
+    # refresh-token value, a foreign JWT) falls back to `row.client_id`, the
+    # pre-resource-indicator behavior. A single audience is emitted as a bare
+    # string, matching the JWT's own serde rule (`Claims.to_payload`).
+    aud: list[str] | str = row.client_id
     try:
         claims = decode_access_token(
             token_value, config.jwt_secret, config.issuer, keyset=request.app.state.keyset
         )
         jti = claims.jti
+        aud = claims.aud[0] if len(claims.aud) == 1 else claims.aud
     except jwt.PyJWTError:
         pass
 
@@ -170,7 +178,7 @@ async def introspect(request: Request) -> ORJSONResponse:
         iat=iat,
         nbf=iat,
         sub=row.user_id or row.client_id,
-        aud=row.client_id,
+        aud=aud,
         jti=jti,
         iss=config.issuer,
         cnf=cnf,

@@ -216,12 +216,20 @@ class Claims(BaseModel):
         cnf: dict | None = None,
         authorization_details: list[dict] | None = None,
         act: dict | None = None,
+        resource: str | None = None,
     ) -> "Claims":
+        """Build access-token claims.
+
+        `resource` is the RFC 8707 resource indicator: when present it
+        REPLACES `client_id` as the audience, so the token is only accepted
+        by the resource server it was requested for. Absent, `aud` stays
+        `[client_id]` (Rust parity — see `services/resource.py`).
+        """
         iat = int(_now().timestamp())
         return cls(
             sub=subject,
             iss=issuer,
-            aud=[client_id],
+            aud=[resource] if resource else [client_id],
             exp=iat + duration_seconds,
             iat=iat,
             scope=scope,

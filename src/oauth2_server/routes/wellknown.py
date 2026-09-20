@@ -97,6 +97,9 @@ def _discovery_document(issuer: str, id_token_alg: str, rar_types_supported: lis
         # hardcoded, unenforced ["openid"] (research-rar-token-exchange.md
         # gotchas).
         "authorization_details_types_supported": rar_types_supported,
+        # RFC 8707 §3: the `resource` parameter is accepted at /oauth/authorize
+        # and /oauth/token and binds the issued access token's `aud`.
+        "resource_indicators_supported": True,
     }
 
 

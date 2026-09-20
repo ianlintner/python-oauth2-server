@@ -165,3 +165,9 @@ async def test_userinfo_foreign_jwt_rejected_not_500(client_app):
     resp = await _get_userinfo(client_app, foreign)
     assert resp.status_code == 401
     assert resp.json()["error"] == "invalid_token"
+
+
+async def test_discovery_advertises_resource_indicators(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    assert resp.json()["resource_indicators_supported"] is True

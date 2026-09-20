@@ -40,10 +40,12 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse
 
+from oauth2_server.errors import OAuthError
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.services.auth import AuthorizeService, scope_is_subset
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.rar import RarError, validate_authorization_details
+from oauth2_server.services.resource import validate_resource
 from oauth2_server.sessions import current_user_id
 
 logger = logging.getLogger(__name__)
@@ -234,6 +236,16 @@ async def authorize(request: Request):
         except RarError as exc:
             return _error_redirect(redirect_uri, exc.error, exc.description, state, config.issuer)
 
+    # RFC 8707 §2: validate the resource indicator (query param, or the PAR-
+    # merged value). Like `invalid_scope` above, a bad value is delivered
+    # through the now-trusted redirect channel (`error=invalid_target`),
+    # never a raw 400. The validated value is stored on the authorization
+    # code below and becomes the access token's `aud` at redemption.
+    try:
+        resource = validate_resource(merged.get("resource"))
+    except OAuthError as exc:
+        return _error_redirect(redirect_uri, exc.error, exc.description, state, config.issuer)
+
     # --- 5. Require an authenticated session ---
     # OIDC Core §3.1.2.1: `prompt` is a space-delimited list of values.
     prompt_values = (params.get("prompt") or "").split()
@@ -299,6 +311,7 @@ async def authorize(request: Request):
         code_challenge_method=code_challenge_method,
         nonce=merged.get("nonce"),
         authorization_details=authorization_details,
+        resource=resource,
     )
     request.app.state.metrics.oauth_authorization_codes_issued.inc()
     emit_event(

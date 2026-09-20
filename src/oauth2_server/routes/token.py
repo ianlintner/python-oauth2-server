@@ -61,6 +61,7 @@ from oauth2_server.services.dpop import (
 from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.rar import RarError, validate_authorization_details
+from oauth2_server.services.resource import validate_resource
 from oauth2_server.services.tokens import TokenService
 
 logger = logging.getLogger(__name__)
@@ -339,6 +340,11 @@ async def token(request: Request) -> ORJSONResponse:
             except RarError as exc:
                 return oauth_error(exc.error, exc.description)
 
+        try:
+            resource = validate_resource(form.get("resource"))
+        except OAuthError as exc:
+            return oauth_error(exc.error, exc.description, exc.status)
+
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             None,
@@ -346,6 +352,7 @@ async def token(request: Request) -> ORJSONResponse:
             with_refresh=False,
             cnf=cnf,
             authorization_details=authorization_details,
+            resource=resource,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
         emit_event(
@@ -446,6 +453,11 @@ async def token(request: Request) -> ORJSONResponse:
             client_id=auth_code.client_id,
         )
 
+        # RFC 8707: the `aud` binding comes from the resource the user's
+        # authorization request asked for (stored on the code, already
+        # validated at /oauth/authorize) — a `resource` form value on this
+        # request is deliberately ignored rather than allowed to narrow it
+        # (Rust parity; RFC 8707 §2.2 would permit narrowing).
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             auth_code.user_id,
@@ -454,6 +466,7 @@ async def token(request: Request) -> ORJSONResponse:
             token_family=auth_code.token_family,
             cnf=cnf,
             authorization_details=authorization_details,
+            resource=auth_code.resource,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
         emit_event(
@@ -539,6 +552,15 @@ async def token(request: Request) -> ORJSONResponse:
         # None on the rotated token") — unlike `cnf` above, there is no
         # carry-over from the old access token's JWT claim; `authorization_details`
         # is deliberately left unset here.
+
+        # RFC 8707: `resource` on refresh is taken at face value — there is
+        # no "must be a subset of the originally authorized resources" check
+        # (Rust parity), so a refresh can rebind `aud` to any valid resource.
+        try:
+            resource = validate_resource(form.get("resource"))
+        except OAuthError as exc:
+            return oauth_error(exc.error, exc.description, exc.status)
+
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             old_token.user_id,
@@ -546,6 +568,7 @@ async def token(request: Request) -> ORJSONResponse:
             with_refresh=True,
             token_family=family,
             cnf=refresh_cnf,
+            resource=resource,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
         emit_event(
@@ -603,6 +626,11 @@ async def token(request: Request) -> ORJSONResponse:
         if not device.approved:
             return oauth_error("authorization_pending", "authorization request is still pending")
 
+        try:
+            resource = validate_resource(form.get("resource"))
+        except OAuthError as exc:
+            return oauth_error(exc.error, exc.description, exc.status)
+
         claimed = await storage.mark_device_authorization_used(device.device_code)
         if claimed == 0:
             # Lost the race to a concurrent request that already claimed this code.
@@ -622,6 +650,7 @@ async def token(request: Request) -> ORJSONResponse:
             device.scope,
             with_refresh=True,
             token_family=uuid.uuid4().hex,
+            resource=resource,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
         emit_event(
@@ -729,6 +758,11 @@ async def token(request: Request) -> ORJSONResponse:
         # Never a refresh token (`with_refresh=False`, no `token_family`).
         # `cnf` binds THIS request's own DPoP proof (the shared pre-grant
         # block above), not the subject token's binding.
+        try:
+            resource = validate_resource(form.get("resource"))
+        except OAuthError as exc:
+            return oauth_error(exc.error, exc.description, exc.status)
+
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             subject_row.user_id,
@@ -736,6 +770,7 @@ async def token(request: Request) -> ORJSONResponse:
             with_refresh=False,
             cnf=cnf,
             act=act,
+            resource=resource,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
         emit_event(

@@ -30,6 +30,7 @@ class TokenService:
         cnf: dict | None = None,
         authorization_details: list[dict] | None = None,
         act: dict | None = None,
+        resource: str | None = None,
     ) -> TokenResponse:
         """Issue an access (+ optional refresh) token.
 
@@ -58,6 +59,12 @@ class TokenService:
         drop rule as `cnf`/`authorization_details` — see routes/token.py's
         token-exchange branch for the only caller that passes a value and
         `models.Claims.act`'s docstring for the JWT-vs-response-body split.
+
+        `resource` (RFC 8707) overrides the access token's `aud` claim, and
+        is therefore ignored in opaque mode for the same reason as the
+        claims above: an opaque token is a bare random string with no `aud`
+        to bind. The stored `Token` row is unaffected either way — the
+        audience lives only in the JWT.
         """
         config = self._config
         subject = user_id or client.client_id
@@ -77,6 +84,7 @@ class TokenService:
                 cnf=bound_cnf,
                 authorization_details=bound_details,
                 act=bound_act,
+                resource=resource,
             )
             # Prefer the current RS256 key so access+refresh tokens follow
             # RS256 rotation automatically whenever one is configured; fall
