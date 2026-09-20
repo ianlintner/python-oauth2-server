@@ -429,8 +429,9 @@ earlier phases deliberately left open:
   authorization code at issuance, not a value re-supplied at the token request); introspection
   echoes the token's own `aud`. Discovery advertises `resource_indicators_supported: true`.
 - **RFC 9728 / metadata parity** — `GET /.well-known/oauth-protected-resource` and
-  `GET /.well-known/oauth-authorization-server/status` (a static, all-valid RFC 9701-adjacent
-  status-list stub) are new endpoints; discovery gains `token_introspection_endpoint` /
+  `GET /.well-known/oauth-authorization-server/status` (a static, all-valid
+  `draft-ietf-oauth-status-list` stub — unrelated to RFC 9701 below) are new endpoints;
+  discovery gains `token_introspection_endpoint` /
   `token_revocation_endpoint` aliases, `service_documentation`, a widened `claims_supported`
   list, and userinfo now returns `iss` and `aud` (the token's `client_id`). Divergence 33: neither
   discovery nor the new protected-resource document advertise mTLS

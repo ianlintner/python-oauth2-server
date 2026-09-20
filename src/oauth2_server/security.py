@@ -1,3 +1,4 @@
+import logging
 from typing import TYPE_CHECKING
 
 import anyio.to_thread
@@ -9,6 +10,8 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from oauth2_server.keys import KeySet, SigningKey, rsa_public_key
 from oauth2_server.models import Claims, IdTokenClaims
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from oauth2_server.config import Config
@@ -127,12 +130,13 @@ def encode_introspection_jwt(payload: dict, config: "Config", keyset: KeySet | N
     key is a caller that forced `id_token_alg="RS256"` with no key material
     at all — for which raising would turn introspection into a 500, where
     falling back to the shared-secret HS256 signature still yields a
-    verifiable response.
+    verifiable response. That downgrade is logged at WARNING: an operator
+    who configured RS256 and is being served HS256 has no other signal, and
+    a relying party pinned to the JWKS would reject every response.
     """
+    rs256_requested = config.id_token_alg == "RS256"
     signing_key = (
-        keyset.current_for_alg("RS256")
-        if keyset is not None and config.id_token_alg == "RS256"
-        else None
+        keyset.current_for_alg("RS256") if keyset is not None and rs256_requested else None
     )
     if signing_key is not None:
         return jwt.encode(
@@ -140,6 +144,11 @@ def encode_introspection_jwt(payload: dict, config: "Config", keyset: KeySet | N
             signing_key.key_material,
             algorithm="RS256",
             headers={"typ": INTROSPECTION_JWT_TYP, "kid": signing_key.kid},
+        )
+    if rs256_requested:
+        logger.warning(
+            "id_token_alg=RS256 but the keyset has no current RS256 key; "
+            "signing the introspection response with HS256 instead"
         )
     return jwt.encode(
         payload, config.jwt_secret, algorithm="HS256", headers={"typ": INTROSPECTION_JWT_TYP}

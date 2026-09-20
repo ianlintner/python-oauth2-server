@@ -13,6 +13,7 @@ have to parse two different media types depending on the answer.
 from __future__ import annotations
 
 import base64
+import logging
 
 import jwt
 import pytest
@@ -149,3 +150,23 @@ async def test_rfc9701_response_has_no_store(client_app):
     assert resp.status_code == 200, resp.text
     assert JWT_MEDIA_TYPE in resp.headers["content-type"]
     assert resp.headers["cache-control"] == "no-store"
+
+
+def test_rs256_without_a_current_key_warns_on_the_hs256_fallback(caplog):
+    """`encode_introspection_jwt` silently downgrades RS256 -> HS256 when
+    the keyset has no current RS256 key. The downgrade is deliberate (a 500
+    would be worse), but it must not be silent — an operator who configured
+    RS256 and is being served HS256 needs a way to notice."""
+    from oauth2_server.config import Config
+    from oauth2_server.keys import KeySet
+    from oauth2_server.security import encode_introspection_jwt
+
+    config = Config(jwt_secret=JWT_SECRET, issuer=ISSUER, id_token_alg="RS256")
+    with caplog.at_level(logging.WARNING, logger="oauth2_server.security"):
+        token = encode_introspection_jwt({"iss": ISSUER}, config, KeySet())
+
+    assert jwt.get_unverified_header(token)["alg"] == "HS256"
+    assert any(
+        record.levelno == logging.WARNING and "HS256" in record.getMessage()
+        for record in caplog.records
+    ), caplog.text
