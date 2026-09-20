@@ -32,6 +32,7 @@ from oauth2_server.routes.token import router as token_router
 from oauth2_server.routes.wellknown import router as wellknown_router
 from oauth2_server.security import derive_session_key
 from oauth2_server.services.client_assertion import JtiReplayGuard
+from oauth2_server.services.device_poll import DevicePollTracker
 from oauth2_server.services.dpop import DpopReplayStore
 from oauth2_server.services.dpop_nonce import DpopNonceIssuer, decode_dpop_nonce_secret
 from oauth2_server.services.events import RecentEventsStore
@@ -123,6 +124,12 @@ def create_app(
     # `app.state.dpop_replay`/`dpop_nonce_issuer` is a hard `AttributeError`
     # rather than a silent security downgrade (divergence 14).
     app.state.dpop_replay = DpopReplayStore()
+    # RFC 8628 §3.5: one shared, single-process poll-interval tracker per app
+    # instance (services/device_poll.py) — enforces `slow_down` on the
+    # device_code grant branch of routes/token.py (divergence 35: the Rust
+    # server never implements slow_down, so there's no parity constraint
+    # here). Same single-process caveat as `dpop_replay` above.
+    app.state.device_poll = DevicePollTracker()
     # RFC 7523 §3: one shared client-assertion replay guard per app instance,
     # so every endpoint that accepts `client_secret_jwt`/`private_key_jwt`
     # sees the same `(client_id, jti)` history.

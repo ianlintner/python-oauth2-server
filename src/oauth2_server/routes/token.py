@@ -617,6 +617,25 @@ async def token(request: Request) -> ORJSONResponse:
         if device is None or device.client_id != client.client_id:
             return oauth_error("invalid_grant", "device_code not found for this client")
 
+        # RFC 8628 §3.5 slow_down (services/device_poll.py, divergence 35 —
+        # no Rust analogue). Checked before expiry/denied/used/pending below
+        # so an over-fast poller is throttled regardless of the device
+        # code's current state, and reset via `forget()` once the code is
+        # actually redeemed further down.
+        new_interval = request.app.state.device_poll.observe(
+            device.device_code, device.interval_seconds
+        )
+        if new_interval is not None:
+            return ORJSONResponse(
+                {
+                    "error": "slow_down",
+                    "error_description": "polling too frequently; increase interval",
+                    "interval": new_interval,
+                },
+                status_code=400,
+                headers={"Cache-Control": "no-store"},
+            )
+
         if device.expires_at <= datetime.now(timezone.utc):
             return oauth_error("expired_token", "device_code has expired")
 
@@ -638,6 +657,10 @@ async def token(request: Request) -> ORJSONResponse:
         if claimed == 0:
             # Lost the race to a concurrent request that already claimed this code.
             return oauth_error("invalid_grant", "device_code has already been redeemed")
+
+        # Redeemed: no further polling of this code is legitimate, so drop
+        # its slow_down tracking state.
+        request.app.state.device_poll.forget(device.device_code)
 
         # Device grant never binds cnf, even when the client presented a
         # valid DPoP proof on this request (Rust parity, research-dpop.md
