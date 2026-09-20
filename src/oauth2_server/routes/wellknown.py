@@ -23,7 +23,12 @@ from pydantic import ValidationError
 
 from oauth2_server.keys import SigningKey, jwk_from_rs256_key
 from oauth2_server.security import decode_access_token, decode_unverified_claims
-from oauth2_server.services.dpop import DpopError, read_dpop_header, validate_dpop_proof
+from oauth2_server.services.dpop import (
+    DpopError,
+    DpopValidated,
+    read_dpop_header,
+    validate_dpop_proof,
+)
 from oauth2_server.services.mtls import mtls_headers
 
 router = APIRouter()
@@ -294,9 +299,12 @@ def _dpop_invalid_token_response(description: str) -> ORJSONResponse:
 _USERINFO_AUTH_SCHEMES = frozenset({"bearer", "dpop"})
 
 
-def _enforce_token_binding(request: Request, config, token_str: str) -> ORJSONResponse | None:
+def _enforce_token_binding(
+    request: Request, config, token_str: str
+) -> tuple[ORJSONResponse | None, DpopValidated | None]:
     """Divergences 49/51: enforce an access token's `cnf` confirmation at the
-    resource endpoint. Returns a 401 response on failure, `None` on success
+    resource endpoint. Returns `(failure, dpop_validated)` — a 401 response on
+    failure and `None` for the proof, or `(None, proof_or_None)` on success
     (including the no-`cnf` case, which is every token this server issued
     before phase 4b/4c and every token issued without a proof or a client
     certificate).
@@ -316,7 +324,11 @@ def _enforce_token_binding(request: Request, config, token_str: str) -> ORJSONRe
     """
     cnf = decode_unverified_claims(token_str).get("cnf")
     if not isinstance(cnf, dict):
-        return None
+        return None, None
+
+    # The validated proof, carried back out so the caller can decide whether
+    # a `DPoP-Nonce` belongs on the successful response (divergence 53).
+    validated: DpopValidated | None = None
 
     # `isinstance` guards throughout: these claims come from an UNVERIFIED
     # decode, so they need not be strings at all.
@@ -324,8 +336,11 @@ def _enforce_token_binding(request: Request, config, token_str: str) -> ORJSONRe
     if isinstance(jkt, str) and jkt:
         scheme = request.headers.get("authorization", "").partition(" ")[0].lower()
         if scheme != "dpop":
-            return _dpop_invalid_token_response(
-                "DPoP-bound access token must be presented with the DPoP scheme"
+            return (
+                _dpop_invalid_token_response(
+                    "DPoP-bound access token must be presented with the DPoP scheme"
+                ),
+                None,
             )
 
         try:
@@ -335,7 +350,10 @@ def _enforce_token_binding(request: Request, config, token_str: str) -> ORJSONRe
             # `invalid_request`, but here it is simply an unusable proof.
             proof = None
         if proof is None:
-            return _dpop_invalid_token_response("DPoP proof required for this access token")
+            return (
+                _dpop_invalid_token_response("DPoP proof required for this access token"),
+                None,
+            )
 
         try:
             validated = validate_dpop_proof(
@@ -351,20 +369,18 @@ def _enforce_token_binding(request: Request, config, token_str: str) -> ORJSONRe
                 access_token=token_str,
             )
         except DpopError:
-            return _dpop_invalid_token_response("DPoP proof validation failed")
+            return _dpop_invalid_token_response("DPoP proof validation failed"), None
 
         # Compare UTF-8 bytes: `jkt` came off an unverified decode and may be
         # non-ASCII, which makes `hmac.compare_digest` raise TypeError on
         # `str` — same hazard/fix as `routes/introspect.py` (Task 3).
         if not hmac.compare_digest(validated.jkt.encode("utf-8"), jkt.encode("utf-8")):
-            return _dpop_invalid_token_response(
-                "DPoP proof key does not match the access token binding"
+            return (
+                _dpop_invalid_token_response(
+                    "DPoP proof key does not match the access token binding"
+                ),
+                None,
             )
-
-        # TASK 5 HOOK (DPoP-Nonce at the resource server): on success, when
-        # the token's client has `dpop_nonce_required`, a fresh
-        # `DPoP-Nonce` response header belongs here. Task 5 wires the
-        # issuer; nothing is emitted yet.
 
     thumb = cnf.get("x5t#S256")
     if isinstance(thumb, str) and thumb:
@@ -377,11 +393,14 @@ def _enforce_token_binding(request: Request, config, token_str: str) -> ORJSONRe
         if presented is None or not hmac.compare_digest(
             presented.encode("utf-8"), thumb.encode("utf-8")
         ):
-            return _invalid_token_response(
-                "Certificate-bound access token requires a matching client certificate"
+            return (
+                _invalid_token_response(
+                    "Certificate-bound access token requires a matching client certificate"
+                ),
+                None,
             )
 
-    return None
+    return None, validated
 
 
 @router.get("/oauth/userinfo")
@@ -415,7 +434,7 @@ async def userinfo(request: Request) -> ORJSONResponse:
     if row is None or row.revoked or row.expires_at <= datetime.now(timezone.utc):
         return _invalid_token_response("Invalid or expired access token")
 
-    binding_failure = _enforce_token_binding(request, config, token_str)
+    binding_failure, dpop_validated = _enforce_token_binding(request, config, token_str)
     if binding_failure is not None:
         return binding_failure
 
@@ -433,4 +452,13 @@ async def userinfo(request: Request) -> ORJSONResponse:
         if "profile" in scopes:
             response["preferred_username"] = user.username
 
-    return ORJSONResponse(response)
+    result = ORJSONResponse(response)
+    if dpop_validated is not None:
+        # Divergence 53: userinfo has no client row of its own — look one up
+        # only on the proof path (at most once per request) so a nonce-
+        # requiring client gets a fresh `DPoP-Nonce` here too, not just from
+        # the token endpoint. A deleted client simply yields no header.
+        token_client = await storage.get_client(row.client_id)
+        if token_client is not None and token_client.dpop_nonce_required:
+            result.headers["DPoP-Nonce"] = request.app.state.dpop_nonce_issuer.issue()
+    return result

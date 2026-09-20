@@ -64,6 +64,7 @@ JAR_OVERLAY_KEYS = (
     "authorization_details",
     "claims",
     "acr_values",
+    "dpop_jkt",
 )
 
 # Signature algorithm each registered auth method pins its JAR to, mirroring

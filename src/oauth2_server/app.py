@@ -34,6 +34,7 @@ from oauth2_server.security import derive_session_key
 from oauth2_server.services.client_assertion import JtiReplayGuard
 from oauth2_server.services.device_poll import DevicePollTracker
 from oauth2_server.services.dpop import DpopReplayStore
+from oauth2_server.services.dpop_bindings import DpopCodeBindings
 from oauth2_server.services.dpop_nonce import DpopNonceIssuer, decode_dpop_nonce_secret
 from oauth2_server.services.events import RecentEventsStore
 from oauth2_server.services.events_bus import IdempotencyStore, build_event_bus
@@ -124,6 +125,11 @@ def create_app(
     # `app.state.dpop_replay`/`dpop_nonce_issuer` is a hard `AttributeError`
     # rather than a silent security downgrade (divergence 14).
     app.state.dpop_replay = DpopReplayStore()
+    # Divergence 52: `dpop_jkt` -> authorization-code bindings, written by
+    # routes/authorize.py and consumed at redemption by routes/token.py.
+    # Entries expire with the codes they describe. Same single-process
+    # caveat as `dpop_replay` above (services/dpop_bindings.py).
+    app.state.dpop_code_bindings = DpopCodeBindings(ttl_secs=config.authorization_code_ttl_secs)
     # RFC 8628 §3.5: one shared, single-process poll-interval tracker per app
     # instance (services/device_poll.py) — enforces `slow_down` on the
     # device_code grant branch of routes/token.py (divergence 35: the Rust

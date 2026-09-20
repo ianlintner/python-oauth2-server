@@ -34,6 +34,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import logging
 import secrets
 import uuid
@@ -58,7 +59,7 @@ from oauth2_server.services.dpop import (
     read_dpop_header as _read_dpop_header,
     validate_dpop_proof,
 )
-from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
+from oauth2_server.services.dpop_nonce import DpopNonceIssuer, enforce_dpop_nonce
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.services.rar import RarError, validate_authorization_details
@@ -185,6 +186,27 @@ def _salvage_old_cnf(access_token: str) -> dict | None:
     old_claims = decode_unverified_claims(access_token)
     cnf = old_claims.get("cnf")
     return cnf if isinstance(cnf, dict) else None
+
+
+def _with_dpop_nonce(
+    response: ORJSONResponse,
+    client: Client,
+    dpop_validated: DpopValidated | None,
+    issuer: DpopNonceIssuer,
+) -> ORJSONResponse:
+    """Divergence 53: attach a fresh `DPoP-Nonce` to a SUCCESSFUL response.
+
+    RFC 9449 §8 lets the AS supply a nonce on any response, not just the 400
+    `use_dpop_nonce` challenge; Rust (and this port through phase 4b) only
+    ever set it on the challenge, so a client whose nonce went stale had to
+    eat a 400 to get the next one. Emitted only when the client actually
+    requires nonces AND this request carried a validated proof — a nonce is
+    meaningless to a request that was not proof-of-possession, and handing
+    one to a client that never has to send one would only invite it to start.
+    """
+    if client.dpop_nonce_required and dpop_validated is not None:
+        response.headers["DPoP-Nonce"] = issuer.issue()
+    return response
 
 
 def _mint_id_token(
@@ -356,7 +378,9 @@ async def token(request: Request) -> ORJSONResponse:
         )
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
-        return response
+        return _with_dpop_nonce(
+            response, client, dpop_validated, request.app.state.dpop_nonce_issuer
+        )
 
     if grant_type == "authorization_code":
         if "authorization_code" not in client.grant_type_list():
@@ -432,6 +456,31 @@ async def token(request: Request) -> ORJSONResponse:
             except RarError as exc:
                 return oauth_error(exc.error, exc.description)
 
+        # RFC 9449 §10 / divergence 52: enforce the `dpop_jkt` the client
+        # pre-bound this code to at /oauth/authorize. `take` is destructive —
+        # a redemption attempt is the one chance to prove possession of that
+        # key — and a mismatch also burns the code below, so an attacker who
+        # stole the code cannot simply retry it once the binding is spent.
+        # An absent binding means "never bound" OR "bound on another
+        # instance" (the store is per-process; see services/dpop_bindings.py),
+        # and skips the check.
+        expected_jkt = request.app.state.dpop_code_bindings.take(auth_code.code)
+        if expected_jkt is not None and (
+            dpop_validated is None
+            # UTF-8 bytes, not `str`: `compare_digest` raises TypeError on
+            # non-ASCII `str` operands, and `expected_jkt` came off a query
+            # parameter. The regex at /oauth/authorize already restricts it to
+            # base64url, but compare on bytes anyway — same house rule as
+            # `_pkce_matches` above.
+            or not hmac.compare_digest(
+                dpop_validated.jkt.encode("utf-8"), expected_jkt.encode("utf-8")
+            )
+        ):
+            await storage.mark_authorization_code_used(auth_code.code)
+            return oauth_error(
+                "invalid_grant", "authorization code is bound to a different DPoP key"
+            )
+
         claimed = await storage.mark_authorization_code_used(auth_code.code)
         if claimed == 0:
             # Lost the race to a concurrent request that already claimed this code.
@@ -490,7 +539,9 @@ async def token(request: Request) -> ORJSONResponse:
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
-        return response
+        return _with_dpop_nonce(
+            response, client, dpop_validated, request.app.state.dpop_nonce_issuer
+        )
 
     if grant_type == "refresh_token":
         if "refresh_token" not in client.grant_type_list():
@@ -544,12 +595,35 @@ async def token(request: Request) -> ORJSONResponse:
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
-        family = old_token.token_family or uuid.uuid4().hex
-        # Refresh carries the OLD access token's cnf forward regardless of
-        # whether this request presented a fresh DPoP proof — `cnf` (from
-        # this request's own header, if any) is deliberately unused here;
-        # see `_salvage_old_cnf` and the module docstring.
+        # Refresh carries the OLD access token's cnf forward; `cnf` (from this
+        # request's own header, if any) is deliberately unused — see
+        # `_salvage_old_cnf` and the module docstring. Salvaged HERE, before
+        # the revocation below, because divergence 54 gates that revocation on
+        # what the old binding turns out to be.
         refresh_cnf = _salvage_old_cnf(old_token.access_token)
+
+        # RFC 9449 §5 / divergence 54: a PUBLIC client refreshing a
+        # `jkt`-bound token must present a fresh proof from the SAME key.
+        # Without client authentication, silent cnf carry-over would let a
+        # stolen refresh token mint fresh DPoP-bound access tokens with no
+        # possession of the bound key at all. Confidential clients keep the
+        # documented parity-gap salvage (their secret is the second factor),
+        # and `x5t#S256` bindings are untouched (there is no proof to
+        # present — the certificate is checked at the TLS terminator).
+        # Deliberately BEFORE `revoke_token`: a rejected refresh must leave
+        # the old token and its family intact, otherwise the client's retry
+        # with the right proof would look like refresh-token reuse.
+        bound_jkt = refresh_cnf.get("jkt") if refresh_cnf else None
+        if isinstance(bound_jkt, str) and bound_jkt and client.is_public():
+            if dpop_validated is None or not hmac.compare_digest(
+                dpop_validated.jkt.encode("utf-8"), bound_jkt.encode("utf-8")
+            ):
+                return oauth_error(
+                    "invalid_grant",
+                    "refresh token is bound to a DPoP key; present a proof with the same key",
+                )
+
+        family = old_token.token_family or uuid.uuid4().hex
         await storage.revoke_token(old_token.access_token)
 
         # RFC 9396 details are DROPPED on refresh (Rust parity,
@@ -593,7 +667,9 @@ async def token(request: Request) -> ORJSONResponse:
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
-        return response
+        return _with_dpop_nonce(
+            response, client, dpop_validated, request.app.state.dpop_nonce_issuer
+        )
 
     if grant_type == "urn:ietf:params:oauth:grant-type:device_code":
         if grant_type not in client.grant_type_list():
@@ -698,7 +774,9 @@ async def token(request: Request) -> ORJSONResponse:
 
         response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
-        return response
+        return _with_dpop_nonce(
+            response, client, dpop_validated, request.app.state.dpop_nonce_issuer
+        )
 
     if grant_type == _TOKEN_EXCHANGE_GRANT:
         # RFC 8693 token exchange. Check order per
@@ -812,6 +890,8 @@ async def token(request: Request) -> ORJSONResponse:
 
         response = ORJSONResponse(body)
         response.headers["Cache-Control"] = "no-store"
-        return response
+        return _with_dpop_nonce(
+            response, client, dpop_validated, request.app.state.dpop_nonce_issuer
+        )
 
     return oauth_error("unsupported_grant_type", f"grant_type '{grant_type}' is not supported")

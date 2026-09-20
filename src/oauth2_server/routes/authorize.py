@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from urllib.parse import parse_qsl, urlencode
 
@@ -120,7 +121,13 @@ _PAR_MERGE_KEYS = (
     "authorization_details",
     "claims",
     "acr_values",
+    "dpop_jkt",
 )
+
+# A base64url-no-pad SHA-256 thumbprint: 32 bytes -> exactly 43 characters of
+# the RFC 4648 §5 alphabet. Padding (`=`), the standard-base64 `+`/`/` and any
+# other length are all rejected (divergence 52).
+_DPOP_JKT_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 
 
 def _strip_reauth_params(query: str) -> str:
@@ -420,6 +427,25 @@ async def authorize(request: Request):
                 config.issuer,
             )
 
+    # RFC 9449 §10 / divergence 52: `dpop_jkt` (query param, PAR-merged or
+    # JAR-overlaid) pre-binds the authorization code to a DPoP key, closing
+    # the window between the code landing at the client and the proof being
+    # presented at the token endpoint. The value is a JWK SHA-256 thumbprint:
+    # base64url (RFC 4648 §5, no padding) of 32 bytes, hence exactly 43
+    # characters. Like `resource`/`claims` above, a bad value is delivered
+    # through the now-trusted redirect channel, never a raw 400. The binding
+    # itself is recorded against the issued code below.
+    dpop_jkt = merged.get("dpop_jkt")
+    if dpop_jkt is not None and not _DPOP_JKT_RE.fullmatch(dpop_jkt):
+        return _deliver_error(
+            response_mode,
+            redirect_uri,
+            "invalid_request",
+            "dpop_jkt must be a base64url-encoded SHA-256 JWK thumbprint",
+            state,
+            config.issuer,
+        )
+
     # --- 5. Require an authenticated session ---
     # OIDC Core §3.1.2.1: `prompt` is a space-delimited list of values.
     prompt_values = (params.get("prompt") or "").split()
@@ -513,6 +539,10 @@ async def authorize(request: Request):
         resource=resource,
         claims_request=claims_request,
     )
+    if dpop_jkt is not None:
+        # Divergence 52: in-process only — `AuthorizationCode` is a Rust-owned
+        # table and may not grow a column for this (services/dpop_bindings.py).
+        request.app.state.dpop_code_bindings.bind(auth_code.code, dpop_jkt)
     request.app.state.metrics.oauth_authorization_codes_issued.inc()
     emit_event(
         request.app.state.event_bus,
