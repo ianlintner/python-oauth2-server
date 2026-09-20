@@ -207,13 +207,24 @@ async def introspect(request: Request) -> Response:
     # unless `trust_proxy_headers` is set (divergence 47) — a forged header
     # behind an untrusted proxy therefore reads as *missing*, not as a
     # match. Rust omits this check entirely (it echoes `cnf` unconditionally
-    # and enforces nothing).
+    # and enforces nothing). This block shares the presented-value gap noted
+    # above (~160): a cert-bound token introspected via its opaque
+    # refresh-token value decodes to no claims and so skips this check.
     thumb = claim_cnf.get("x5t#S256") if isinstance(claim_cnf, dict) else None
-    # `isinstance` guard: `hmac.compare_digest` raises on non-str, and the
-    # claim is read from an UNVERIFIED decode.
+    # `isinstance` guard: the claim comes from an UNVERIFIED decode, so it
+    # need not be a string at all.
     if isinstance(thumb, str) and thumb:
         presented = mtls_headers(request, config)[0]
-        if presented is None or not hmac.compare_digest(presented, thumb):
+        # Compare UTF-8 BYTES, not `str`: `hmac.compare_digest` raises
+        # TypeError on a non-ASCII `str` instead of returning False, and
+        # Starlette decodes headers as latin-1, so a thumbprint header
+        # carrying any byte >= 0x80 binds fine at the token endpoint and
+        # would then turn this oracle-free `{"active": false}` path into a
+        # distinguishable 500. Same hazard and same fix as
+        # `services/clients.py::_secrets_equal`.
+        if presented is None or not hmac.compare_digest(
+            presented.encode("utf-8"), thumb.encode("utf-8")
+        ):
             return _inactive_response(request, client)
 
         cnf = claim_cnf

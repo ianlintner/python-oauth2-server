@@ -573,4 +573,69 @@ async def test_unbound_token_introspection_unaffected():
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["active"] is True
-        assert "cnf" not in resp.json() or resp.json()["cnf"] is None
+        # The response is dumped with `exclude_none`, so an unbound token
+        # omits `cnf` entirely.
+        assert "cnf" not in resp.json()
+
+
+async def test_introspection_of_non_ascii_cert_binding_is_inactive_not_500():
+    """A non-ASCII thumbprint must not escape the oracle-free path.
+
+    Starlette decodes headers as latin-1, so a proxy header carrying any
+    byte >= 0x80 binds fine at the token endpoint. `hmac.compare_digest`
+    raises TypeError on a non-ASCII `str` rather than returning False, so
+    comparing the raw strings would turn the `{"active": false}` mismatch
+    path into a distinguishable 500 — an oracle for "this token IS
+    certificate-bound". The comparison is done on UTF-8 bytes instead.
+    """
+    # httpx will not ASCII-encode a `str` header value, but a real proxy
+    # emits raw bytes on the wire — send those, exactly as Starlette would
+    # receive them, and it latin-1-decodes them back to `non_ascii`.
+    non_ascii = "abcé"
+    raw = {"X-Client-Cert-Thumbprint": non_ascii.encode("latin-1")}
+    async with _trusting_app() as client_app:
+        issued = await post_token(
+            client_app,
+            CLIENT_CREDENTIALS,
+            basic_auth=("client1", "s3cret"),
+            headers=raw,
+        )
+        assert issued.status_code == 200, issued.text
+        access_token = issued.json()["access_token"]
+        assert _unverified_cnf(access_token) == {"x5t#S256": non_ascii}
+
+        basic = "Basic " + base64.b64encode(b"client1:s3cret").decode()
+
+        mismatch = await client_app.post(
+            "/oauth/introspect",
+            data={"token": access_token},
+            headers={"Authorization": basic, **_cert_headers()},
+        )
+        assert mismatch.status_code == 200, mismatch.text
+        assert mismatch.json()["active"] is False
+
+        # A non-ASCII *presented* value against an ASCII binding is the
+        # mirror image of the same hazard.
+        other = await post_token(
+            client_app,
+            CLIENT_CREDENTIALS,
+            basic_auth=("client1", "s3cret"),
+            headers=_cert_headers(),
+        )
+        reversed_mismatch = await client_app.post(
+            "/oauth/introspect",
+            data={"token": other.json()["access_token"]},
+            headers={"Authorization": basic, **raw},
+        )
+        assert reversed_mismatch.status_code == 200, reversed_mismatch.text
+        assert reversed_mismatch.json()["active"] is False
+
+        # And the matching case still works end to end.
+        match = await client_app.post(
+            "/oauth/introspect",
+            data={"token": access_token},
+            headers={"Authorization": basic, **raw},
+        )
+        assert match.status_code == 200, match.text
+        assert match.json()["active"] is True
+        assert match.json()["cnf"] == {"x5t#S256": non_ascii}
