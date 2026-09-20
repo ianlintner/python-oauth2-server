@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import time
 from dataclasses import dataclass
@@ -89,6 +90,11 @@ def read_dpop_header(request: Request) -> str | None:
 class DpopValidated:
     jkt: str
     nonce: str | None
+    # The proof's `ath` claim (RFC 9449 §4.2), normalized to `None` when
+    # absent or not a JSON string. Only meaningful — and only *checked* —
+    # when `validate_dpop_proof` was given an `access_token`; see divergence
+    # 50 and the `access_token` parameter's docstring.
+    ath: str | None = None
 
 
 class DpopReplayStore:
@@ -152,6 +158,18 @@ def jwk_thumbprint(jwk: dict) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
+def access_token_hash(access_token: str) -> str:
+    """RFC 9449 §4.2 `ath`: base64url-no-pad(SHA-256(access token)).
+
+    Same construction as `jwk_thumbprint` above and `security.half_hash`,
+    over the access token's UTF-8 bytes *exactly as the client presented
+    them* — the value is a binding to the presented string, not to any
+    canonicalized or re-encoded form of it.
+    """
+    digest = hashlib.sha256(access_token.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
 def _build_verification_key(alg: str, jwk: dict):
     """Build a PyJWT verification key from the proof's embedded JWK. Only
     called once `alg` has already been checked against `_ALLOWED_ALGS`, so
@@ -162,7 +180,12 @@ def _build_verification_key(alg: str, jwk: dict):
 
 
 def validate_dpop_proof(
-    proof: str, method: str, url: str, replay_store: DpopReplayStore
+    proof: str,
+    method: str,
+    url: str,
+    replay_store: DpopReplayStore,
+    *,
+    access_token: str | None = None,
 ) -> DpopValidated:
     """Validate a DPoP proof JWT per RFC 9449 §4.3.
 
@@ -171,7 +194,21 @@ def validate_dpop_proof(
     `.superpowers/sdd/research-dpop.md` `key_behaviors`. Validation order:
     header parse -> typ -> jwk presence -> thumbprint -> signature (with
     htm/htu/iat/jti required, aud/exp unchecked) -> htm match -> htu match
-    -> iat skew -> jti replay.
+    -> ath (only when `access_token` is given) -> iat skew -> jti replay.
+
+    `access_token` (divergence 50, phase 4c Task 4) is the access token the
+    proof was presented ALONGSIDE — i.e. the resource server's case
+    (`GET|POST /oauth/userinfo`). When given, the proof MUST carry an `ath`
+    claim (a JSON string) equal to `access_token_hash(access_token)`, per
+    RFC 9449 §4.3 step 11; the comparison is `hmac.compare_digest` over
+    UTF-8 bytes (the claim comes off an attacker-supplied payload, so it may
+    be non-ASCII, which makes `compare_digest` on `str` raise TypeError —
+    same hazard and same fix as `services/clients.py::_secrets_equal`).
+    When `None` — the token (`routes/token.py`) and introspection
+    (`routes/introspect.py`) endpoints, which have no access token to bind
+    a proof to — `ath` is neither required nor checked, only carried
+    through on `DpopValidated.ath`. The check sits before the replay-store
+    insert so a rejected proof does not burn its `jti`.
     """
     try:
         header = jwt.get_unverified_header(proof)
@@ -225,6 +262,21 @@ def validate_dpop_proof(
     if strip_query(str(claims.get("htu") or "")) != strip_query(url):
         raise DpopError("invalid_dpop_proof", "DPoP proof htu does not match request URI")
 
+    # `ath` comes off an unverified-shape JSON payload: anything that isn't
+    # a `str` (a number, null, an object) collapses to `None` here, so it is
+    # rejected below rather than reaching `.encode()`.
+    ath = claims.get("ath")
+    if not isinstance(ath, str):
+        ath = None
+    if access_token is not None:
+        expected_ath = access_token_hash(access_token)
+        if ath is None or not hmac.compare_digest(
+            ath.encode("utf-8"), expected_ath.encode("utf-8")
+        ):
+            raise DpopError(
+                "invalid_dpop_proof", "DPoP proof ath does not match the presented access token"
+            )
+
     iat_claim = claims["iat"]
     if not isinstance(iat_claim, (int, float)):
         # PyJWT decodes JSON numbers as int/float; a numeric *string* like
@@ -250,4 +302,4 @@ def validate_dpop_proof(
 
     replay_store.check_and_insert(str(claims["jti"]))
 
-    return DpopValidated(jkt=jkt, nonce=nonce)
+    return DpopValidated(jkt=jkt, nonce=nonce, ath=ath)

@@ -237,6 +237,7 @@ def make_dpop_proof(
     *,
     jti: str | None = None,
     iat: float | None = None,
+    extra_claims: dict | None = None,
 ) -> tuple[str, dict]:
     """Build a real, signed ES256 DPoP proof JWT for `method` + `url`.
 
@@ -248,6 +249,10 @@ def make_dpop_proof(
     `(proof, public_jwk)` so callers can independently compute the expected
     `jkt` thumbprint (`oauth2_server.services.dpop.jwk_thumbprint`) without
     threading the key back out separately.
+
+    `extra_claims` merges arbitrary extra payload claims over the defaults —
+    used by `tests/test_userinfo_dpop.py` to attach the `ath` claim a
+    resource-server proof needs (divergence 50).
     """
     if key is None:
         key = generate_dpop_key()
@@ -260,6 +265,8 @@ def make_dpop_proof(
     }
     if nonce is not None:
         claims["nonce"] = nonce
+    if extra_claims:
+        claims.update(extra_claims)
     proof = jwt.encode(
         claims, private_pem, algorithm="ES256", headers={"typ": "dpop+jwt", "jwk": public_jwk}
     )
