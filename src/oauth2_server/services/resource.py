@@ -24,10 +24,20 @@ def validate_resource(value: str | None) -> str | None:
     that as "no resource requested", leaving `aud` as `[client_id]`. Anything
     present but not an absolute, fragment-free URI raises `OAuthError`
     (`invalid_target`, RFC 8707 §2).
+
+    "Absolute URI" is RFC 3986 §4.3: a scheme, a hier-part, and no fragment.
+    The hier-part does NOT have to carry an authority — `urn:example:api` is a
+    perfectly good resource indicator and is accepted, as is any other
+    authority-less scheme (`mailto:`, `tag:`, ...). What is rejected is a
+    relative reference (no scheme, e.g. `/api/orders`) and a scheme with
+    nothing after it (`https:`), which name nothing.
     """
     if value is None:
         return None
     split = urlsplit(value)
-    if not split.scheme or not split.netloc or split.fragment:
+    # urlsplit puts an authority-less hier-part entirely in `path`, so the
+    # "names something" check is netloc/path/query rather than netloc alone.
+    names_something = bool(split.netloc or split.path or split.query)
+    if not split.scheme or not names_something or split.fragment:
         raise OAuthError("invalid_target", _INVALID_TARGET_DESCRIPTION, 400)
     return value

@@ -539,6 +539,18 @@ async def token(request: Request) -> ORJSONResponse:
         else:
             scope = old_token.scope
 
+        # RFC 8707: `resource` on refresh is taken at face value — there is
+        # no "must be a subset of the originally authorized resources" check
+        # (Rust parity), so a refresh can rebind `aud` to any valid resource.
+        # Validated HERE, before the old token is revoked below: a rejected
+        # value must leave the refresh token usable, otherwise the client's
+        # corrected retry would look like refresh-token reuse and revoke the
+        # entire token family.
+        try:
+            resource = validate_resource(form.get("resource"))
+        except OAuthError as exc:
+            return oauth_error(exc.error, exc.description, exc.status)
+
         family = old_token.token_family or uuid.uuid4().hex
         # Refresh carries the OLD access token's cnf forward regardless of
         # whether this request presented a fresh DPoP proof — `cnf` (from
@@ -552,15 +564,6 @@ async def token(request: Request) -> ORJSONResponse:
         # None on the rotated token") — unlike `cnf` above, there is no
         # carry-over from the old access token's JWT claim; `authorization_details`
         # is deliberately left unset here.
-
-        # RFC 8707: `resource` on refresh is taken at face value — there is
-        # no "must be a subset of the originally authorized resources" check
-        # (Rust parity), so a refresh can rebind `aud` to any valid resource.
-        try:
-            resource = validate_resource(form.get("resource"))
-        except OAuthError as exc:
-            return oauth_error(exc.error, exc.description, exc.status)
-
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             old_token.user_id,

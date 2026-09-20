@@ -23,6 +23,7 @@ from tests.test_token_endpoint import _pkce_pair, run_code_flow
 ISSUER = "https://auth.example.com"
 REDIRECT_URI = "https://a.example/cb"
 RESOURCE = "https://api.resource.test"
+URN_RESOURCE = "urn:example:api"
 OTHER_RESOURCE = "https://other.resource.test"
 BASIC = ("client1", "s3cret")
 
@@ -146,6 +147,51 @@ async def test_resource_on_device_grant_binds_aud(client_app):
     )
     assert resp.status_code == 200, resp.text
     assert _claims(resp.json()["access_token"])["aud"] == RESOURCE
+
+
+async def test_invalid_resource_on_refresh_does_not_revoke_token_family(client_app):
+    """A rejected `resource` must leave the refresh token (and its family) intact.
+
+    The value is validated before the old token is revoked, so the client's
+    corrected retry is an ordinary refresh — not refresh-token reuse, which
+    would revoke the whole family.
+    """
+    resp, _ = await run_code_flow(client_app)
+    assert resp.status_code == 200, resp.text
+    refresh_token = resp.json()["refresh_token"]
+
+    rejected = await post_token(
+        client_app,
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "resource": "not-an-absolute-uri",
+        },
+        basic_auth=BASIC,
+    )
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["error"] == "invalid_target"
+
+    retried = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": refresh_token},
+        basic_auth=BASIC,
+    )
+    assert retried.status_code == 200, retried.text
+    assert _claims(retried.json()["access_token"])["aud"] == "client1"
+
+
+async def test_urn_resource_accepted_as_aud(client_app):
+    # RFC 3986 §4.3: an absolute URI's hier-part need not carry an authority.
+    resp = await _client_credentials(client_app, URN_RESOURCE)
+    assert resp.status_code == 200, resp.text
+    assert _claims(resp.json()["access_token"])["aud"] == URN_RESOURCE
+
+
+async def test_scheme_only_resource_rejected_invalid_target(client_app):
+    resp = await _client_credentials(client_app, "https:")
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_target"
 
 
 async def test_relative_resource_rejected_invalid_target(client_app):
