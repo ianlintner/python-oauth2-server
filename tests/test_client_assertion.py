@@ -711,6 +711,14 @@ async def test_registration_private_key_jwt_echoes_jwks_uri(client_app):
         "https://[::1]/jwks.json",
         "https://169.254.169.254/latest/meta-data",
         "https://[fe80::1]/jwks.json",
+        # Alternative spellings of 127.0.0.1 that `ipaddress.ip_address`
+        # rejects but `inet_aton` (and therefore every real resolver)
+        # accepts.
+        "https://2130706433/jwks.json",
+        "https://0177.0.0.1/jwks.json",
+        "https://127.1/jwks.json",
+        # IPv4-mapped IPv6 loopback.
+        "https://[::ffff:127.0.0.1]/jwks.json",
         "/jwks.json",
         "https:///jwks.json",
         "https://app.example/jwks.json#frag",

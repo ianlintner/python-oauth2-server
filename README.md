@@ -442,9 +442,13 @@ earlier phases deliberately left open:
 - **RFC 9701 JWT-secured introspection responses** — `POST /oauth/introspect` with
   `Accept: application/token-introspection+jwt` returns a signed JWT
   (`security.py::encode_introspection_jwt`) wrapping the introspection body for BOTH active and
-  inactive results (divergence 34 — Rust only wraps the active case). Signing follows divergence
-  11: the keyset's current RS256 key (with `kid`) when `id_token_alg == "RS256"`, else HS256 with
-  `jwt_secret`.
+  inactive results (divergence 34 — Rust only wraps the active case). The response is signed with
+  a key the REQUESTING CLIENT can verify (security over parity): the keyset's current RS256 key
+  with its `kid` whenever the keyset has one — regardless of `id_token_alg`, since that key is
+  published in JWKS — else HS256 under that client's own `client_secret` (OIDC Core §10.1), never
+  the server's `jwt_secret`. A public client with no RS256 key available gets `invalid_request`
+  400 instead of a silent downgrade to unauthenticated JSON. Discovery advertises
+  `introspection_signing_alg_values_supported: ["RS256", "HS256"]` (RFC 9701 §7).
 - **RFC 8628 §3.5 `slow_down`** — `services/device_poll.py::DevicePollTracker` tracks the most
   recent poll time and currently-required interval per `device_code`; a poll that arrives sooner
   than that interval gets `slow_down` back with the interval grown by 5 seconds (uncapped,

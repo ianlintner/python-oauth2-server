@@ -487,9 +487,16 @@ From Phase 4a (`docs/plans/2026-09-20-python-oauth2-port-phase-4a.md` → "Globa
     Kept as-is; no code change in Phase 4a.
 34. RFC 9701: an `Accept: application/token-introspection+jwt` caller gets a signed JWT
     for BOTH active and inactive results — Rust only wraps the active path and returns
-    plain JSON `{"active": false}` otherwise. Signing follows divergence 11 (keyset's
-    current RS256 key with its `kid` when `id_token_alg == "RS256"`, else HS256
-    `jwt_secret`) rather than Rust's static env PEM. Task 4 (commit `b247529`).
+    plain JSON `{"active": false}` otherwise. Signing is **security over parity**: Rust
+    signs with the server's own secret, which the relying party does not hold and
+    therefore cannot verify. The rule here (RFC 9701 §5 + OIDC Core §10.1) is: the
+    keyset's current RS256 key with its `kid` whenever one exists — regardless of
+    `id_token_alg`, since that key is published in JWKS; else HS256 under the REQUESTING
+    CLIENT's own `client_secret` (never `jwt_secret`); else — a public client with no
+    RS256 key, so no key it could verify with — `invalid_request` 400 rather than a
+    silent downgrade to unauthenticated JSON. Discovery advertises
+    `introspection_signing_alg_values_supported: ["RS256", "HS256"]` (RFC 9701 §7).
+    Task 4 (commit `b247529`), rule revised in Phase 4a hardening.
 35. RFC 8628 §3.5 `slow_down` is implemented (Rust never returns it — recorded as a shared
     gap in "Known Phase 3c gaps"). The required interval grows by 5 s per `slow_down`.
     Task 5 (commit `2c034c3`).
@@ -553,26 +560,13 @@ Out of scope for all of Phase 4 (unchanged from earlier phases): Redis/Kafka/Rab
 backends, bulkheads, OTel span export, multi-instance persistence of in-process stores,
 admin-session server-side revocation.
 
-**Open question surfaced in review (candidate for 4b/4c):** in HS256 deployments, the RFC 9701
-introspection JWT (divergence 34) is signed with the server's own `jwt_secret` — Rust parity,
-the same key `id_token`s use (divergence 11) — so the requesting client, which does not hold
-`jwt_secret`, cannot verify the signature itself. Candidates: sign with the client's own secret
-instead, or require RS256 (keyset key) for this response type regardless of `id_token_alg`.
 
 ### Residuals from the Phase 4a final review (parked, non-blocking)
 
-- `services/clients.py::is_valid_jwks_uri` blocks canonical loopback/link-local literals but not
-  alternative IPv4 spellings (`https://2130706433/`, `https://0177.0.0.1/`, `https://127.1/`) —
-  `ipaddress.ip_address` rejects those forms, so they fall through as "registered names" while
-  `getaddrinfo` resolves them to 127.0.0.1. DNS-resolution bypasses are out of scope by design;
-  normalising these literal spellings is a cheap Phase 4b/4c hardening item. The inline comment
-  claiming `.hostname` raises on a malformed port is inaccurate on CPython 3.12 (only `.port` raises).
 - Admin `POST /admin/api/clients` echoes `jwks` as the submitted object while `GET` returns the raw
   stored JSON string (module convention) — shapes disagree between create and detail.
 - Admin `PUT` now validates `token_endpoint_auth_method` against the merged row, so a legacy row with
   an unknown method 400s on any update until a valid method is supplied in the same call.
-- `tests/test_introspection_jwt.py` still uses a 16-byte HS256 test secret (PyJWT
-  `InsecureKeyLengthWarning`); `tests/test_client_assertion.py` was fixed in the final fix wave.
 - Refresh without `resource` widens `aud` back to `client_id` (Rust parity, "Phase 6.3" note in Rust);
   carrying the old token's `aud` forward via the existing unverified-decode salvage and enforcing
   "new resource ⊆ old aud" is a zero-migration Phase 4c candidate. Relatedly, `userinfo` validates
