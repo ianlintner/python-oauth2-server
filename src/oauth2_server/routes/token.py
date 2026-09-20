@@ -61,6 +61,7 @@ from oauth2_server.services.dpop import (
 )
 from oauth2_server.services.dpop_nonce import DpopNonceIssuer, enforce_dpop_nonce
 from oauth2_server.services.events_bus import emit_event
+from oauth2_server.services.limits import LimitError, check_depth
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource
@@ -847,7 +848,29 @@ async def token(request: Request) -> ORJSONResponse:
         # supplied on this request (`actor_token`'s VALUE is never
         # validated, matching Rust — its mere presence triggers the
         # response member).
-        act = {"sub": client.client_id}
+        #
+        # Nested chains (divergence 55): when the SUBJECT token itself
+        # carries a dict `act` (i.e. it was produced by a prior exchange),
+        # that prior `act` is nested under this hop's:
+        # `{"sub": <this client_id>, "act": <prior act>}`. The prior `act`
+        # is read via `decode_unverified_claims` — same "already gated by
+        # the storage lookup above, only reading claims back out" trust
+        # model as every other unverified-claims read in this module — and
+        # is simply absent (`{}`) for an opaque subject token, which has no
+        # JWT claims to read; nesting then can't trigger and `act` stays
+        # flat. If the SAME client re-exchanges a token it already stamped
+        # (`prior["sub"] == client.client_id`), the chain does NOT nest —
+        # re-exchanging your own token isn't a new delegation hop. A chain
+        # nested deeper than 10 levels is rejected as `invalid_request`
+        # rather than embedded, via the shared `check_depth` guard.
+        act: dict = {"sub": client.client_id}
+        prior_act = decode_unverified_claims(subject_token).get("act")
+        if isinstance(prior_act, dict) and prior_act.get("sub") != client.client_id:
+            act["act"] = prior_act
+        try:
+            check_depth(act, name="act", max_depth=10)
+        except LimitError as exc:
+            return oauth_error("invalid_request", exc.description)
         actor_token_present = form.get("actor_token") is not None
 
         # Impersonation model (Rust parity): issued token carries the

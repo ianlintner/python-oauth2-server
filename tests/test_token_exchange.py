@@ -470,3 +470,268 @@ async def test_exchanged_token_introspects_for_exchanging_client_only(client_app
     )
     assert cross_introspect.status_code == 200, cross_introspect.text
     assert cross_introspect.json()["active"] is False
+
+
+# --- Nested act delegation chains (RFC 8693 §4.1, divergence 55) --------------
+
+
+async def test_two_hop_exchange_nests_act(client_app):
+    """Exchanging a token that was ITSELF produced by a prior exchange (by a
+    DIFFERENT client) nests the prior `act` under the new one: `{"sub": <new
+    client_id>, "act": {"sub": <prior client_id>}}`."""
+    await _seed_exchange_client(client_app)
+    await seed_client(
+        client_app.storage,
+        client_id="tx_client2",
+        client_secret="tx_secret2",
+        grant_types=json.dumps([EXCHANGE_URN]),
+        scope="read profile openid",
+    )
+    await _seed_subject_token(client_app, access_token="subj_hop1", scope="read")
+
+    first = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": "subj_hop1",
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client", "tx_secret"),
+    )
+    assert first.status_code == 200, first.text
+    first_token = first.json()["access_token"]
+
+    second = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": first_token,
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client2", "tx_secret2"),
+    )
+    assert second.status_code == 200, second.text
+    claims = jwt.decode(second.json()["access_token"], options={"verify_signature": False})
+    assert claims["act"] == {"sub": "tx_client2", "act": {"sub": "tx_client"}}
+
+
+async def test_three_hop_exchange_nests_twice(client_app):
+    """A third hop (by a third client) nests one level deeper still."""
+    await _seed_exchange_client(client_app)
+    await seed_client(
+        client_app.storage,
+        client_id="tx_client2",
+        client_secret="tx_secret2",
+        grant_types=json.dumps([EXCHANGE_URN]),
+        scope="read profile openid",
+    )
+    await seed_client(
+        client_app.storage,
+        client_id="tx_client3",
+        client_secret="tx_secret3",
+        grant_types=json.dumps([EXCHANGE_URN]),
+        scope="read profile openid",
+    )
+    await _seed_subject_token(client_app, access_token="subj_hop2", scope="read")
+
+    first = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": "subj_hop2",
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client", "tx_secret"),
+    )
+    assert first.status_code == 200, first.text
+
+    second = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": first.json()["access_token"],
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client2", "tx_secret2"),
+    )
+    assert second.status_code == 200, second.text
+
+    third = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": second.json()["access_token"],
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client3", "tx_secret3"),
+    )
+    assert third.status_code == 200, third.text
+    claims = jwt.decode(third.json()["access_token"], options={"verify_signature": False})
+    assert claims["act"] == {
+        "sub": "tx_client3",
+        "act": {"sub": "tx_client2", "act": {"sub": "tx_client"}},
+    }
+
+
+async def test_same_client_reexchange_collapses(client_app):
+    """When the SAME client re-exchanges a token it already holds `act` for
+    (`prior["sub"] == client.client_id`), the chain does NOT nest — it stays
+    flat `{"sub": client_id}`."""
+    await _seed_exchange_client(client_app)
+    await _seed_subject_token(client_app, access_token="subj_same_client", scope="read")
+
+    first = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": "subj_same_client",
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client", "tx_secret"),
+    )
+    assert first.status_code == 200, first.text
+
+    second = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": first.json()["access_token"],
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client", "tx_secret"),
+    )
+    assert second.status_code == 200, second.text
+    claims = jwt.decode(second.json()["access_token"], options={"verify_signature": False})
+    assert claims["act"] == {"sub": "tx_client"}
+
+
+async def test_over_depth_act_chain_rejected(client_app, monkeypatch):
+    """A subject token whose `act` claim already nests deeper than the
+    10-level limit is rejected with `invalid_request`, per
+    `services/limits.py::check_depth`. Crafting a genuinely 11-deep chain via
+    real exchanges would take 11 real hops/clients, so this test instead
+    monkeypatches `decode_unverified_claims` (as used by
+    `routes/token.py`'s token-exchange branch) to return a pre-built 11-deep
+    `act` for the subject token under test — an acceptable unit-ish
+    shortcut for a route-level depth-limit test."""
+    from oauth2_server.routes import token as token_route
+
+    await _seed_exchange_client(client_app)
+    await _seed_subject_token(client_app, access_token="subj_over_depth", scope="read")
+
+    deep_act: dict = {"sub": "client_0"}
+    for i in range(1, 11):
+        deep_act = {"sub": f"client_{i}", "act": deep_act}
+
+    real_decode = token_route.decode_unverified_claims
+
+    def fake_decode(token: str) -> dict:
+        if token == "subj_over_depth":
+            return {"act": deep_act}
+        return real_decode(token)
+
+    monkeypatch.setattr(token_route, "decode_unverified_claims", fake_decode)
+
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": "subj_over_depth",
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client", "tx_secret"),
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_request"
+
+
+async def test_response_body_act_matches_jwt_claim(client_app):
+    """The response-body `act` (still conditional on `actor_token`) is the
+    SAME nested object as the JWT `act` claim, not just a flat `{"sub":
+    ...}`."""
+    await _seed_exchange_client(client_app)
+    await seed_client(
+        client_app.storage,
+        client_id="tx_client2",
+        client_secret="tx_secret2",
+        grant_types=json.dumps([EXCHANGE_URN]),
+        scope="read profile openid",
+    )
+    await _seed_subject_token(client_app, access_token="subj_body_match", scope="read")
+
+    first = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": "subj_body_match",
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client", "tx_secret"),
+    )
+    assert first.status_code == 200, first.text
+
+    second = await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": first.json()["access_token"],
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+            "actor_token": "some-opaque-actor-token",
+            "actor_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client2", "tx_secret2"),
+    )
+    assert second.status_code == 200, second.text
+    body = second.json()
+    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
+    assert body["act"] == claims["act"] == {"sub": "tx_client2", "act": {"sub": "tx_client"}}
+
+
+async def test_opaque_mode_act_split_unchanged():
+    """Opaque mode's documented body-survives/JWT-claim-dropped split
+    (`test_opaque_mode_response_body_act_survives_while_token_is_opaque`)
+    still holds now that nesting logic is present. An opaque access token is
+    a bare random string, so a SECOND exchange of it cannot recover a prior
+    `act` via `decode_unverified_claims` (it isn't a JWT — no claims to
+    read) — nesting simply doesn't trigger, and `act` stays the flat
+    `{"sub": <exchanging client_id>}` for the second hop too, exactly as for
+    a first hop."""
+    async with build_client_app({"access_tokens_opaque": True}) as opaque_app:
+        await _seed_exchange_client(opaque_app)
+        await seed_client(
+            opaque_app.storage,
+            client_id="tx_client2",
+            client_secret="tx_secret2",
+            grant_types=json.dumps([EXCHANGE_URN]),
+            scope="read profile openid",
+        )
+        await _seed_subject_token(opaque_app, access_token="subj_opaque_nest", scope="read")
+
+        first = await post_token(
+            opaque_app,
+            {
+                "grant_type": EXCHANGE_URN,
+                "subject_token": "subj_opaque_nest",
+                "subject_token_type": ACCESS_TOKEN_TYPE,
+            },
+            basic_auth=_basic("tx_client", "tx_secret"),
+        )
+        assert first.status_code == 200, first.text
+
+        second = await post_token(
+            opaque_app,
+            {
+                "grant_type": EXCHANGE_URN,
+                "subject_token": first.json()["access_token"],
+                "subject_token_type": ACCESS_TOKEN_TYPE,
+                "actor_token": "some-opaque-actor-token",
+                "actor_token_type": ACCESS_TOKEN_TYPE,
+            },
+            basic_auth=_basic("tx_client2", "tx_secret2"),
+        )
+        assert second.status_code == 200, second.text
+        body = second.json()
+        assert body["act"] == {"sub": "tx_client2"}
+
+        with pytest.raises(jwt.PyJWTError):
+            jwt.decode(body["access_token"], options={"verify_signature": False})

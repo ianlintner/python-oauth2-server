@@ -202,6 +202,17 @@ class Claims(BaseModel):
     # present — see research-rar-token-exchange.md gotchas); this port fixes
     # the JWT gap while keeping the response-body member Rust-conditional
     # (routes/token.py's token-exchange branch).
+    #
+    # Nested chains (divergence 55): when the token being exchanged was
+    # itself produced by a prior exchange (its own `act` claim is a dict),
+    # that prior `act` nests one level deeper: `{"sub": <this exchanging
+    # client_id>, "act": <prior act>}` — a re-exchange chain reads as a
+    # delegation history, most recent actor outermost. A client
+    # re-exchanging a token it already stamped (`prior["sub"]` equal to its
+    # own `client_id`) does NOT nest — the chain stays flat. Chains deeper
+    # than 10 levels are rejected (`invalid_request`) rather than embedded;
+    # see `services/limits.py::check_depth` and `routes/token.py`'s
+    # token-exchange branch for both rules.
     act: dict | None = None
 
     @classmethod
