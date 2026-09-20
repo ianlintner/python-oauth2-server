@@ -286,6 +286,11 @@ class SqlStorage:
         callers can refuse an ambiguous match rather than pick one.
         """
         folded = email.strip().lower()
+        # `lower(trim(email))` is non-sargable: it cannot use the plain
+        # `idx_users_email` index and degrades to a scan. Fine at this
+        # port's scale (one lookup per social callback), but a large
+        # deployment that enables linking should add a functional index —
+        # e.g. Postgres `CREATE INDEX ON users (lower(btrim(email)))`.
         async with self._engine.connect() as conn:
             rows = (
                 (

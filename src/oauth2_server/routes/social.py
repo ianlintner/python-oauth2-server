@@ -32,6 +32,7 @@ import hmac
 import logging
 import secrets
 import uuid
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import ORJSONResponse, PlainTextResponse, RedirectResponse
@@ -53,6 +54,10 @@ from oauth2_server.services.social import (
     resolve_provider_config,
 )
 from oauth2_server.sessions import set_login
+
+if TYPE_CHECKING:
+    from oauth2_server.config import Config
+    from oauth2_server.storage.base import Storage
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +130,9 @@ def _fold_email(email: str) -> str:
     return email.strip().casefold()
 
 
-async def _link_by_verified_email(config, storage, userinfo: SocialUserInfo) -> User | None:
+async def _link_by_verified_email(
+    config: "Config", storage: "Storage", userinfo: SocialUserInfo
+) -> User | None:
     """The existing local user this social login may be linked to, or
     `None` to provision a fresh `provider:id` account as before
     (divergence 56).
@@ -146,10 +153,15 @@ async def _link_by_verified_email(config, storage, userinfo: SocialUserInfo) -> 
        candidate prefilter whose case semantics belong to the database, so
        every candidate is re-checked here against `_fold_email` before it
        counts.
-    4. The candidate is not privileged: neither `role == "admin"` nor an
-       address in `config.admin_emails` (already lowercased by its
-       validator — an admin-by-email account is exactly the row an
-       attacker who can assert an address at a provider would want).
+    4. The candidate is neither privileged nor disabled: not
+       `role == "admin"`, not an address in `config.admin_emails` (already
+       lowercased by its validator — an admin-by-email account is exactly
+       the row an attacker who can assert an address at a provider would
+       want), and `enabled` is True. The `enabled` check matters HERE
+       specifically: `routes/login.py` is the only other place that
+       enforces it and nothing downstream of `set_login` re-checks it, so
+       without it a DISABLED account could be signed back in by whoever
+       controls its address at a provider.
     """
     if not config.social_link_by_verified_email or not userinfo.email_verified:
         return None
@@ -175,8 +187,16 @@ async def _link_by_verified_email(config, storage, userinfo: SocialUserInfo) -> 
     # a row that the guard would treat as admin must never be linkable,
     # even where the two normalizations disagree.
     lowered = candidate.email.strip().lower()
-    if candidate.role == "admin" or folded in config.admin_emails or lowered in config.admin_emails:
-        logger.warning("refusing to link social login to privileged account %r", candidate.username)
+    if (
+        candidate.role == "admin"
+        or folded in config.admin_emails
+        or lowered in config.admin_emails
+        or not candidate.enabled
+    ):
+        logger.warning(
+            "refusing to link social login to privileged or disabled account %r",
+            candidate.username,
+        )
         return None
     return candidate
 

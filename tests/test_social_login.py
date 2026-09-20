@@ -645,13 +645,21 @@ def _install_session_probe(client) -> None:
         return ORJSONResponse(dict(request.session))
 
 
-async def _seed_local_user(client, *, email: str, username: str = "local_user", role: str = "user"):
+async def _seed_local_user(
+    client,
+    *,
+    email: str,
+    username: str = "local_user",
+    role: str = "user",
+    enabled: bool = True,
+):
     user = User(
         id=uuid.uuid4().hex,
         username=username,
         email=email,
         password_hash=security.hash_password("password123"),
         role=role,
+        enabled=enabled,
     )
     await client.storage.save_user(user)
     return user
@@ -764,6 +772,24 @@ async def test_admin_emails_candidate_refused():
         social = await client.storage.get_user_by_username("google:3")
         assert social is not None
         assert social.id != boss.id
+
+
+async def test_disabled_candidate_refused():
+    """A disabled local account must not be reachable through a provider
+    that asserts its address. `enabled` is enforced only by
+    `routes/login.py` and nothing downstream of `set_login` re-checks it,
+    so linking is the one place that has to refuse the row itself."""
+    async with build_client_app(LINK_ON) as client:
+        disabled = await _seed_local_user(
+            client, email="gail@example.com", username="gail", enabled=False
+        )
+        resp = await _run_callback(client, "google", _google_handler("7", "gail@example.com"))
+        assert resp.status_code == 302, resp.text
+
+        social = await client.storage.get_user_by_username("google:7")
+        assert social is not None
+        assert social.id != disabled.id
+        assert social.enabled is True
 
 
 async def test_ambiguous_email_refused():

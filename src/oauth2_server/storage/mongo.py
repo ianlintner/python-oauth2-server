@@ -292,6 +292,11 @@ class MongoStorage:
         in an email would be regex metacharacters (a `$regex` value is
         still data, never executable server code, but an unescaped pattern
         would silently match rows it must not).
+
+        Note: `$options: "i"` folds ASCII only, so a non-ASCII address that
+        SQL's `lower()` would match here may return no candidate — this
+        fails CLOSED (no link, a new `provider:id` account is provisioned)
+        rather than over-matching.
         """
         folded = re.escape(email.strip().lower())
         cursor = self.users.find({"email": {"$regex": f"^\\s*{folded}\\s*$", "$options": "i"}})
