@@ -281,7 +281,20 @@ async def token(request: Request) -> ORJSONResponse:
             if nonce_response is not None:
                 return nonce_response
 
-    cnf = {"jkt": dpop_validated.jkt} if dpop_validated is not None else None
+    # RFC 9449 §6.1 / RFC 8705 §3.1 `cnf` precedence (Rust parity): a valid
+    # DPoP proof wins outright; otherwise the token is certificate-bound
+    # whenever a thumbprint header is present — regardless of how the client
+    # authenticated, since `mtls_headers` already gates the header on
+    # `trust_proxy_headers` (divergence 47), so an untrusted proxy yields
+    # `None` and binds nothing. The thumbprint is stored verbatim; only a
+    # `jkt` binding flips `token_type` to "DPoP" (services/tokens.py).
+    cnf: dict | None = None
+    if dpop_validated is not None:
+        cnf = {"jkt": dpop_validated.jkt}
+    else:
+        cert_thumbprint = mtls_headers(request, config)[0]
+        if cert_thumbprint is not None:
+            cnf = {"x5t#S256": cert_thumbprint}
 
     grant_type = form.get("grant_type")
 

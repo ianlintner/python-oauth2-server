@@ -8,17 +8,27 @@ into `ClientService.authenticate` but not acted on (Task 2).
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
 from starlette.requests import Request
 
+import oauth2_server.services.device_poll as device_poll_module
 from oauth2_server.config import Config
 from oauth2_server.security import decode_unverified_claims
 from oauth2_server.services.clients import ClientService, is_valid_redirect_uri
+from oauth2_server.services.dpop import jwk_thumbprint
 from oauth2_server.services.mtls import mtls_headers
 from tests.conftest import build_client_app
-from tests.helpers import generate_rsa_keypair, post_token, reseed_client
+from tests.helpers import (
+    generate_rsa_keypair,
+    login_session,
+    make_dpop_proof,
+    post_token,
+    reseed_client,
+)
+from tests.test_token_endpoint import run_code_flow
 
 MTLS_HEADERS = {
     "X-Client-Cert-Thumbprint": "abc123",
@@ -372,3 +382,195 @@ async def test_mtls_authenticates_at_par_and_introspect():
         )
         assert introspect.status_code == 200, introspect.text
         assert introspect.json()["active"] is True
+
+
+# --- Task 3: certificate-bound access tokens (cnf x5t#S256) ----------------
+
+TOKEN_URL = "https://auth.example.com/oauth/token"
+OTHER_THUMBPRINT = "b3RoZXItdGh1bWJwcmludC0zMi1ieXRlcy1iNjR1Cg"
+
+
+def _unverified_cnf(access_token: str) -> dict | None:
+    return decode_unverified_claims(access_token).get("cnf")
+
+
+async def test_cert_bound_token_carries_x5t_s256_cnf():
+    """RFC 8705 §3: a token issued over a (trusted-proxy) mTLS connection is
+    bound to the certificate thumbprint via `cnf["x5t#S256"]`, stored
+    verbatim. `token_type` stays "Bearer" — only DPoP binding flips it."""
+    async with _trusting_app() as client_app:
+        await reseed_client(
+            client_app,
+            token_endpoint_auth_method="tls_client_auth",
+            tls_client_certificate_subject_dn=CLIENT_DN,
+            client_secret="",
+        )
+        resp = await post_token(
+            client_app,
+            {**CLIENT_CREDENTIALS, "client_id": "client1"},
+            headers=_cert_headers(dn=CLIENT_DN),
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["token_type"] == "Bearer"
+        assert _unverified_cnf(body["access_token"]) == {"x5t#S256": CERT_THUMBPRINT}
+
+
+async def test_cert_binding_applies_to_any_auth_method():
+    """Rust parity: binding keys off the (trust-gated) thumbprint header
+    alone, not off the client's registered authentication method."""
+    async with _trusting_app() as client_app:
+        resp = await post_token(
+            client_app,
+            CLIENT_CREDENTIALS,
+            basic_auth=("client1", "s3cret"),
+            headers=_cert_headers(),
+        )
+        assert resp.status_code == 200, resp.text
+        assert _unverified_cnf(resp.json()["access_token"]) == {"x5t#S256": CERT_THUMBPRINT}
+
+
+async def test_cert_binding_ignored_without_trust_proxy():
+    """Divergence 47: an untrusted proxy's header binds nothing."""
+    async with build_client_app() as client_app:
+        resp = await post_token(
+            client_app,
+            CLIENT_CREDENTIALS,
+            basic_auth=("client1", "s3cret"),
+            headers=_cert_headers(),
+        )
+        assert resp.status_code == 200, resp.text
+        assert _unverified_cnf(resp.json()["access_token"]) is None
+
+
+async def test_dpop_beats_mtls_when_both_present():
+    """`cnf` precedence: a valid DPoP proof wins over the certificate
+    thumbprint, and only DPoP flips `token_type`."""
+    proof, pub_jwk = make_dpop_proof(TOKEN_URL, "POST")
+    async with _trusting_app() as client_app:
+        resp = await post_token(
+            client_app,
+            CLIENT_CREDENTIALS,
+            basic_auth=("client1", "s3cret"),
+            headers={**_cert_headers(), "DPoP": proof},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["token_type"] == "DPoP"
+        assert _unverified_cnf(body["access_token"]) == {"jkt": jwk_thumbprint(pub_jwk)}
+
+
+async def test_device_grant_never_binds_x5t(monkeypatch):
+    """Rust parity: the device grant hardcodes `cnf: None`, certificate or
+    not."""
+    async with _trusting_app() as client_app:
+        headers = _cert_headers()
+        start = await client_app.post(
+            "/oauth/device_authorization",
+            data={},
+            headers={
+                "Authorization": "Basic " + base64.b64encode(b"client1:s3cret").decode(),
+                **headers,
+            },
+        )
+        assert start.status_code == 200, start.text
+        device_code = start.json()["device_code"]
+        user_code = start.json()["user_code"]
+
+        assert (await login_session(client_app)).status_code == 303
+        verify = await client_app.post(
+            "/oauth/device/verify", data={"user_code": user_code, "action": "approve"}
+        )
+        assert verify.status_code == 200, verify.text
+
+        # RFC 8628 slow_down: advance the poll tracker's clock past the
+        # device's 5s interval so this poll isn't rate-limited (same trick as
+        # tests/test_device_flow.py).
+        real_monotonic = device_poll_module.time.monotonic
+        monkeypatch.setattr(device_poll_module.time, "monotonic", lambda: real_monotonic() + 5)
+        token = await post_token(
+            client_app,
+            {
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": device_code,
+            },
+            basic_auth=("client1", "s3cret"),
+            headers=headers,
+        )
+        assert token.status_code == 200, token.text
+        assert token.json()["token_type"] == "Bearer"
+        assert _unverified_cnf(token.json()["access_token"]) is None
+
+
+async def test_refresh_salvages_cert_binding_unchanged():
+    """The refresh grant carries the OLD token's `cnf` forward verbatim —
+    `_salvage_old_cnf` is kind-agnostic, so an `x5t#S256` binding survives
+    rotation (and stays a Bearer token)."""
+    async with _trusting_app() as client_app:
+        issued, _code = await run_code_flow(
+            client_app, scope="openid email", headers=_cert_headers()
+        )
+        assert issued.status_code == 200, issued.text
+        assert _unverified_cnf(issued.json()["access_token"]) == {"x5t#S256": CERT_THUMBPRINT}
+
+        refreshed = await post_token(
+            client_app,
+            {"grant_type": "refresh_token", "refresh_token": issued.json()["refresh_token"]},
+            basic_auth=("client1", "s3cret"),
+        )
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["token_type"] == "Bearer"
+        assert _unverified_cnf(refreshed.json()["access_token"]) == {"x5t#S256": CERT_THUMBPRINT}
+
+
+async def test_introspection_of_cert_bound_token_requires_matching_thumbprint():
+    """Divergence 49: a cert-bound token introspected without a matching
+    (trusted) thumbprint header collapses to `{"active": false}` — the same
+    oracle-free shape as the DPoP `jkt` block."""
+    async with _trusting_app() as client_app:
+        issued = await post_token(
+            client_app,
+            CLIENT_CREDENTIALS,
+            basic_auth=("client1", "s3cret"),
+            headers=_cert_headers(),
+        )
+        assert issued.status_code == 200, issued.text
+        access_token = issued.json()["access_token"]
+
+        async def introspect(headers):
+            return await client_app.post(
+                "/oauth/introspect",
+                data={"token": access_token},
+                headers={
+                    "Authorization": "Basic " + base64.b64encode(b"client1:s3cret").decode(),
+                    **headers,
+                },
+            )
+
+        missing = await introspect({})
+        assert missing.status_code == 200, missing.text
+        assert missing.json()["active"] is False
+
+        mismatch = await introspect(_cert_headers(OTHER_THUMBPRINT))
+        assert mismatch.status_code == 200, mismatch.text
+        assert mismatch.json()["active"] is False
+
+        match = await introspect(_cert_headers())
+        assert match.status_code == 200, match.text
+        body = match.json()
+        assert body["active"] is True
+        assert body["cnf"] == {"x5t#S256": CERT_THUMBPRINT}
+
+
+async def test_unbound_token_introspection_unaffected():
+    async with _trusting_app() as client_app:
+        issued = await post_token(client_app, CLIENT_CREDENTIALS, basic_auth=("client1", "s3cret"))
+        assert issued.status_code == 200, issued.text
+        resp = await client_app.post(
+            "/oauth/introspect",
+            data={"token": issued.json()["access_token"]},
+            headers={"Authorization": "Basic " + base64.b64encode(b"client1:s3cret").decode()},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["active"] is True
+        assert "cnf" not in resp.json() or resp.json()["cnf"] is None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -192,6 +193,27 @@ async def introspect(request: Request) -> Response:
             return _inactive_response(request, client)
 
         if validated.jkt != jkt:
+            return _inactive_response(request, client)
+
+        cnf = claim_cnf
+
+    # Divergence 49 (RFC 8705 §3.2, security-motivated): a certificate-bound
+    # access token (`cnf["x5t#S256"]`) is ENFORCED here too — the
+    # introspection request must itself arrive over an mTLS connection whose
+    # certificate thumbprint matches. Missing and mismatched collapse to the
+    # same `{"active": false}` as the DPoP block above, so introspection is
+    # never an oracle for which certificate a token is bound to. The
+    # presented thumbprint comes from `mtls_headers`, which returns `None`
+    # unless `trust_proxy_headers` is set (divergence 47) — a forged header
+    # behind an untrusted proxy therefore reads as *missing*, not as a
+    # match. Rust omits this check entirely (it echoes `cnf` unconditionally
+    # and enforces nothing).
+    thumb = claim_cnf.get("x5t#S256") if isinstance(claim_cnf, dict) else None
+    # `isinstance` guard: `hmac.compare_digest` raises on non-str, and the
+    # claim is read from an UNVERIFIED decode.
+    if isinstance(thumb, str) and thumb:
+        presented = mtls_headers(request, config)[0]
+        if presented is None or not hmac.compare_digest(presented, thumb):
             return _inactive_response(request, client)
 
         cnf = claim_cnf

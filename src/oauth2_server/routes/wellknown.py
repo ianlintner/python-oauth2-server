@@ -30,6 +30,10 @@ _CONFIDENTIAL_AUTH_METHODS = [
     "client_secret_post",
     "client_secret_jwt",
     "private_key_jwt",
+    # RFC 8705 §3.3 — implemented in `services/clients.py` and gated on
+    # `trust_proxy_headers` (divergence 47).
+    "tls_client_auth",
+    "self_signed_tls_client_auth",
 ]
 
 # Shared between the discovery document's `scopes_supported` and the RFC
@@ -99,13 +103,11 @@ def _discovery_document(
         "response_types_supported": ["code", "code id_token"],
         "response_modes_supported": ["query", "form_post", "fragment"],
         "code_challenge_methods_supported": ["S256"],
-        "token_endpoint_auth_methods_supported": [
-            "client_secret_basic",
-            "client_secret_post",
-            "client_secret_jwt",
-            "private_key_jwt",
-            "none",
-        ],
+        "token_endpoint_auth_methods_supported": [*_CONFIDENTIAL_AUTH_METHODS, "none"],
+        # RFC 8705 §3.3: the token endpoint binds `cnf["x5t#S256"]` onto
+        # access tokens issued over mTLS, and introspection enforces it
+        # (divergence 49).
+        "tls_client_certificate_bound_access_tokens": True,
         # RFC 8414 §2: introspection/revocation accept the same client-auth
         # methods as the token endpoint, minus `none` — those endpoints
         # always require an authenticated client.
@@ -216,11 +218,7 @@ async def jwks(request: Request) -> ORJSONResponse:
 
 @router.get("/.well-known/oauth-protected-resource")
 async def protected_resource_metadata(request: Request) -> ORJSONResponse:
-    """RFC 9728 OAuth 2.0 Protected Resource Metadata.
-
-    Divergence 33: `tls_client_certificate_bound_access_tokens` is omitted —
-    mTLS (RFC 8705) is not implemented by this server.
-    """
+    """RFC 9728 OAuth 2.0 Protected Resource Metadata."""
     config = request.app.state.config
     base = config.issuer.rstrip("/")
     response = ORJSONResponse(
@@ -232,6 +230,7 @@ async def protected_resource_metadata(request: Request) -> ORJSONResponse:
             "token_introspection_endpoint": f"{base}/oauth/introspect",
             "jwks_uri": f"{base}/.well-known/jwks.json",
             "scopes_supported": SCOPES_SUPPORTED,
+            "tls_client_certificate_bound_access_tokens": True,
         }
     )
     response.headers["Cache-Control"] = "public, max-age=3600"
