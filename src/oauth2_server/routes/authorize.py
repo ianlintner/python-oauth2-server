@@ -27,9 +27,11 @@ Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
 3b. `response_mode` (read from the QUERY only, never the PAR-merged params)
    is resolved next: `query`, `fragment` or `form_post`, defaulting to
    `fragment` for the hybrid flow and `query` otherwise (OIDC Core
-   §3.3.2.3). An unsupported value is a 400 JSON `invalid_request` — a valid
-   mode is what tells us *how* to redirect, so this one error can't use the
-   redirect channel (Rust parity). From here on, `_deliver_error` shapes
+   §3.3.2.3). An unsupported value — or, divergence 46, an explicit `query`
+   on a hybrid request, which would leak the id_token into the redirect
+   URL's query string — is a 400 JSON `invalid_request`: a valid mode is what
+   tells us *how* to redirect, so these errors can't use the redirect
+   channel (Rust parity). From here on, `_deliver_error` shapes
    every error according to the resolved mode (divergence 37: Rust honors
    `form_post` only for the `login_required` case and `fragment` only inside
    its own error-redirect builder).

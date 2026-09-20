@@ -19,7 +19,13 @@ shaped by `response_mode`:
 valid mode is what tells us *how* to redirect — so an unsupported value is a
 raw 400 (`resolve_response_mode` raises `OAuthError`).
 
-Two deliberate divergences from Rust:
+Three deliberate divergences from Rust:
+- Divergence 46: `response_mode=query` is REJECTED for the hybrid
+  `response_type=code id_token` (Rust accepts it). OIDC Core §3.3.2.3: the
+  query string is not a safe channel for an id_token — it lands in browser
+  history, server access logs and the `Referer` of anything the redirect
+  target loads. `fragment` (the hybrid default) and `form_post` remain
+  allowed.
 - Divergence 38: `html_escape_attr` also escapes `'` as `&#x27;`. Rust escapes
   only `& " < >`; single-quoted attributes aren't emitted here either, but
   escaping `'` costs nothing and removes the footgun entirely.
@@ -60,8 +66,11 @@ def resolve_response_mode(requested: str | None, *, hybrid: bool) -> str:
 
     OIDC Core §3.3.2.3: hybrid flows default to `fragment`, everything else to
     `query`. Raises `OAuthError` (400 `invalid_request`) for an unsupported
-    value — this is the one post-`redirect_uri` error that cannot itself be
-    delivered through the redirect channel.
+    value, and — divergence 46 — for an explicit `query` on a hybrid request,
+    which would put the id_token in the redirect URL's query string. Mode
+    errors are the one post-`redirect_uri` error that cannot itself be
+    delivered through the redirect channel, since a valid mode is what says
+    *how* to redirect.
     """
     if requested is None:
         return "fragment" if hybrid else "query"
@@ -69,6 +78,12 @@ def resolve_response_mode(requested: str | None, *, hybrid: bool) -> str:
         raise OAuthError(
             "invalid_request",
             "Unsupported response_mode; supported values: query, form_post, fragment",
+            400,
+        )
+    if hybrid and requested == "query":
+        raise OAuthError(
+            "invalid_request",
+            "response_mode=query is not allowed for response_type=code id_token",
             400,
         )
     return requested
@@ -85,6 +100,8 @@ def success_response(
 ) -> Response:
     """Deliver a successful authorization response in `mode`."""
     if mode == "query":
+        # `query` is unreachable for a hybrid request (divergence 46), so
+        # `id_token` is always None here; listed for symmetry only.
         params = _present([("code", code), ("state", state), ("iss", iss), ("id_token", id_token)])
     else:
         params = _present([("code", code), ("iss", iss), ("state", state), ("id_token", id_token)])

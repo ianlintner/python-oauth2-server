@@ -14,6 +14,10 @@ Rust-parity behaviors pinned here:
 
 Divergence 39: hybrid REQUIRES `nonce` — a missing one is a redirect-channel
 `invalid_request` rather than Rust's silently-unauthenticated id_token.
+
+Divergence 46: hybrid REJECTS an explicit `response_mode=query` — Rust accepts
+it and hands the id_token to the redirect's query string, where it leaks into
+browser history, access logs and `Referer` (OIDC Core §3.3.2.3).
 """
 
 from __future__ import annotations
@@ -26,7 +30,9 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from oauth2_server.errors import OAuthError
 from oauth2_server.security import half_hash
+from oauth2_server.services.authorize_response import resolve_response_mode
 from tests.conftest import build_client_app
 from tests.helpers import login_session, reseed_client
 from tests.test_token_endpoint import _pkce_pair, run_code_flow
@@ -112,6 +118,38 @@ async def test_hybrid_requires_nonce(app_with_session):
     assert frag["state"] == ["xyz"]
     assert "code" not in frag
     assert "id_token" not in frag
+
+
+def test_resolve_response_mode_rejects_query_for_hybrid():
+    # Divergence 46, at the unit level.
+    with pytest.raises(OAuthError) as excinfo:
+        resolve_response_mode("query", hybrid=True)
+    assert excinfo.value.error == "invalid_request"
+    assert excinfo.value.status == 400
+    assert excinfo.value.description == (
+        "response_mode=query is not allowed for response_type=code id_token"
+    )
+    # Non-hybrid `query` is untouched, and hybrid keeps its other two modes.
+    assert resolve_response_mode("query", hybrid=False) == "query"
+    assert resolve_response_mode("fragment", hybrid=True) == "fragment"
+    assert resolve_response_mode("form_post", hybrid=True) == "form_post"
+
+
+async def test_hybrid_rejects_query_response_mode(app_with_session):
+    # Divergence 46: an explicit `response_mode=query` on a hybrid request is
+    # a raw 400 — a mode error can never use the redirect channel, and this
+    # one exists precisely to keep the id_token out of the redirect URL.
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize", params=_hybrid_params(response_mode="query", state="xyz")
+    )
+    assert resp.status_code == 400, resp.text
+    assert "location" not in resp.headers
+    body = resp.json()
+    assert body["error"] == "invalid_request"
+    assert body["error_description"] == (
+        "response_mode=query is not allowed for response_type=code id_token"
+    )
 
 
 @pytest.fixture(scope="module")

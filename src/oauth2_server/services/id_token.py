@@ -74,6 +74,9 @@ def mint_id_token(
         exp=now + config.access_token_ttl_secs,
         iat=now,
         nonce=nonce,
+        acr=acr,
+        amr=amr,
+        auth_time=auth_time,
     )
     if access_token is not None:
         claims.at_hash = half_hash(access_token)
@@ -84,7 +87,4 @@ def mint_id_token(
             claims.email = user.email
         if "profile" in scope_set:
             claims.preferred_username = user.username
-    claims.acr = acr
-    claims.amr = amr
-    claims.auth_time = auth_time
     return encode_id_token(claims, config.jwt_secret, config=config, keyset=keyset)

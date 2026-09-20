@@ -56,6 +56,13 @@ def test_resolve_response_mode_defaults_to_fragment_for_hybrid():
 @pytest.mark.parametrize("mode", ["query", "form_post", "fragment"])
 def test_resolve_response_mode_passes_through_supported_modes(mode):
     assert resolve_response_mode(mode, hybrid=False) == mode
+
+
+@pytest.mark.parametrize("mode", ["form_post", "fragment"])
+def test_resolve_response_mode_passes_through_hybrid_safe_modes(mode):
+    # Divergence 46: `query` is the one mode hybrid may not request; see
+    # `test_resolve_response_mode_rejects_query_for_hybrid` in
+    # tests/test_hybrid_flow.py.
     assert resolve_response_mode(mode, hybrid=True) == mode
 
 
