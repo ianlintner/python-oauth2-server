@@ -1,8 +1,9 @@
 """GET /oauth/authorize — RFC 6749 §4.1.1 authorization endpoint (PKCE + RFC 9207 iss).
 
 Ported from `crates/oauth2-actix/src/handlers/oauth.rs::authorize`. Supports
-`response_type=code` (authorization_code + PKCE, + RFC 9126 PAR) and the OIDC
-hybrid `response_type=code id_token` — no JAR, no implicit (`token`/`id_token`).
+`response_type=code` (authorization_code + PKCE, + RFC 9126 PAR and RFC 9101
+JAR) and the OIDC hybrid `response_type=code id_token` — no implicit
+(`token`/`id_token`).
 
 Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
 0. Any repeated query key (e.g. `?response_type=code&response_type=code`) ->
@@ -22,10 +23,23 @@ Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
    `response_type` always come from the query string.
 2. Unknown/disabled `client_id` -> 400 JSON, never redirect (redirecting would let
    an attacker exfiltrate data to an unregistered endpoint).
+2b. RFC 9700 §4.7 `require_state`: a client that opted in must carry `state`
+   on the RAW QUERY — checked before the JAR overlay (Rust parity), so a
+   `state` that exists only inside the request object does not satisfy it.
+2c. If `request` is present (read from the QUERY only — it is not a PAR merge
+   key, so a JAR pushed inside a PAR body is ignored), the RFC 9101 request
+   object is verified against the client's REGISTERED
+   `token_endpoint_auth_method` (`services/jar.py`) and its claims overlaid
+   on top of both the query string and any PAR-pushed values. Every JAR
+   failure is a 400 JSON body: this runs before `redirect_uri` validation
+   (the JAR may itself supply the `redirect_uri`), so no redirect target is
+   trusted yet. The EFFECTIVE `response_type` is validated here too, and the
+   outer check in step 4 is skipped.
 3. `redirect_uri` not an exact match against the client's registered list -> 400
    JSON, never redirect, for the same reason.
-3b. `response_mode` (read from the QUERY only, never the PAR-merged params)
-   is resolved next: `query`, `fragment` or `form_post`, defaulting to
+3b. `response_mode` (the JAR's if it supplied one, else the QUERY's — never
+   the PAR-merged params) is resolved next: `query`, `fragment` or
+   `form_post`, defaulting to
    `fragment` for the hybrid flow and `query` otherwise (OIDC Core
    §3.3.2.3). An unsupported value — or, divergence 46, an explicit `query`
    on a hybrid request, which would leak the id_token into the redirect
@@ -67,6 +81,7 @@ from oauth2_server.services.authorize_response import (
 )
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.id_token import mint_id_token
+from oauth2_server.services.jar import process_jar
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource
 from oauth2_server.sessions import current_user_id
@@ -185,9 +200,6 @@ async def authorize(request: Request):
             if key in entry.params:
                 merged[key] = entry.params[key]
 
-    redirect_uri = merged.get("redirect_uri")
-    state = merged.get("state")
-
     # --- 2. client_id must exist and be enabled — 400, never redirect ---
     client = await storage.get_client(client_id) if client_id else None
     denylist_reason = (
@@ -203,6 +215,50 @@ async def authorize(request: Request):
             )
         return _error_page(400, "invalid_client", "unknown or disabled client_id")
 
+    # --- 2b. RFC 9700 §4.7: per-client `require_state` ---
+    # Evaluated against the RAW QUERY, before the JAR overlay (Rust parity):
+    # a client that opts into this must carry `state` on the outer request
+    # too, not only inside a request object.
+    if client.require_state and params.get("state") is None:
+        return _error_page(
+            400, "invalid_request", "state parameter is required for this client (RFC 9700 §4.7)"
+        )
+
+    # --- 2c. RFC 9101 §4: verify and overlay a JAR `request` object ---
+    # Read from the QUERY only — `request` is not a PAR merge key, so a JAR
+    # smuggled into a PAR body is never processed. Placed here because the
+    # client (and hence the verification key) must already be resolved, and
+    # because every JAR failure is a 400 JSON body: it precedes the
+    # `redirect_uri` registration check, so no redirect target is trusted yet
+    # — and the JAR may itself *supply* the `redirect_uri` being checked.
+    request_jwt = params.get("request")
+    jar_response_mode: str | None = None
+    if request_jwt is not None:
+        try:
+            jar_claims = await process_jar(
+                client,
+                request_jwt,
+                authorize_url=f"{config.issuer.rstrip('/')}/oauth/authorize",
+                jwks_cache=request.app.state.jwks_cache,
+            )
+        except OAuthError as exc:
+            return _oauth_error_page(exc)
+        # JAR claims win over BOTH the query string and PAR-pushed values.
+        merged.update(jar_claims)
+        jar_response_mode = jar_claims.get("response_mode")
+        # The EFFECTIVE `response_type` (the JAR's, else the query's) is what
+        # gets validated — the outer check below is skipped whenever a JAR is
+        # present. Like every other JAR error this is a 400 JSON body.
+        if merged.get("response_type") not in _SUPPORTED_RESPONSE_TYPES:
+            return _error_page(
+                400,
+                "invalid_request",
+                "Unsupported response_type in JAR; supported values: code, code id_token",
+            )
+
+    redirect_uri = merged.get("redirect_uri")
+    state = merged.get("state")
+
     # --- 3. redirect_uri must exact-match the registered list — 400, never redirect ---
     if not redirect_uri or redirect_uri not in client.redirect_uri_list():
         return _error_page(400, "invalid_request", "redirect_uri is not registered for this client")
@@ -215,10 +271,16 @@ async def authorize(request: Request):
     # `fragment`, everything else to `query`. The response_type is only
     # *validated* below, through the redirect channel — an unsupported value
     # still resolves its mode here so that error can be delivered.
-    response_type = params.get("response_type")
+    # With a JAR present every value below is the EFFECTIVE (post-overlay)
+    # one, and the JAR's `response_mode` outranks the query's.
+    response_type = (
+        merged.get("response_type") if request_jwt is not None else params.get("response_type")
+    )
     hybrid = response_type == _HYBRID_RESPONSE_TYPE
     try:
-        response_mode = resolve_response_mode(params.get("response_mode"), hybrid=hybrid)
+        response_mode = resolve_response_mode(
+            jar_response_mode or params.get("response_mode"), hybrid=hybrid
+        )
     except OAuthError as exc:
         return _oauth_error_page(exc)
 
@@ -233,7 +295,7 @@ async def authorize(request: Request):
             config.issuer,
         )
 
-    if response_type not in _SUPPORTED_RESPONSE_TYPES:
+    if request_jwt is None and response_type not in _SUPPORTED_RESPONSE_TYPES:
         return _deliver_error(
             response_mode,
             redirect_uri,
