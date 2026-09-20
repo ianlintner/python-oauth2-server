@@ -9,7 +9,6 @@ from the Rust `validate_jwt_client_assertion` / `enforce_jti_replay` /
 
 import json
 import time
-import uuid
 
 import httpx
 import jwt
@@ -29,9 +28,12 @@ from oauth2_server.services.jwks_cache import (
     JwksCache,
     parse_cache_control_max_age,
 )
-from tests.helpers import post_token, reseed_client
-
-TOKEN_ENDPOINT = "https://auth.example.com/oauth/token"
+from tests.helpers import (
+    generate_rsa_keypair,
+    make_client_assertion,
+    post_token,
+    reseed_client,
+)
 
 # PyJWT warns (`InsecureKeyLengthWarning`, RFC 7518 §3.2) when an HMAC key is
 # shorter than 32 bytes, and the shared `seed_client` fixture's `s3cret` is 6.
@@ -50,48 +52,6 @@ async def reseed_secret_jwt_client(client_app, **overrides):
         client_secret=CLIENT_SECRET_JWT_SECRET,
         **overrides,
     )
-
-
-def make_client_assertion(
-    client_id: str,
-    key,
-    alg: str,
-    aud: str = TOKEN_ENDPOINT,
-    headers: dict | None = None,
-    **claim_overrides,
-) -> str:
-    """Build a signed RFC 7523 client assertion.
-
-    Any claim passed as `None` in `claim_overrides` is *removed* from the
-    payload, which is how the "missing jti" case below is constructed.
-    """
-    now = int(time.time())
-    claims: dict = {
-        "iss": client_id,
-        "sub": client_id,
-        "aud": aud,
-        "jti": uuid.uuid4().hex,
-        "iat": now,
-        "exp": now + 60,
-    }
-    claims.update(claim_overrides)
-    claims = {k: v for k, v in claims.items() if v is not None}
-    return jwt.encode(claims, key, algorithm=alg, headers=headers)
-
-
-def generate_rsa_keypair(kid: str = "client-key-1") -> tuple[bytes, dict]:
-    """Return `(private_key_pem, jwks_document)` for a fresh RS256 keypair."""
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
-    public_jwk = jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
-    public_jwk["kid"] = kid
-    public_jwk["use"] = "sig"
-    public_jwk["alg"] = "RS256"
-    return pem, {"keys": [public_jwk]}
 
 
 def generate_private_rsa_jwks(kid: str = "client-key-1") -> tuple[bytes, dict]:

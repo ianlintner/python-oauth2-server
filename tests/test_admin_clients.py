@@ -13,8 +13,15 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from oauth2_server.models import Token
+from oauth2_server.services.client_assertion import JWT_BEARER_ASSERTION_TYPE
 from tests.conftest import build_client_app
-from tests.helpers import login_admin, seed_admin, seed_client
+from tests.helpers import (
+    generate_rsa_keypair,
+    login_admin,
+    make_client_assertion,
+    seed_admin,
+    seed_client,
+)
 
 
 async def _login(client) -> None:
@@ -428,3 +435,204 @@ async def test_regenerate_client_secret_replaces_secret():
 
         reloaded = await client.storage.get_client("client1")
         assert reloaded.client_secret == body["client_secret"]
+
+
+# --- private_key_jwt / key material ---
+
+
+async def test_admin_created_private_key_jwt_client_authenticates_at_token_endpoint():
+    """End-to-end: a `private_key_jwt` client provisioned purely through the
+    admin API must be usable at /oauth/token with an RS256 assertion. Before
+    the admin body carried `jwks`/`jwks_uri` this was unreachable — the
+    method persisted but the key material had nowhere to go."""
+    async with build_client_app() as client:
+        await _login(client)
+        private_pem, jwks = generate_rsa_keypair()
+
+        create = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Assertion Client",
+                "client_id": "admin-pkjwt",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "grant_types": ["client_credentials"],
+                "jwks": jwks,
+            },
+        )
+        assert create.status_code == 201, create.text
+        assert create.json()["jwks"] == jwks
+
+        stored = await client.storage.get_client("admin-pkjwt")
+        assert json.loads(stored.jwks) == jwks
+        assert stored.jwks_uri == ""
+
+        assertion = make_client_assertion(
+            "admin-pkjwt", private_pem, "RS256", headers={"kid": "client-key-1"}
+        )
+        resp = await client.post(
+            "/oauth/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": "admin-pkjwt",
+                "client_assertion_type": JWT_BEARER_ASSERTION_TYPE,
+                "client_assertion": assertion,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["token_type"] == "Bearer"
+
+
+async def test_create_private_key_jwt_client_without_keys_rejected():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={"name": "Keyless", "token_endpoint_auth_method": "private_key_jwt"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "private_key_jwt requires jwks or jwks_uri",
+        }
+        assert await client.storage.get_client("Keyless") is None
+
+
+async def test_create_client_rejects_unknown_auth_method():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={"name": "Bogus", "token_endpoint_auth_method": "mtls_wishful_thinking"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_request"
+        assert "token_endpoint_auth_method" in resp.json()["error_description"]
+
+
+async def test_create_client_rejects_jwks_and_jwks_uri_together():
+    async with build_client_app() as client:
+        await _login(client)
+        _, jwks = generate_rsa_keypair()
+        resp = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Both",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "jwks": jwks,
+                "jwks_uri": "https://app.example/jwks.json",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error_description"] == "jwks and jwks_uri are mutually exclusive"
+
+
+async def test_create_client_rejects_unsafe_jwks_uri():
+    """The admin API shares the registration SSRF guard — an operator
+    account is not a reason to let the server be aimed at 169.254.169.254."""
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Metadata",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "jwks_uri": "http://169.254.169.254/latest/meta-data",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error_description"] == "jwks_uri must be an absolute https URL"
+
+
+async def test_client_detail_echoes_key_material():
+    async with build_client_app() as client:
+        await _login(client)
+        create = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Uri Client",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "jwks_uri": "https://app.example/jwks.json",
+            },
+        )
+        assert create.status_code == 201, create.text
+        assert create.json()["jwks_uri"] == "https://app.example/jwks.json"
+
+        detail = await client.get(f"/admin/api/clients/{create.json()['id']}")
+        assert detail.status_code == 200
+        assert detail.json()["jwks_uri"] == "https://app.example/jwks.json"
+        assert detail.json()["jwks"] == ""
+
+
+async def test_update_cannot_strip_keys_from_private_key_jwt_client():
+    """The rules are enforced against the MERGED row, so a partial update
+    cannot leave a `private_key_jwt` client with no way to be authenticated."""
+    async with build_client_app() as client:
+        await _login(client)
+        _, jwks = generate_rsa_keypair()
+        create = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Keyed",
+                "client_id": "admin-keyed",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "jwks": jwks,
+            },
+        )
+        client_uuid = create.json()["id"]
+
+        resp = await client.put(f"/admin/api/clients/{client_uuid}", json={"jwks": {}})
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error_description"] == "private_key_jwt requires jwks or jwks_uri"
+
+        stored = await client.storage.get_client("admin-keyed")
+        assert json.loads(stored.jwks) == jwks
+
+
+async def test_update_to_private_key_jwt_without_keys_rejected():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+        resp = await client.put(
+            f"/admin/api/clients/{seeded.id}",
+            json={"token_endpoint_auth_method": "private_key_jwt"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error_description"] == "private_key_jwt requires jwks or jwks_uri"
+
+        reloaded = await client.storage.get_client("client1")
+        assert reloaded.token_endpoint_auth_method == "client_secret_basic"
+
+
+async def test_update_can_swap_key_material_for_a_private_key_jwt_client():
+    async with build_client_app() as client:
+        await _login(client)
+        _, jwks = generate_rsa_keypair()
+        create = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Rotating",
+                "client_id": "admin-rotating",
+                "token_endpoint_auth_method": "private_key_jwt",
+                "jwks": jwks,
+            },
+        )
+        client_uuid = create.json()["id"]
+
+        _, rotated = generate_rsa_keypair(kid="client-key-2")
+        resp = await client.put(f"/admin/api/clients/{client_uuid}", json={"jwks": rotated})
+        assert resp.status_code == 200, resp.text
+
+        stored = await client.storage.get_client("admin-rotating")
+        assert json.loads(stored.jwks) == rotated
+
+
+async def test_update_rejects_unknown_auth_method():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+        resp = await client.put(
+            f"/admin/api/clients/{seeded.id}",
+            json={"token_endpoint_auth_method": "mtls_wishful_thinking"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "token_endpoint_auth_method" in resp.json()["error_description"]
