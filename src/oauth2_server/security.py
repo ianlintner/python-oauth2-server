@@ -8,8 +8,9 @@ from argon2.exceptions import VerifyMismatchError
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from oauth2_server.errors import OAuthError
 from oauth2_server.keys import KeySet, SigningKey, rsa_public_key
-from oauth2_server.models import Claims, IdTokenClaims
+from oauth2_server.models import Claims, Client, IdTokenClaims
 
 logger = logging.getLogger(__name__)
 
@@ -114,30 +115,31 @@ def encode_id_token(
 INTROSPECTION_JWT_TYP = "token-introspection+jwt"
 
 
-def encode_introspection_jwt(payload: dict, config: "Config", keyset: KeySet | None) -> str:
-    """Sign an RFC 9701 JWT-secured introspection response.
+def encode_introspection_jwt(payload: dict, *, keyset: KeySet | None, client: Client) -> str:
+    """Sign an RFC 9701 JWT-secured introspection response with a key the
+    REQUESTING CLIENT can actually verify.
 
-    Key selection follows the same rule as `encode_id_token` above
-    (divergence 11): RS256 from `keyset.current_for_alg("RS256")` — with
-    that key's `kid` in the header, so the JWT stays verifiable via JWKS
-    across rotation — when `config.id_token_alg == "RS256"` and the keyset
-    has a current RS256 key; otherwise kid-less HS256 over
-    `config.jwt_secret`.
+    Divergence 34 (security over parity): Rust signs this response with the
+    server's own `jwt_secret`, which no client holds — the signature is then
+    decorative, and a relying party cannot tell a genuine introspection
+    result from a forged one. The rule here instead follows RFC 9701 §5 and
+    the OIDC Core §10.1 symmetric-key convention:
 
-    Unlike `encode_id_token` there is no `config.id_token_private_key_pem`
-    fallback: `seed_keyset` always seeds the keyset from that PEM whenever
-    it is configured, so the only way to reach RS256-mode-without-a-keyset-
-    key is a caller that forced `id_token_alg="RS256"` with no key material
-    at all — for which raising would turn introspection into a 500, where
-    falling back to the shared-secret HS256 signature still yields a
-    verifiable response. That downgrade is logged at WARNING: an operator
-    who configured RS256 and is being served HS256 has no other signal, and
-    a relying party pinned to the JWKS would reject every response.
+    1. RS256 with `keyset.current_for_alg("RS256")` whenever the keyset has
+       one — regardless of `config.id_token_alg`, because that key's public
+       half is published in JWKS, so any client can verify it and it follows
+       key rotation via the `kid` header.
+    2. Otherwise HS256 with the requesting client's own `client_secret`
+       (OIDC Core §10.1: the symmetric signing key is the client secret).
+       Only the server and that client hold it, and `aud` is that client, so
+       the response is both verifiable and unforgeable by third parties.
+    3. A public client with no RS256 key holds no key at all. There is no
+       verifiable JWT to produce, and silently answering in JSON instead
+       would hand a JWT-negotiating caller an unauthenticated result it
+       cannot distinguish from a downgrade attack — so this raises
+       `OAuthError` and the caller turns it into a 400.
     """
-    rs256_requested = config.id_token_alg == "RS256"
-    signing_key = (
-        keyset.current_for_alg("RS256") if keyset is not None and rs256_requested else None
-    )
+    signing_key = keyset.current_for_alg("RS256") if keyset is not None else None
     if signing_key is not None:
         return jwt.encode(
             payload,
@@ -145,13 +147,17 @@ def encode_introspection_jwt(payload: dict, config: "Config", keyset: KeySet | N
             algorithm="RS256",
             headers={"typ": INTROSPECTION_JWT_TYP, "kid": signing_key.kid},
         )
-    if rs256_requested:
-        logger.warning(
-            "id_token_alg=RS256 but the keyset has no current RS256 key; "
-            "signing the introspection response with HS256 instead"
+    if client.client_secret:
+        return jwt.encode(
+            payload,
+            client.client_secret,
+            algorithm="HS256",
+            headers={"typ": INTROSPECTION_JWT_TYP},
         )
-    return jwt.encode(
-        payload, config.jwt_secret, algorithm="HS256", headers={"typ": INTROSPECTION_JWT_TYP}
+    raise OAuthError(
+        "invalid_request",
+        "JWT introspection responses require an RS256 signing key for public clients",
+        400,
     )
 
 

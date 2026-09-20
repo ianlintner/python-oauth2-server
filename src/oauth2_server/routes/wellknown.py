@@ -105,6 +105,11 @@ def _discovery_document(issuer: str, id_token_alg: str, rar_types_supported: lis
         "prompt_values_supported": ["none", "login", "consent", "select_account"],
         "scopes_supported": SCOPES_SUPPORTED,
         "subject_types_supported": ["public"],
+        # RFC 9701 §7: the algorithms a JWT-secured introspection response
+        # may be signed with. RS256 (the JWKS-published keyset key) when the
+        # server has one, else HS256 under the requesting client's own
+        # secret — see `security.py::encode_introspection_jwt`.
+        "introspection_signing_alg_values_supported": ["RS256", "HS256"],
         "id_token_signing_alg_values_supported": (
             ["RS256"] if id_token_alg == "RS256" else ["HS256"]
         ),

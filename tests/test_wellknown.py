@@ -265,3 +265,11 @@ async def test_userinfo_includes_iss_and_aud(client_app):
     assert body["iss"] == "https://auth.example.com"
     assert body["aud"] == "client1"
     assert body["sub"] == "u1"
+
+
+async def test_discovery_advertises_introspection_signing_algs(client_app):
+    """RFC 9701 §7: a client that may negotiate a JWT-secured introspection
+    response needs to know which algorithms it must be able to verify."""
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    assert resp.json()["introspection_signing_alg_values_supported"] == ["RS256", "HS256"]

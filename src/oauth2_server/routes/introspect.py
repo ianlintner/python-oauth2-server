@@ -69,6 +69,11 @@ def _introspection_response(request: Request, body: dict, client: Client) -> Res
 
     Client-authentication failures (`invalid_client`) are NOT results and
     stay JSON: at that point there is no authenticated `aud` to sign for.
+
+    A public client asking for the JWT format when the server has no RS256
+    key gets a 400 rather than a JSON body: `encode_introspection_jwt` has
+    no key such a client could verify, and quietly answering in the other
+    media type would be an unauthenticated downgrade.
     """
     if INTROSPECTION_JWT_MEDIA_TYPE in request.headers.get("accept", ""):
         config = request.app.state.config
@@ -78,8 +83,14 @@ def _introspection_response(request: Request, body: dict, client: Client) -> Res
             "iat": int(datetime.now(timezone.utc).timestamp()),
             "token_introspection": body,
         }
+        try:
+            signed = encode_introspection_jwt(
+                payload, keyset=request.app.state.keyset, client=client
+            )
+        except OAuthError as exc:
+            return oauth_error(exc.error, exc.description, exc.status)
         response: Response = Response(
-            content=encode_introspection_jwt(payload, config, request.app.state.keyset),
+            content=signed,
             media_type=INTROSPECTION_JWT_MEDIA_TYPE,
         )
     else:
