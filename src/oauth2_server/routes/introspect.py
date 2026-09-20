@@ -59,7 +59,7 @@ async def introspect(request: Request) -> ORJSONResponse:
     event_bus = request.app.state.event_bus
 
     try:
-        client = await ClientService(storage, event_bus).authenticate(
+        client = await ClientService.from_app(request.app.state).authenticate(
             form, request.headers.get("authorization")
         )
     except OAuthError as exc:
@@ -188,7 +188,7 @@ async def revoke(request: Request) -> ORJSONResponse:
     event_bus = request.app.state.event_bus
 
     try:
-        client = await ClientService(storage, event_bus).authenticate(
+        client = await ClientService.from_app(request.app.state).authenticate(
             form, request.headers.get("authorization")
         )
     except OAuthError as exc:

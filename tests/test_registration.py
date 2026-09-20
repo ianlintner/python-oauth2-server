@@ -108,7 +108,7 @@ async def test_invalid_auth_method_rejected(client):
         "/connect/register",
         json={
             "redirect_uris": ["https://app.example/cb"],
-            "token_endpoint_auth_method": "private_key_jwt",
+            "token_endpoint_auth_method": "bogus_method",
         },
     )
     assert resp.status_code == 400

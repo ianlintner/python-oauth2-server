@@ -58,7 +58,7 @@ async def device_authorization(request: Request) -> ORJSONResponse:
     config = request.app.state.config
 
     try:
-        client = await ClientService(storage, request.app.state.event_bus).authenticate(
+        client = await ClientService.from_app(request.app.state).authenticate(
             form, request.headers.get("authorization")
         )
     except OAuthError as exc:

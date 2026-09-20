@@ -22,6 +22,16 @@ from oauth2_server.security import decode_access_token
 
 router = APIRouter()
 
+# Client-authentication methods the introspection and revocation endpoints
+# accept — the token endpoint's list minus `none`, since neither endpoint
+# is reachable by an unauthenticated (public) client.
+_CONFIDENTIAL_AUTH_METHODS = [
+    "client_secret_basic",
+    "client_secret_post",
+    "client_secret_jwt",
+    "private_key_jwt",
+]
+
 
 def _discovery_document(issuer: str, id_token_alg: str, rar_types_supported: list[str]) -> dict:
     base = issuer.rstrip("/")
@@ -60,8 +70,15 @@ def _discovery_document(issuer: str, id_token_alg: str, rar_types_supported: lis
         "token_endpoint_auth_methods_supported": [
             "client_secret_basic",
             "client_secret_post",
+            "client_secret_jwt",
+            "private_key_jwt",
             "none",
         ],
+        # RFC 8414 §2: introspection/revocation accept the same client-auth
+        # methods as the token endpoint, minus `none` — those endpoints
+        # always require an authenticated client.
+        "introspection_endpoint_auth_methods_supported": list(_CONFIDENTIAL_AUTH_METHODS),
+        "revocation_endpoint_auth_methods_supported": list(_CONFIDENTIAL_AUTH_METHODS),
         "authorization_response_iss_parameter_supported": True,
         "prompt_values_supported": ["none", "login", "consent", "select_account"],
         "scopes_supported": ["openid", "profile", "email", "read", "write", "admin"],

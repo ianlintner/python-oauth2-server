@@ -50,6 +50,7 @@ from oauth2_server.keys import KeySet
 from oauth2_server.models import Client, IdTokenClaims, User
 from oauth2_server.security import encode_id_token
 from oauth2_server.services.auth import scope_is_subset
+from oauth2_server.services.client_assertion import unverified_assertion_subject
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.dpop import (
     DpopError,
@@ -84,6 +85,10 @@ def _extract_client_id_for_penalty(form: dict, authorization_header: str | None)
     over the form) WITHOUT re-raising on a malformed header — this only
     needs a bucket key, not a validated credential, so a decode failure
     just means "no key, skip the penalty" rather than another error path.
+
+    The RFC 7523 `client_assertion` fallback mirrors divergence 36 in
+    `authenticate` — a JWT-authenticated client may omit `client_id`
+    entirely, and without this its failures would land in no bucket at all.
     """
     if authorization_header and authorization_header.lower().startswith("basic "):
         encoded = authorization_header[len("Basic ") :].strip()
@@ -95,7 +100,12 @@ def _extract_client_id_for_penalty(form: dict, authorization_header: str | None)
             raw_client_id, _, _ = decoded.partition(":")
             return unquote_plus(raw_client_id) or None
     client_id = form.get("client_id")
-    return client_id or None
+    if client_id:
+        return client_id
+    assertion = form.get("client_assertion")
+    if isinstance(assertion, str):
+        return unverified_assertion_subject(assertion)
+    return None
 
 
 def _invalid_client_response(
@@ -242,7 +252,7 @@ async def token(request: Request) -> ORJSONResponse:
     event_bus = request.app.state.event_bus
 
     try:
-        client = await ClientService(storage, event_bus).authenticate(
+        client = await ClientService.from_app(request.app.state).authenticate(
             form, request.headers.get("authorization")
         )
     except OAuthError as exc:

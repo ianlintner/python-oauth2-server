@@ -17,7 +17,13 @@ from oauth2_server.services.events_bus import emit_event
 
 router = APIRouter()
 
-_VALID_AUTH_METHODS = {"client_secret_basic", "client_secret_post", "none"}
+_VALID_AUTH_METHODS = {
+    "client_secret_basic",
+    "client_secret_post",
+    "client_secret_jwt",
+    "private_key_jwt",
+    "none",
+}
 
 
 def _registration_error(description: str) -> ORJSONResponse:
@@ -85,6 +91,18 @@ async def register_client(request: Request) -> ORJSONResponse:
             f"token_endpoint_auth_method must be one of {sorted(_VALID_AUTH_METHODS)}"
         )
 
+    # RFC 7523 §3 / RFC 7591 §2: a private_key_jwt client's assertions can
+    # only ever be verified against a registered key set.
+    if (
+        reg.token_endpoint_auth_method == "private_key_jwt"
+        and reg.jwks is None
+        and not reg.jwks_uri
+    ):
+        return _registration_error("private_key_jwt requires jwks or jwks_uri")
+
+    if reg.jwks is not None and reg.jwks_uri:
+        return _registration_error("jwks and jwks_uri are mutually exclusive")
+
     is_public = reg.token_endpoint_auth_method == "none"
     if is_public and "client_credentials" in reg.grant_types:
         return _registration_error(
@@ -116,6 +134,8 @@ async def register_client(request: Request) -> ORJSONResponse:
         frontchannel_logout_uri=reg.frontchannel_logout_uri or "",
         frontchannel_logout_session_required=reg.frontchannel_logout_session_required,
         post_logout_redirect_uris=json.dumps(reg.post_logout_redirect_uris),
+        jwks=json.dumps(reg.jwks) if reg.jwks else "",
+        jwks_uri=reg.jwks_uri or "",
         enabled=True,
     )
     await storage.save_client(client)
@@ -139,6 +159,8 @@ async def register_client(request: Request) -> ORJSONResponse:
         token_endpoint_auth_method=reg.token_endpoint_auth_method,
         client_name=reg.client_name,
         scope=reg.scope,
+        jwks=reg.jwks,
+        jwks_uri=reg.jwks_uri,
         backchannel_logout_uri=reg.backchannel_logout_uri,
         backchannel_logout_session_required=reg.backchannel_logout_session_required,
         frontchannel_logout_uri=reg.frontchannel_logout_uri,

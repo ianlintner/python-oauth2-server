@@ -352,6 +352,10 @@ class ClientRegistrationResponse(BaseModel):
     token_endpoint_auth_method: str
     client_name: str = ""
     scope: str = ""
+    # RFC 7591 §3.2.1: echoed back only when the client registered them
+    # (`model_dump(exclude_none=True)` drops them otherwise).
+    jwks: dict | None = None
+    jwks_uri: str | None = None
     backchannel_logout_uri: str | None = None
     backchannel_logout_session_required: bool = False
     frontchannel_logout_uri: str | None = None

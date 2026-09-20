@@ -11,12 +11,24 @@ from urllib.parse import unquote_plus
 from oauth2_server.errors import OAuthError
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import Client
+from oauth2_server.services.client_assertion import (
+    JWT_BEARER_ASSERTION_TYPE,
+    JtiReplayGuard,
+    unverified_assertion_subject,
+    validate_client_assertion,
+)
 from oauth2_server.services.events_bus import EventBus, emit_event
+from oauth2_server.services.jwks_cache import JwksCache, resolve_client_jwks
 from oauth2_server.storage.base import Storage
 
 logger = logging.getLogger(__name__)
 
 _UNKNOWN_OR_DISABLED_CLIENT_MESSAGE = "unknown or disabled client"
+
+# RFC 7523 §3 auth methods, dispatched on the client's REGISTERED
+# `token_endpoint_auth_method` — never on what the request happens to
+# present, so a JWT client cannot fall back to `client_secret_basic`.
+_JWT_AUTH_METHODS = frozenset({"client_secret_jwt", "private_key_jwt"})
 
 
 def _secrets_equal(a: str, b: str) -> bool:
@@ -36,9 +48,39 @@ def _secrets_equal(a: str, b: str) -> bool:
 
 
 class ClientService:
-    def __init__(self, storage: Storage, event_bus: EventBus | None = None):
+    def __init__(
+        self,
+        storage: Storage,
+        event_bus: EventBus | None = None,
+        *,
+        issuer: str | None = None,
+        jwks_cache: JwksCache | None = None,
+        jti_guard: JtiReplayGuard | None = None,
+    ):
         self._storage = storage
         self._event_bus = event_bus
+        self._issuer = issuer
+        self._jwks_cache = jwks_cache
+        self._jti_guard = jti_guard
+
+    @classmethod
+    def from_app(cls, state) -> ClientService:
+        """Build a fully-wired service from `request.app.state`.
+
+        Every route that authenticates a client goes through this so the
+        RFC 7523 pieces (issuer, shared `JwksCache`, shared
+        `JtiReplayGuard`) are never accidentally left unwired — a service
+        built with the plain two-argument constructor still works for
+        secret-based auth but rejects JWT methods outright (see
+        `_authenticate_jwt`).
+        """
+        return cls(
+            state.storage,
+            state.event_bus,
+            issuer=state.config.issuer,
+            jwks_cache=state.jwks_cache,
+            jti_guard=state.jti_guard,
+        )
 
     def _emit_client_validated(self, client_id: str, success: bool) -> None:
         # `client_validated` (research doc `key_behaviors` EVENT TYPES:
@@ -70,6 +112,15 @@ class ClientService:
             client_secret = form_client_secret
 
         if not client_id:
+            # Divergence 36 (deliberate): a form carrying `client_assertion`
+            # but no `client_id` resolves the client from the assertion's
+            # UNVERIFIED `sub`. That only picks which client row to load —
+            # `validate_client_assertion` still re-checks the verified
+            # `iss`/`sub` against that row's `client_id` before the request
+            # is authenticated.
+            client_id = unverified_assertion_subject(request_form.get("client_assertion") or "")
+
+        if not client_id:
             raise OAuthError("invalid_client", "missing client_id")
 
         client = await self._storage.get_client(client_id)
@@ -96,11 +147,50 @@ class ClientService:
             self._emit_client_validated(client.client_id, success=True)
             return client
 
+        if client.token_endpoint_auth_method in _JWT_AUTH_METHODS:
+            await self._authenticate_jwt(client, request_form)
+            return client
+
         if not client_secret or not _secrets_equal(client_secret, client.client_secret):
             self._emit_client_validated(client.client_id, success=False)
             raise OAuthError("invalid_client", "invalid client secret")
         self._emit_client_validated(client.client_id, success=True)
         return client
+
+    async def _authenticate_jwt(self, client: Client, request_form: dict) -> None:
+        """RFC 7523 §3 client authentication for a client registered with
+        `client_secret_jwt` or `private_key_jwt`.
+
+        No `client_validated` event is emitted here: Rust raises that event
+        only from the secret-comparison path (`client_actor.rs`
+        `ValidateClient`), and `_emit_client_validated`'s contract is
+        deliberately scoped to that same outcome.
+        """
+        if self._issuer is None or self._jti_guard is None:
+            raise OAuthError("invalid_client", "Client is not configured for JWT authentication")
+
+        assertion_type = request_form.get("client_assertion_type")
+        if not assertion_type:
+            raise OAuthError("invalid_client", "Missing client_assertion_type")
+        if assertion_type != JWT_BEARER_ASSERTION_TYPE:
+            raise OAuthError("invalid_client", "Unsupported client_assertion_type")
+
+        assertion = request_form.get("client_assertion")
+        if not assertion:
+            raise OAuthError("invalid_client", "Missing client_assertion")
+
+        jwks = await resolve_client_jwks(client, self._jwks_cache)
+        validate_client_assertion(
+            client,
+            assertion,
+            # RFC 7523 §3 / Rust parity: the expected `aud` is the TOKEN
+            # endpoint URL at EVERY endpoint that authenticates a client
+            # this way (introspect, revoke, PAR, device authorization
+            # included), not the URL of the endpoint being called.
+            self._issuer.rstrip("/") + "/oauth/token",
+            jwks=jwks,
+            guard=self._jti_guard,
+        )
 
 
 def _parse_basic_auth(authorization_header: str | None) -> tuple[str, str] | None:
