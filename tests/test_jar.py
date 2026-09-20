@@ -638,6 +638,90 @@ async def test_jar_unsupported_response_type_is_rejected(client_app):
     )
 
 
+async def test_jar_unregistered_redirect_uri_is_still_rejected(client_app):
+    """The overlay runs BEFORE the registration check precisely so a JAR
+    cannot smuggle in an unregistered callback: a signed request object is
+    authentic, not authorized."""
+    await login_session(client_app)
+    _, challenge = _pkce_pair()
+    jar = make_hs256_jar(
+        _signed_claims(
+            "client1",
+            redirect_uri="https://evil.example/cb",
+            code_challenge=challenge,
+            code_challenge_method="S256",
+        ),
+        "s3cret",
+    )
+    resp = await _authorize(
+        client_app,
+        response_type="code",
+        client_id="client1",
+        redirect_uri=REDIRECT_URI,
+        request=jar,
+    )
+    assert resp.status_code == 400
+    assert "location" not in resp.headers
+    body = resp.json()
+    assert body["error"] == "invalid_request"
+    assert body["error_description"] == "redirect_uri is not registered for this client"
+
+
+async def test_jar_prompt_and_max_age_claims_are_inert(client_app):
+    """`prompt` and `max_age` are not overlay keys — they are read from the
+    raw query only, so a JAR cannot force an authenticated user back through
+    the login UI (nor, conversely, suppress a re-auth the query asked for)."""
+    await login_session(client_app)
+    _, challenge = _pkce_pair()
+    jar = make_hs256_jar(
+        _signed_claims(
+            "client1",
+            prompt="login",
+            max_age="0",
+            code_challenge=challenge,
+            code_challenge_method="S256",
+        ),
+        "s3cret",
+    )
+    resp = await _authorize(
+        client_app,
+        response_type="code",
+        client_id="client1",
+        redirect_uri=REDIRECT_URI,
+        request=jar,
+    )
+    assert resp.status_code == 302, resp.text
+    location = resp.headers["location"]
+    assert location != "/auth/login"
+    assert "code" in _query(location)
+
+
+async def test_jar_request_uri_claim_is_inert(client_app):
+    """`request_uri` is not an overlay key either: a PAR reference inside a
+    request object triggers no lookup, so an unknown one cannot turn a valid
+    request into `Unknown or expired request_uri`."""
+    await login_session(client_app)
+    _, challenge = _pkce_pair()
+    jar = make_hs256_jar(
+        _signed_claims(
+            "client1",
+            request_uri="urn:ietf:params:oauth:request-uri:does-not-exist",
+            code_challenge=challenge,
+            code_challenge_method="S256",
+        ),
+        "s3cret",
+    )
+    resp = await _authorize(
+        client_app,
+        response_type="code",
+        client_id="client1",
+        redirect_uri=REDIRECT_URI,
+        request=jar,
+    )
+    assert resp.status_code == 302, resp.text
+    assert "code" in _query(resp.headers["location"])
+
+
 # --- PAR interaction ----------------------------------------------------------
 
 

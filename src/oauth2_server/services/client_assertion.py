@@ -218,10 +218,6 @@ def rsa_key_from_jwks(
     return key
 
 
-# Pre-Phase-4b name, kept as an alias for any out-of-tree caller.
-_rsa_key_from_jwks = rsa_key_from_jwks
-
-
 def _enforce_jti_replay(client_id: str, claims: dict, guard: JtiReplayGuard) -> None:
     """RFC 7523 §3 / RFC 9700 §2.5: record the validated assertion's `jti`
     against the client, rejecting a pair already seen in its window.
