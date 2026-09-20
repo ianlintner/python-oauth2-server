@@ -298,8 +298,8 @@ following holds, and falls back to provisioning a new account otherwise:
 4. The matched account is **not privileged**: its role is not `admin` and its address is not in
    `OAUTH2_ADMIN_EMAILS`.
 5. The matched account is **enabled**. A disabled local row is refused outright rather than
-   revived through a social callback (and linking does not fall back to provisioning a fresh
-   account in that case).
+   revived through a social callback (the disabled row is never reused; the callback provisions a separate
+   `provider:id` account instead).
 
 Leave it off unless every provider you have configured is one whose email verification you trust
 for the accounts in your user table.
