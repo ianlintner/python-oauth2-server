@@ -45,6 +45,7 @@ from oauth2_server.services.social import (
     OAUTH_PROVIDERS,
     STUB_PROVIDERS,
     ProviderError,
+    SocialUserInfo,
     build_authorize_url,
     exchange_code,
     fetch_userinfo,
@@ -124,7 +125,7 @@ def _fold_email(email: str) -> str:
     return email.strip().casefold()
 
 
-async def _link_by_verified_email(config, storage, userinfo) -> User | None:
+async def _link_by_verified_email(config, storage, userinfo: SocialUserInfo) -> User | None:
     """The existing local user this social login may be linked to, or
     `None` to provision a fresh `provider:id` account as before
     (divergence 56).
@@ -167,7 +168,14 @@ async def _link_by_verified_email(config, storage, userinfo) -> User | None:
             )
         return None
     candidate = candidates[0]
-    if candidate.role == "admin" or folded in config.admin_emails:
+    # Both normalizations are checked against `admin_emails`: `casefold()`
+    # is the strictly-safer Unicode form, while `lower()` is exactly what
+    # `routes/admin/guard.py` will apply to `session["email"]` (i.e. to
+    # this row's address) when deciding whether the session is an admin —
+    # a row that the guard would treat as admin must never be linkable,
+    # even where the two normalizations disagree.
+    lowered = candidate.email.strip().lower()
+    if candidate.role == "admin" or folded in config.admin_emails or lowered in config.admin_emails:
         logger.warning("refusing to link social login to privileged account %r", candidate.username)
         return None
     return candidate
@@ -233,7 +241,6 @@ async def social_callback(provider: str, request: Request):
     await breaker.record_success()
 
     storage = request.app.state.storage
-    config = request.app.state.config
     username = f"{provider}:{userinfo.provider_user_id}"
     user = await storage.get_user_by_username(username)
     if user is None:
