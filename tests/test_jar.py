@@ -1016,3 +1016,32 @@ async def test_require_state_client_with_query_state_succeeds(client_app):
         code_challenge_method="S256",
     )
     assert resp.status_code == 302, resp.text
+
+
+async def test_claims_request_from_jar_stored(client_app):
+    await login_session(client_app)
+    _, challenge = _pkce_pair()
+    claims = {"userinfo": {"email": {"essential": True}}}
+    jar = make_hs256_jar(
+        _signed_claims(
+            "client1",
+            redirect_uri=REDIRECT_URI,
+            code_challenge=challenge,
+            code_challenge_method="S256",
+            claims=json.dumps(claims),
+        ),
+        "s3cret",
+    )
+    resp = await _authorize(
+        client_app,
+        response_type="code",
+        client_id="client1",
+        redirect_uri=REDIRECT_URI,
+        scope="read",
+        request=jar,
+    )
+    assert resp.status_code == 302, resp.text
+    code = _query(resp.headers["location"])["code"][0]
+
+    stored = await client_app.storage.get_authorization_code(code)
+    assert stored.claims_request == json.dumps(claims)

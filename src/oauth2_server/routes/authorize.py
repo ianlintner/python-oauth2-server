@@ -68,6 +68,7 @@ Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from urllib.parse import parse_qsl, urlencode
@@ -397,6 +398,28 @@ async def authorize(request: Request):
             response_mode, redirect_uri, exc.error, exc.description, state, config.issuer
         )
 
+    # OIDC Core §5.5 / divergence 44: `claims` (query param, or the PAR-merged
+    # or JAR-overlaid value) must parse as a JSON *object* — an array,
+    # string, number or malformed JSON is an `invalid_request` redirect. The
+    # raw string (not the parsed dict) is what gets stored on the
+    # authorization code below; nothing downstream reads it yet, and
+    # `claims_parameter_supported` is deliberately not advertised.
+    claims_request = merged.get("claims")
+    if claims_request is not None:
+        try:
+            parsed_claims = json.loads(claims_request)
+        except json.JSONDecodeError:
+            parsed_claims = None
+        if not isinstance(parsed_claims, dict):
+            return _deliver_error(
+                response_mode,
+                redirect_uri,
+                "invalid_request",
+                "claims must be a JSON object",
+                state,
+                config.issuer,
+            )
+
     # --- 5. Require an authenticated session ---
     # OIDC Core §3.1.2.1: `prompt` is a space-delimited list of values.
     prompt_values = (params.get("prompt") or "").split()
@@ -488,6 +511,7 @@ async def authorize(request: Request):
         nonce=nonce,
         authorization_details=authorization_details,
         resource=resource,
+        claims_request=claims_request,
     )
     request.app.state.metrics.oauth_authorization_codes_issued.inc()
     emit_event(

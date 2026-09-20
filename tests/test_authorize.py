@@ -1,3 +1,4 @@
+import json
 import secrets
 from urllib.parse import parse_qs, urlparse
 
@@ -211,3 +212,54 @@ async def test_authorize_requires_authorization_code_grant(app_with_session):
     assert q["error"] == ["unauthorized_client"]
     assert q["state"] == ["xyz"]
     assert "iss" in q
+
+
+# --- OIDC Core §5.5 `claims` request parameter (divergence 44) ---------------
+
+
+async def test_claims_request_stored_on_code(app_with_session):
+    claims = {"userinfo": {"email": {"essential": True}}}
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "claims": json.dumps(claims),
+        },
+    )
+    assert resp.status_code == 302, resp.text
+    q = parse_qs(urlparse(resp.headers["location"]).query)
+    code = q["code"][0]
+
+    stored = await app_with_session.storage.get_authorization_code(code)
+    assert stored.claims_request == json.dumps(claims)
+
+
+async def test_malformed_claims_rejected_via_redirect(app_with_session):
+    await login_session(app_with_session)
+
+    for bad_claims in (
+        "not-json{",
+        json.dumps(["not", "an", "object"]),
+        json.dumps("a string"),
+        "42",
+    ):
+        resp = await app_with_session.get(
+            "/oauth/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "client1",
+                "redirect_uri": "https://a.example/cb",
+                "scope": "read",
+                "claims": bad_claims,
+                "state": "xyz",
+            },
+        )
+        assert resp.status_code == 302, resp.text
+        q = parse_qs(urlparse(resp.headers["location"]).query)
+        assert q["error"] == ["invalid_request"]
+        assert q["error_description"] == ["claims must be a JSON object"]
+        assert q["state"] == ["xyz"]
