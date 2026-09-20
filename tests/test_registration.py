@@ -222,3 +222,55 @@ async def test_client_registration_includes_logout_fields(client):
     assert body["frontchannel_logout_uri"] == "https://app.example/fc-logout"
     assert body["frontchannel_logout_session_required"] is True
     assert body["post_logout_redirect_uris"] == ["https://app.example/logged-out"]
+
+
+# --- RFC 8705 mTLS client authentication ---
+
+
+async def test_registration_accepts_tls_client_auth_with_subject_dn(client):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "token_endpoint_auth_method": "tls_client_auth",
+            "tls_client_certificate_subject_dn": "CN=svc,O=Example",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["token_endpoint_auth_method"] == "tls_client_auth"
+    assert body["tls_client_certificate_subject_dn"] == "CN=svc,O=Example"
+
+    stored = await client.storage.get_client(body["client_id"])
+    assert stored.tls_client_certificate_subject_dn == "CN=svc,O=Example"
+
+
+async def test_registration_self_signed_requires_jwks(client):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "token_endpoint_auth_method": "self_signed_tls_client_auth",
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json() == {
+        "error": "invalid_client_metadata",
+        "error_description": "self_signed_tls_client_auth requires jwks or jwks_uri",
+    }
+
+
+async def test_registration_self_signed_with_jwks_succeeds(client):
+    jwks = {"keys": [{"kty": "RSA", "n": "abc", "e": "AQAB", "x5t#S256": "thumb"}]}
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "token_endpoint_auth_method": "self_signed_tls_client_auth",
+            "jwks": jwks,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["jwks"] == jwks
+    # Not registered, so not echoed (RFC 7591 §3.2.1).
+    assert "tls_client_certificate_subject_dn" not in resp.json()

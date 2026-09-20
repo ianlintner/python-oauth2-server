@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from oauth2_server.models import Client, ClientRegistration, ClientRegistrationResponse
 from oauth2_server.services.clients import (
     JWKS_URI_ERROR,
+    SELF_SIGNED_REQUIRES_JWKS_ERROR,
     VALID_AUTH_METHODS,
     is_valid_jwks_uri,
     is_valid_redirect_uri,
@@ -95,6 +96,17 @@ async def register_client(request: Request) -> ORJSONResponse:
     ):
         return _registration_error("private_key_jwt requires jwks or jwks_uri")
 
+    # RFC 8705 §2.2 (divergence 48): a self-signed-certificate client is
+    # authenticated by matching the certificate thumbprint against a
+    # registered JWK's `x5t#S256`, so registering the method without any key
+    # material would leave the client permanently unauthenticatable.
+    if (
+        reg.token_endpoint_auth_method == "self_signed_tls_client_auth"
+        and reg.jwks is None
+        and not reg.jwks_uri
+    ):
+        return _registration_error(SELF_SIGNED_REQUIRES_JWKS_ERROR)
+
     if reg.jwks is not None and reg.jwks_uri:
         return _registration_error("jwks and jwks_uri are mutually exclusive")
 
@@ -137,6 +149,7 @@ async def register_client(request: Request) -> ORJSONResponse:
         post_logout_redirect_uris=json.dumps(reg.post_logout_redirect_uris),
         jwks=json.dumps(reg.jwks) if reg.jwks else "",
         jwks_uri=reg.jwks_uri or "",
+        tls_client_certificate_subject_dn=reg.tls_client_certificate_subject_dn or "",
         enabled=True,
     )
     await storage.save_client(client)
@@ -162,6 +175,7 @@ async def register_client(request: Request) -> ORJSONResponse:
         scope=reg.scope,
         jwks=reg.jwks,
         jwks_uri=reg.jwks_uri,
+        tls_client_certificate_subject_dn=reg.tls_client_certificate_subject_dn,
         backchannel_logout_uri=reg.backchannel_logout_uri,
         backchannel_logout_session_required=reg.backchannel_logout_session_required,
         frontchannel_logout_uri=reg.frontchannel_logout_uri,

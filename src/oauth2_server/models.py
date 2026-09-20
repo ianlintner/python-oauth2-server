@@ -310,6 +310,10 @@ class ClientRegistration(BaseModel):
     tos_uri: str | None = None
     jwks: dict | None = None
     jwks_uri: str | None = None
+    # RFC 8705 §2.1.2: the expected certificate Subject DN for a
+    # `tls_client_auth` client. Persisted to the existing
+    # `Client.tls_client_certificate_subject_dn` column.
+    tls_client_certificate_subject_dn: str | None = None
     backchannel_logout_uri: str | None = None
     backchannel_logout_session_required: bool = False
     frontchannel_logout_uri: str | None = None
@@ -365,6 +369,7 @@ class ClientRegistrationResponse(BaseModel):
     # (`model_dump(exclude_none=True)` drops them otherwise).
     jwks: dict | None = None
     jwks_uri: str | None = None
+    tls_client_certificate_subject_dn: str | None = None
     backchannel_logout_uri: str | None = None
     backchannel_logout_session_required: bool = False
     frontchannel_logout_uri: str | None = None

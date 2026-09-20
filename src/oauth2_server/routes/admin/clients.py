@@ -32,7 +32,12 @@ from oauth2_server.models import Client
 from oauth2_server.routes.admin._util import _json_body, _parse_body
 from oauth2_server.routes.admin.guard import AdminActor, require_admin
 from oauth2_server.services.audit import build_audit, record_audit
-from oauth2_server.services.clients import JWKS_URI_ERROR, VALID_AUTH_METHODS, is_valid_jwks_uri
+from oauth2_server.services.clients import (
+    JWKS_URI_ERROR,
+    SELF_SIGNED_REQUIRES_JWKS_ERROR,
+    VALID_AUTH_METHODS,
+    is_valid_jwks_uri,
+)
 from oauth2_server.storage.paging import ListQuery, page_envelope
 
 router = APIRouter()
@@ -65,6 +70,10 @@ class ClientUpdateBody(BaseModel):
     # assertions against.
     jwks: dict | None = None
     jwks_uri: StrictStr | None = None
+    # RFC 8705 §2.1.2 expected certificate Subject DN; "" clears it, which
+    # makes a `tls_client_auth` client accept any certificate the proxy
+    # vouched for (see `services/clients.py::_authenticate_tls_client_auth`).
+    tls_client_certificate_subject_dn: StrictStr | None = None
 
 
 def _client_not_found() -> ORJSONResponse:
@@ -97,6 +106,8 @@ def _validate_key_material(
         return _bad_request(JWKS_URI_ERROR)
     if auth_method == "private_key_jwt" and not jwks_json and not jwks_uri:
         return _bad_request("private_key_jwt requires jwks or jwks_uri")
+    if auth_method == "self_signed_tls_client_auth" and not jwks_json and not jwks_uri:
+        return _bad_request(SELF_SIGNED_REQUIRES_JWKS_ERROR)
     return None
 
 
@@ -138,6 +149,7 @@ def _client_detail(client: Client) -> dict:
         "tos_uri": client.tos_uri,
         "jwks": client.jwks,
         "jwks_uri": client.jwks_uri,
+        "tls_client_certificate_subject_dn": client.tls_client_certificate_subject_dn,
         "created_at": client.created_at.isoformat(),
         "updated_at": client.updated_at.isoformat(),
     }
@@ -202,6 +214,10 @@ async def create_client(
         return _bad_request("jwks_uri must be a string")
     jwks_json = json.dumps(jwks) if jwks else ""
 
+    subject_dn = body.get("tls_client_certificate_subject_dn") or ""
+    if not isinstance(subject_dn, str):
+        return _bad_request("tls_client_certificate_subject_dn must be a string")
+
     invalid = _validate_key_material(auth_method, jwks_json, jwks_uri)
     if invalid is not None:
         return invalid
@@ -227,6 +243,7 @@ async def create_client(
         token_endpoint_auth_method=auth_method,
         jwks=jwks_json,
         jwks_uri=jwks_uri,
+        tls_client_certificate_subject_dn=subject_dn,
         enabled=True,
     )
     await storage.save_client(client)
@@ -256,6 +273,7 @@ async def create_client(
             "token_endpoint_auth_method": auth_method,
             "jwks": jwks,
             "jwks_uri": jwks_uri,
+            "tls_client_certificate_subject_dn": subject_dn,
             "enabled": True,
             "created_at": now.isoformat(),
         },
@@ -304,6 +322,8 @@ async def update_client(
         updates["jwks"] = json.dumps(body_model.jwks) if body_model.jwks else ""
     if "jwks_uri" in fields_set:
         updates["jwks_uri"] = body_model.jwks_uri
+    if "tls_client_certificate_subject_dn" in fields_set:
+        updates["tls_client_certificate_subject_dn"] = body_model.tls_client_certificate_subject_dn
 
     # Validate the row as it would be AFTER the merge, so a partial update
     # cannot combine with the stored values into an unusable client.

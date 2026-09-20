@@ -636,3 +636,68 @@ async def test_update_rejects_unknown_auth_method():
         )
         assert resp.status_code == 400, resp.text
         assert "token_endpoint_auth_method" in resp.json()["error_description"]
+
+
+# --- RFC 8705 mTLS client metadata ---
+
+
+async def test_admin_create_and_update_persist_subject_dn():
+    async with build_client_app() as client:
+        await _login(client)
+        create = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "mTLS Client",
+                "client_id": "admin-mtls",
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_certificate_subject_dn": "CN=svc,O=Example",
+            },
+        )
+        assert create.status_code == 201, create.text
+        assert create.json()["tls_client_certificate_subject_dn"] == "CN=svc,O=Example"
+
+        stored = await client.storage.get_client("admin-mtls")
+        assert stored.tls_client_certificate_subject_dn == "CN=svc,O=Example"
+
+        detail = await client.get(f"/admin/api/clients/{stored.id}")
+        assert detail.json()["tls_client_certificate_subject_dn"] == "CN=svc,O=Example"
+
+        update = await client.put(
+            f"/admin/api/clients/{stored.id}",
+            json={"tls_client_certificate_subject_dn": "CN=rotated,O=Example"},
+        )
+        assert update.status_code == 200, update.text
+        reloaded = await client.storage.get_client("admin-mtls")
+        assert reloaded.tls_client_certificate_subject_dn == "CN=rotated,O=Example"
+        assert reloaded.token_endpoint_auth_method == "tls_client_auth"
+
+
+async def test_admin_create_self_signed_without_keys_rejected():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "Keyless mTLS",
+                "token_endpoint_auth_method": "self_signed_tls_client_auth",
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {
+            "error": "invalid_request",
+            "error_description": "self_signed_tls_client_auth requires jwks or jwks_uri",
+        }
+
+
+async def test_admin_update_to_self_signed_without_keys_rejected():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+        resp = await client.put(
+            f"/admin/api/clients/{seeded.id}",
+            json={"token_endpoint_auth_method": "self_signed_tls_client_auth"},
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error_description"] == (
+            "self_signed_tls_client_auth requires jwks or jwks_uri"
+        )
