@@ -197,7 +197,14 @@ async def social_callback(provider: str, request: Request):
 
     # Read before set_login() clears the session (mirrors routes/login.py).
     return_to = request.session.get("return_to")
-    set_login(request, user)
+    # `amr=["fed"]`: the user was authenticated by an external identity
+    # provider, not by a password presented here (OIDC Core §2 / RFC 8176).
+    set_login(
+        request,
+        user,
+        acr=request.app.state.config.default_acr,
+        amr=["fed"],
+    )
 
     target = return_to if is_safe_redirect(return_to) else "/profile"
     return RedirectResponse(target, status_code=302)

@@ -485,6 +485,79 @@ shared persistence:
   effectively gets a looser, per-worker-independent interval rather than one enforced
   server-wide.
 
+## Phase 4b: authorize front-channel parity
+
+Phase 4b (see `docs/plans/2026-09-20-python-oauth2-port-phase-4b.md` and `docs/PHASE2-BACKLOG.md` →
+"Accepted divergences" 37–46) is the second of the three Phase 4 sub-phases and brings
+`GET /oauth/authorize` to parity with the Rust handler for the front-channel features Phase 1 left
+out:
+
+- **`response_mode` (`query` / `fragment` / `form_post`)** — a single mode-aware builder
+  (`services/authorize_response.py`) delivers every success and error response, replacing the
+  route's ad hoc redirect construction. `query` (the existing default for `code`) appends
+  parameters to `redirect_uri`'s existing query string in order `code, state, iss, id_token` (or
+  `error, error_description, state, iss`); `fragment` (the default for hybrid) appends a
+  `#`-delimited, unreserved-safe-encoded fragment in order `code, iss, state, id_token` (or
+  `error, error_description, iss, state`); `form_post` returns a 200 `text/html; charset=utf-8`
+  auto-submitting form with the same parameter order and set as `fragment`, escaping `&`, `"`,
+  `<`, `>`, and — divergence 38 — `'` as `&#x27;` in attribute values (Rust's `html_escape_attr`
+  leaves `'` unescaped). Every authorize response, success or error, on every mode, carries
+  `Cache-Control: no-store`, `Pragma: no-cache`, `Referrer-Policy: no-referrer`,
+  `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`, and
+  `X-Content-Type-Options: nosniff` — including redirect-delivered errors that Rust sends through
+  `fragment`/`form_post`-blind paths (divergence 37: the `prompt=none` → `login_required` and
+  `acr_values` step-up error paths honor the requested `response_mode` here, where Rust's
+  equivalents ignore it).
+- **OIDC hybrid `code id_token`** — `response_type=code id_token` mints an id_token at the
+  authorize endpoint via a minter shared with the token endpoint (`services/id_token.py::
+  mint_id_token`), so the hybrid and token-endpoint id_tokens share the same claim construction
+  and TTL (`config.access_token_ttl_secs`) instead of Rust's hardcoded one-hour expiry (divergence
+  40); the hybrid id_token additionally carries `acr`, `amr`, and `auth_time` from the session,
+  which the token endpoint omits since it has no session to draw from. The id_token's `c_hash` is
+  `base64url(SHA-256(code)[:16])` with no padding;
+  `at_hash` is omitted (no access token is issued on this path). `nonce` is REQUIRED for the
+  hybrid response type per OIDC Core §3.3.2.11 — a missing `nonce` is a redirect error
+  `invalid_request` (divergence 39; Rust issues the id_token anyway). An explicit
+  `response_mode=query` on a hybrid request is rejected with 400 `invalid_request` (divergence
+  46 — OIDC Core §3.3.2.3 forbids delivering an id_token in the query string; Rust accepts it and
+  puts the id_token in the query).
+- **RFC 9101 JAR (`request=`) request objects** — `services/jar.py::process_jar` verifies an
+  inline `request` JWT and overlays its claims onto the merged (query + PAR) authorize
+  parameters, dispatched on the client's *registered* `token_endpoint_auth_method`: `none` →
+  literal `alg: none` header with an empty signature and no `iss`/`aud`/`exp` checks;
+  `client_secret_*` → HS256 under the client secret; `private_key_jwt` → RS256 verified against
+  the client's inline `jwks` or cached `jwks_uri` (reusing Phase 4a's `resolve_client_jwks`).
+  Required claims: `aud == f"{issuer}/oauth/authorize"`, `exp`, `iss == client_id`; a `client_id`
+  claim, if present, MUST equal the query `client_id` (RFC 9101 §6.3 — unchecked in Rust).
+  Verification failures use `invalid_request_object` (RFC 9101 §6.3.1, divergence 41); structural
+  or unsupported cases — not a JWT, an unsupported auth method, or, on the `none` path, `alg` not
+  literally `none` or a non-empty signature — stay `invalid_request`. `request` is read only from
+  the query string, never from a PAR-pushed body, and `request_uri=` (a JAR fetched from a URL,
+  RFC 9101 §5.2) is not supported. JAR claims win over both query and PAR for the keys they
+  overlay.
+- **RFC 9470 `acr_values` step-up** — a successful login stamps `acr` and `amr` onto the session
+  (`sessions.py::set_login(acr=, amr=)`): `urn:mace:incommon:iap:bronze` / `["pwd"]` for password
+  login, `["fed"]` for social login. `GET /oauth/authorize` with `acr_values` fails with
+  `insufficient_user_authentication` when the session's stamped `acr` isn't one of the
+  space-separated requested values. `acr_values_supported` is config-driven
+  (`OAUTH2_ACR_VALUES_SUPPORTED`) and advertises only what login can actually attest to
+  (divergence 42 — Rust advertises silver+bronze but never sets `acr`, so every `acr_values`
+  request there fails).
+- **`claims` request parameter** — validated as a JSON object (malformed → `invalid_request`
+  "claims must be a JSON object") and stored verbatim on the authorization code as
+  `claims_request`. Not yet honored at `/oauth/userinfo` or `/oauth/token` (divergence 44), so
+  `claims_parameter_supported` is deliberately NOT advertised.
+
+No new single-process, in-memory state — Phase 4b's session fields (`acr`, `amr`) live in the
+existing session store, and the JAR processor reuses Phase 4a's `jwks_cache`.
+
+### New environment variables (Phase 4b)
+
+- `OAUTH2_ACR_VALUES_SUPPORTED` — comma-separated list of Authentication Context Class References
+  this deployment can attest to (like `OAUTH2_RAR_TYPES_SUPPORTED`). Default:
+  `urn:mace:incommon:iap:bronze`. `[0]` is the value login stamps on the session
+  (`config.default_acr`); the full list is advertised as discovery's `acr_values_supported`.
+
 ## Running
 
 ```bash

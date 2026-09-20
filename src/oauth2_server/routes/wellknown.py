@@ -55,6 +55,7 @@ def _discovery_document(
     rar_types_supported: list[str],
     *,
     has_rs256_key: bool,
+    acr_values_supported: list[str],
 ) -> dict:
     base = issuer.rstrip("/")
     return {
@@ -76,10 +77,12 @@ def _discovery_document(
         "pushed_authorization_request_endpoint": f"{base}/oauth/par",
         "require_pushed_authorization_requests": False,
         "request_uri_parameter_supported": True,
-        # Divergence: JAR (`request=`/`request_uri=` JWT-encoded authorization
-        # requests, RFC 9101) was not ported — only PAR's own `request_uri`
-        # value is supported.
-        "request_parameter_supported": False,
+        # RFC 9101 (JAR): `request=` JWT-encoded authorization requests are
+        # supported (`services/jar.py::process_jar`) — `none`/HS256/RS256,
+        # dispatched on the client's registered `token_endpoint_auth_method`.
+        # `request_uri=` (RFC 9101 §5.2, a JAR fetched from a URL) remains
+        # unsupported; only PAR's own `request_uri` value is accepted there.
+        "request_parameter_supported": True,
         "end_session_endpoint": f"{base}/oauth/logout",
         "check_session_iframe": f"{base}/oauth/check_session",
         "backchannel_logout_supported": True,
@@ -93,7 +96,8 @@ def _discovery_document(
             "urn:ietf:params:oauth:grant-type:device_code",
             "urn:ietf:params:oauth:grant-type:token-exchange",
         ],
-        "response_types_supported": ["code"],
+        "response_types_supported": ["code", "code id_token"],
+        "response_modes_supported": ["query", "form_post", "fragment"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": [
             "client_secret_basic",
@@ -109,6 +113,15 @@ def _discovery_document(
         "revocation_endpoint_auth_methods_supported": list(_CONFIDENTIAL_AUTH_METHODS),
         "authorization_response_iss_parameter_supported": True,
         "prompt_values_supported": ["none", "login", "consent", "select_account"],
+        # Divergence 43: what `services/jar.py::process_jar` actually
+        # implements (`none` dispatched for `token_endpoint_auth_method=none`
+        # clients, HS256 for `client_secret_*`, RS256 for `private_key_jwt`)
+        # — not Rust's `["RS256", "ES256", "HS256"]` (ES256 unimplemented
+        # there, `none` implemented but unadvertised).
+        "request_object_signing_alg_values_supported": ["RS256", "HS256", "none"],
+        # RFC 9470 step-up: only values this server can actually attest to
+        # at login (divergence 42) — config-driven, default bronze.
+        "acr_values_supported": acr_values_supported,
         "scopes_supported": SCOPES_SUPPORTED,
         "subject_types_supported": ["public"],
         # RFC 9701 §7: the algorithms a JWT-secured introspection response
@@ -133,6 +146,10 @@ def _discovery_document(
             "at_hash",
             "email",
             "preferred_username",
+            "c_hash",
+            "acr",
+            "amr",
+            "auth_time",
         ],
         # RFC 9449 §10: narrower than what services/dpop.py actually accepts
         # (RS256/384/512, PS256/384/512, ES256/384) — Rust parity
@@ -161,6 +178,7 @@ async def openid_configuration(request: Request) -> ORJSONResponse:
             config.id_token_alg,
             config.rar_types_supported,
             has_rs256_key=keyset.current_for_alg("RS256") is not None,
+            acr_values_supported=config.acr_values_supported,
         )
     )
 

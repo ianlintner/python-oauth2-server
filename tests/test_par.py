@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import secrets
 from urllib.parse import parse_qs, urlparse
 
@@ -274,3 +275,20 @@ async def test_par_request_uri_expires(client_app, monkeypatch):
     )
     assert resp.status_code == 400
     assert resp.json()["error_description"] == "Unknown or expired request_uri"
+
+
+async def test_claims_request_from_par_stored(client_app):
+    claims = {"userinfo": {"email": {"essential": True}}}
+    request_uri = await _push_client1_par(client_app, claims=json.dumps(claims))
+
+    await login_session(client_app)
+    resp = await client_app.get(
+        "/oauth/authorize",
+        params={"request_uri": request_uri, "client_id": "client1", "response_type": "code"},
+    )
+    assert resp.status_code == 302, resp.text
+    q = parse_qs(urlparse(resp.headers["location"]).query)
+    code = q["code"][0]
+
+    stored = await client_app.storage.get_authorization_code(code)
+    assert stored.claims_request == json.dumps(claims)

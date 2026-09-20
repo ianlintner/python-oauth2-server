@@ -73,7 +73,9 @@ From Phase 2 (`docs/plans/2026-07-19-python-oauth2-port-phase-2.md` → "Global 
 7. Admin seeding only runs when `OAUTH2_SEED_PASSWORD` is explicitly set (Rust ships an insecure
    default rejected only in production mode).
 8. Discovery advertises `request_parameter_supported: false` (JAR is not ported; Rust has JAR and
-   advertises `true`).
+   advertises `true`). **Superseded by Phase 4b** — JAR (`request=`) is now ported
+   (`services/jar.py::process_jar`) and discovery advertises `request_parameter_supported: true`;
+   see divergence 41 below.
 9. Dashboard summary does not swallow storage errors into zeros; a broken backend 500s.
 
 From Phase 3a (`docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` → "Global Constraints"):
@@ -504,6 +506,46 @@ From Phase 4a (`docs/plans/2026-09-20-python-oauth2-port-phase-4a.md` → "Globa
     assertion's `sub` (RFC 7523 §2.2 says `client_id` is unnecessary). Rust requires
     `client_id` in the form. Task 1 (commits `1fc7171`, `4537833`).
 
+From Phase 4b (`docs/plans/2026-09-20-python-oauth2-port-phase-4b.md` → "Global Constraints"):
+37. Every redirect-channel error honors `response_mode` (Rust's `prompt=none`/`login_required` path
+    ignores `fragment`, and its `acr_values` step-up path ignores both `fragment` and `form_post`).
+    `form_post` error responses also carry `Cache-Control: no-store` + `Pragma: no-cache` like the
+    success path. Task 1 (commit `1d592f0`).
+38. `form_post` attribute escaping also escapes `'` (`&#x27;`) — Rust's `html_escape_attr` does
+    not. Task 1 (commit `1d592f0`).
+39. Hybrid `code id_token` REQUIRES `nonce` (OIDC Core §3.3.2.11); missing → redirect error
+    `invalid_request` / "nonce is required for response_type=code id_token". Rust issues the
+    id_token without it. Task 2 (commit `6de85cb`).
+40. The hybrid id_token uses the same minter and TTL as the token endpoint's id_token
+    (`config.access_token_ttl_secs`) and carries `acr`, `amr`, `auth_time` from the session; Rust
+    hardcodes `exp = now + 3600` and omits those claims. Task 2 (commit `6de85cb`).
+41. JAR verification failures use error code `invalid_request_object` (RFC 9101 §6.3.1) instead of
+    Rust's `invalid_request`; structural/unsupported cases (not a JWT, unsupported auth method, and
+    — on the `none` path — `alg` not literally `none` or a non-empty signature) stay
+    `invalid_request`, and only signature/claim verification failures (bad HS256/RS256 signature,
+    missing/mismatched `iss`/`aud`/`exp`/`client_id`) use `invalid_request_object`. A JAR
+    `client_id` claim, when present, MUST equal the query `client_id` (RFC 9101 §6.3 — Rust never
+    checks it). This also supersedes divergence 8 above: `request_parameter_supported` is now
+    `true`. Task 3 (commits `f3a28ce`, `1049f84`, `9fab2c4`).
+42. Login stamps `acr = urn:mace:incommon:iap:bronze` and `amr = ["pwd"]` (social login:
+    `amr = ["fed"]`) into the session; `acr_values_supported` is config-driven
+    (`OAUTH2_ACR_VALUES_SUPPORTED`, default `["urn:mace:incommon:iap:bronze"]`) and advertises only
+    achievable values. Rust advertises silver+bronze but never sets `acr`, so every `acr_values`
+    request fails. Task 5 (commit `595ae62`).
+43. `request_object_signing_alg_values_supported` advertises `["RS256", "HS256", "none"]` — what is
+    implemented — not Rust's `["RS256", "ES256", "HS256"]` (ES256 unimplemented there, `none`
+    implemented but unadvertised). Task 7 (this task).
+44. `claims` is validated as a JSON object (malformed → 400/redirect `invalid_request` "claims must
+    be a JSON object") before being stored verbatim on the code; `claims_parameter_supported` is
+    NOT advertised because the stored value is not yet honored at userinfo/token (Rust: stored
+    unparsed, never read). Task 6 (commit `0b9da00`).
+45. Fragment encoding uses `urllib.parse.urlencode(..., quote_via=quote)` (RFC 3986 unreserved set
+    kept, never `+`); Rust percent-escapes all non-alphanumerics. Functionally equivalent after
+    decoding. Task 1 (commit `1d592f0`).
+46. Hybrid `code id_token` rejects an explicit `response_mode=query` with 400 `invalid_request`
+    (OIDC Core §3.3.2.3 MUST NOT deliver an id_token in the query string); Rust accepts it. Task 2
+    (commit `7926ca3`).
+
 ### Known Phase 3d gaps (deliberate/parity, MongoDB backend)
 
 - **App-side full-collection scans for every list/page method.** `list_all_*`/`list_*_page`/
@@ -553,12 +595,33 @@ branch/PR:
 | Sub-phase | Scope |
 |---|---|
 | **4a** (this phase) | RFC 7523 JWT client auth (`client_secret_jwt`, `private_key_jwt`) + jti replay + `jwks_uri` cache; RFC 8707 resource indicators → `aud`; RFC 9728 protected-resource metadata + status-list stub + discovery/userinfo field parity; RFC 9701 JWT introspection responses; RFC 8628 `slow_down`. |
-| **4b** | Authorize front-channel parity: `response_mode` `query`/`form_post`/`fragment`; OIDC hybrid `code id_token`; JAR `request` objects (unsigned public / HS256 / RS256-via-client-JWKS); `acr_values` step-up (RFC 9470) + `claims` request + `acr`/`amr`/`auth_time` claims. |
+| **4b** (done) | Authorize front-channel parity: `response_mode` `query`/`form_post`/`fragment`; OIDC hybrid `code id_token`; JAR `request` objects (unsigned public / HS256 / RS256-via-client-JWKS); `acr_values` step-up (RFC 9470) + `claims` request + `acr`/`amr`/`auth_time` claims. |
 | **4c** | RFC 8705 mTLS (`tls_client_auth`, `self_signed_tls_client_auth`, `X-Client-Cert-Thumbprint`/`X-SSL-Client-S-DN`, `cnf.x5t#S256`); DPoP hardening beyond Rust (`ath`, resource-side DPoP at userinfo, `dpop_jkt` at authorize/PAR, `DPoP-Nonce` on 200s); nested `act` chains; social account-linking by email. |
 
 Out of scope for all of Phase 4 (unchanged from earlier phases): Redis/Kafka/RabbitMQ event
 backends, bulkheads, OTel span export, multi-instance persistence of in-process stores,
 admin-session server-side revocation.
+
+### Remaining Phase 4b gaps (carried to 4c or later)
+
+- `claims` (RFC-style OIDC claims request) is parsed and stored on the authorization code
+  (`claims_request`, Task 6) but not yet honored at `/oauth/userinfo` or `/oauth/token` —
+  requested individual claims currently have no effect on the response.
+- PKCE is still required only for public clients (`token_endpoint_auth_method == "none"`); Rust
+  requires PKCE unconditionally, for confidential clients too.
+- `request_uri=` (RFC 9101 §5.2, a JAR fetched from a URL rather than passed inline via
+  `request=`) remains unsupported; only PAR's own `request_uri` value is accepted at
+  `/oauth/authorize`.
+- No size cap is enforced on the `claims`, `authorization_details` (RAR), or `resource` parameter
+  values — an oversized value is stored/processed as-is rather than rejected up front. Relatedly,
+  deeply nested `claims`/`authorization_details` JSON can raise `RecursionError` (→ an unhandled
+  500) during parsing/validation; the size/depth cap above needs to bound nesting depth too, not
+  just payload length.
+- `POST /admin/api/clients` and `PUT` do not run `_is_valid_redirect_uri` over the submitted
+  `redirect_uris` (pre-existing Phase 3 gap), so an admin can register a `redirect_uri` containing
+  a fragment or otherwise malformed value; this is now more relevant with response_mode
+  fragment/form_post delivery, where such a value is rejected only at authorize time via the
+  `"redirect_uri must not contain a fragment"` guard rather than at registration.
 
 ### Residuals from the Phase 4a final review (parked, non-blocking)
 

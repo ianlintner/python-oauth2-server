@@ -147,7 +147,7 @@ def validate_client_assertion(
     if method == "client_secret_jwt":
         key: object = client.client_secret
     else:
-        key = _rsa_key_from_jwks(jwks, header.get("kid"))
+        key = rsa_key_from_jwks(jwks, header.get("kid"))
 
     try:
         claims = jwt.decode(
@@ -167,9 +167,11 @@ def validate_client_assertion(
     _enforce_jti_replay(client.client_id, claims, guard)
 
 
-def _rsa_key_from_jwks(jwks: dict | None, kid: str | None):
-    """Select the JWKS key the assertion header points at (by `kid`, else
-    the first RSA key) and build a PyJWT verification key from it.
+def rsa_key_from_jwks(
+    jwks: dict | None, kid: str | None, *, error: str = "invalid_client", context: str = ""
+):
+    """Select the JWKS key the JWT header points at (by `kid`, else the
+    first RSA key) and build a PyJWT verification key from it.
 
     `jwks` is whatever `resolve_client_jwks` parsed out of the client's
     inline `jwks` column, so it is arbitrary client-controlled JSON — a
@@ -177,28 +179,31 @@ def _rsa_key_from_jwks(jwks: dict | None, kid: str | None):
     an unhandled `AttributeError` (500). Everything that is not an object
     with a `keys` array is rejected as `invalid_client` here instead, which
     is also what Rust's `Value::get("keys")` does for a non-object.
+
+    `error`/`context` exist for the second caller, `services/jar.py`: Rust
+    raises the key-selection failures as `invalid_request` with a `" for
+    JAR"` suffix on the two selection messages when the JWT being verified
+    is an RFC 9101 request object rather than an RFC 7523 assertion.
     """
     if jwks is None:
-        raise OAuthError(
-            "invalid_client", "Client must register jwks or jwks_uri for private_key_jwt"
-        )
+        raise OAuthError(error, "Client must register jwks or jwks_uri for private_key_jwt")
     keys = jwks.get("keys") if isinstance(jwks, dict) else None
     if not isinstance(keys, list):
-        raise OAuthError("invalid_client", "Client JWKS missing 'keys' array")
+        raise OAuthError(error, "Client JWKS missing 'keys' array")
 
     if kid is not None:
         match = next((k for k in keys if isinstance(k, dict) and k.get("kid") == kid), None)
         if match is None:
-            raise OAuthError("invalid_client", "No matching kid in client JWKS")
+            raise OAuthError(error, f"No matching kid in client JWKS{context}")
     else:
         match = next((k for k in keys if isinstance(k, dict) and k.get("kty") == "RSA"), None)
         if match is None:
-            raise OAuthError("invalid_client", "No RSA key found in client JWKS")
+            raise OAuthError(error, f"No RSA key found in client JWKS{context}")
 
     try:
         key = RSAAlgorithm.from_jwk(match)
     except Exception as exc:
-        raise OAuthError("invalid_client", "Failed to construct RSA key from client JWKS") from exc
+        raise OAuthError(error, "Failed to construct RSA key from client JWKS") from exc
 
     # `from_jwk` hands back an `RSAPrivateKey` whenever the registered JWK
     # carries private material (`d`/`p`/`q`) — a plausible client
@@ -209,7 +214,7 @@ def _rsa_key_from_jwks(jwks: dict | None, kid: str | None):
     # Rejected here rather than by broadening that `except`, which would
     # mangle the `"{method} validation failed: {reason}"` message contract.
     if not isinstance(key, RSAPublicKey):
-        raise OAuthError("invalid_client", "Client JWKS key is not an RSA public key")
+        raise OAuthError(error, "Client JWKS key is not an RSA public key")
     return key
 
 

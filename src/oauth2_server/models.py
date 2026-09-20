@@ -259,6 +259,7 @@ class IdTokenClaims(BaseModel):
     email: str | None = None
     preferred_username: str | None = None
     acr: str | None = None
+    amr: list[str] | None = None
     auth_time: int | None = None
 
 

@@ -15,7 +15,28 @@ def current_user_id(request: Request) -> str | None:
     return request.session.get("user_id")
 
 
-def set_login(request: Request, user: "User") -> None:
+def current_acr(request: Request) -> str | None:
+    """The Authentication Context Class Reference stamped at login (RFC 9470
+    step-up). Server-side only: it is written by `set_login` from config and
+    is never taken from a request parameter, so a client cannot talk its way
+    into a stronger `acr` by asking for one."""
+    return request.session.get("acr")
+
+
+def current_amr(request: Request) -> list[str] | None:
+    """The Authentication Methods References stamped at login (`["pwd"]` for
+    password login, `["fed"]` for social/federated login)."""
+    amr = request.session.get("amr")
+    return amr if isinstance(amr, list) else None
+
+
+def set_login(
+    request: Request,
+    user: "User",
+    *,
+    acr: str | None = None,
+    amr: list[str] | None = None,
+) -> None:
     # Starlette sessions are cookie-based (signed, client-held) rather than a
     # server-side session id, so there is nothing to "rotate" server-side.
     # Clearing the session before writing the new identity is the equivalent
@@ -30,3 +51,12 @@ def set_login(request: Request, user: "User") -> None:
     request.session["role"] = user.role
     request.session["email"] = user.email
     request.session["username"] = user.username
+    # RFC 9470 / OIDC Core §2: what this authentication event can attest to.
+    # `acr` comes from `config.acr_values_supported[0]` and `amr` from the
+    # route that authenticated the user — both server-chosen, never client
+    # input. Omitted keys simply leave the session without the claim, which
+    # makes every `acr_values` request unsatisfiable (fail closed).
+    if acr is not None:
+        request.session["acr"] = acr
+    if amr is not None:
+        request.session["amr"] = list(amr)

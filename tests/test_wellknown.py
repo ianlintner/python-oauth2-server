@@ -71,7 +71,7 @@ async def test_discovery_advertises_par(client_app):
     assert body["pushed_authorization_request_endpoint"] == "https://auth.example.com/oauth/par"
     assert body["require_pushed_authorization_requests"] is False
     assert body["request_uri_parameter_supported"] is True
-    assert body["request_parameter_supported"] is False
+    assert body["request_parameter_supported"] is True
 
 
 async def test_jwks_returns_empty_keys(client_app):
@@ -256,7 +256,55 @@ async def test_discovery_claims_supported_parity(client_app):
         "at_hash",
         "email",
         "preferred_username",
+        "c_hash",
+        "acr",
+        "amr",
+        "auth_time",
     ]
+
+
+async def test_wave5_discovery_response_types_includes_code_id_token(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    assert resp.json()["response_types_supported"] == ["code", "code id_token"]
+
+
+async def test_wave5_discovery_response_modes_includes_fragment(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    assert resp.json()["response_modes_supported"] == ["query", "form_post", "fragment"]
+
+
+async def test_wave5_discovery_request_parameter_supported_is_true(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    assert resp.json()["request_parameter_supported"] is True
+
+
+async def test_discovery_request_object_algs_match_implementation(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    assert resp.json()["request_object_signing_alg_values_supported"] == [
+        "RS256",
+        "HS256",
+        "none",
+    ]
+
+
+async def test_wave4_rfc9470_acr_values_supported_advertised(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["acr_values_supported"]
+    assert body["acr_values_supported"] == ["urn:mace:incommon:iap:bronze"]
+
+
+async def test_wave4_oidc_claims_request_acr_auth_time_in_claims_supported(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    claims_supported = resp.json()["claims_supported"]
+    for claim in ("acr", "auth_time", "amr", "c_hash"):
+        assert claim in claims_supported
 
 
 async def test_userinfo_includes_iss_and_aud(client_app):

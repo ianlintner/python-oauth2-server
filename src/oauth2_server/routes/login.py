@@ -182,7 +182,12 @@ async def login(request: Request):
     # set_login() clears the session.
     return_to = request.session.get("return_to")
     return_to_ts = request.session.get("return_to_ts")
-    set_login(request, user)
+    set_login(
+        request,
+        user,
+        acr=request.app.state.config.default_acr,
+        amr=["pwd"],
+    )
 
     # Only honor return_to when it was stamped by a recent redirect. A stale
     # (or unstamped) value from an abandoned request must not be replayed on

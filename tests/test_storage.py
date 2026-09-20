@@ -72,6 +72,25 @@ async def test_authorization_code_single_use(storage):
     assert got.used is True
 
 
+async def test_claims_survives_sql_round_trip(storage):
+    await storage.save_client(_client())
+    await storage.save_user(_user())
+    claims_request = json.dumps({"userinfo": {"email": {"essential": True}}})
+    code = AuthorizationCode(
+        id=uuid.uuid4().hex,
+        code="c-claims",
+        client_id="client1",
+        user_id="u1",
+        redirect_uri="https://a.example/cb",
+        scope="read",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        claims_request=claims_request,
+    )
+    await storage.save_authorization_code(code)
+    got = await storage.get_authorization_code("c-claims")
+    assert got.claims_request == claims_request
+
+
 async def test_mark_authorization_code_used_is_single_claim(storage):
     await storage.save_client(_client())
     await storage.save_user(_user())
