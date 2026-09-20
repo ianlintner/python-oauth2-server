@@ -31,6 +31,12 @@ MIN_TTL_SECS = 30
 # cache forever.
 MAX_TTL_SECS = 86_400
 
+# Budget for a single JWKS fetch. Passed explicitly on every request rather
+# than relying on the shared `app.state.http_client`'s own timeout: that
+# client is built for back-channel logout POSTs (app.py) and its timeout is
+# not this module's to assume.
+JWKS_FETCH_TIMEOUT_SECS = 10
+
 _MAX_AGE_PREFIX = "max-age="
 
 
@@ -73,7 +79,11 @@ class JwksCache:
 
     async def _fetch_from_url(self, url: str) -> tuple[dict, int]:
         try:
-            response = await self._http_client.get(url, headers={"Accept": "application/json"})
+            response = await self._http_client.get(
+                url,
+                headers={"Accept": "application/json"},
+                timeout=JWKS_FETCH_TIMEOUT_SECS,
+            )
         except httpx.HTTPError as exc:
             raise OAuthError("invalid_client", f"Failed to fetch jwks_uri '{url}': {exc}") from exc
 

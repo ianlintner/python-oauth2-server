@@ -33,6 +33,31 @@ async def test_discovery_advertises_none_auth_method(client_app):
     assert "none" in resp.json()["token_endpoint_auth_methods_supported"]
 
 
+async def test_discovery_advertises_jwt_auth_methods(client_app):
+    resp = await client_app.get("/.well-known/openid-configuration")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["token_endpoint_auth_methods_supported"] == [
+        "client_secret_basic",
+        "client_secret_post",
+        "client_secret_jwt",
+        "private_key_jwt",
+        "none",
+    ]
+    assert body["introspection_endpoint_auth_methods_supported"] == [
+        "client_secret_basic",
+        "client_secret_post",
+        "client_secret_jwt",
+        "private_key_jwt",
+    ]
+    assert body["revocation_endpoint_auth_methods_supported"] == [
+        "client_secret_basic",
+        "client_secret_post",
+        "client_secret_jwt",
+        "private_key_jwt",
+    ]
+
+
 async def test_discovery_advertises_par(client_app):
     resp = await client_app.get("/.well-known/openid-configuration")
     assert resp.status_code == 200

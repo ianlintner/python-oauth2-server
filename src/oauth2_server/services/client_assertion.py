@@ -22,6 +22,7 @@ import logging
 import time
 
 import jwt
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from jwt.algorithms import RSAAlgorithm
 
 from oauth2_server.errors import OAuthError
@@ -195,9 +196,21 @@ def _rsa_key_from_jwks(jwks: dict | None, kid: str | None):
             raise OAuthError("invalid_client", "No RSA key found in client JWKS")
 
     try:
-        return RSAAlgorithm.from_jwk(match)
+        key = RSAAlgorithm.from_jwk(match)
     except Exception as exc:
         raise OAuthError("invalid_client", "Failed to construct RSA key from client JWKS") from exc
+
+    # `from_jwk` hands back an `RSAPrivateKey` whenever the registered JWK
+    # carries private material (`d`/`p`/`q`) — a plausible client
+    # misconfiguration, since registration only checks that `jwks` is a JSON
+    # object. A private key has no `.verify`, so `jwt.decode` below would
+    # raise `AttributeError` — NOT a `jwt.PyJWTError`, so it would escape
+    # the handler as a 500 instead of the contracted `invalid_client` body.
+    # Rejected here rather than by broadening that `except`, which would
+    # mangle the `"{method} validation failed: {reason}"` message contract.
+    if not isinstance(key, RSAPublicKey):
+        raise OAuthError("invalid_client", "Client JWKS key is not an RSA public key")
+    return key
 
 
 def _enforce_jti_replay(client_id: str, claims: dict, guard: JtiReplayGuard) -> None:

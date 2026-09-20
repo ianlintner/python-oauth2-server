@@ -23,6 +23,7 @@ from oauth2_server.services.client_assertion import (
 )
 from oauth2_server.services.jwks_cache import (
     DEFAULT_TTL_SECS,
+    JWKS_FETCH_TIMEOUT_SECS,
     MAX_TTL_SECS,
     MIN_TTL_SECS,
     JwksCache,
@@ -73,6 +74,25 @@ def generate_rsa_keypair(kid: str = "client-key-1") -> tuple[bytes, dict]:
     public_jwk["use"] = "sig"
     public_jwk["alg"] = "RS256"
     return pem, {"keys": [public_jwk]}
+
+
+def generate_private_rsa_jwks(kid: str = "client-key-1") -> tuple[bytes, dict]:
+    """Return `(private_key_pem, jwks_document)` where the JWKS carries the
+    PRIVATE key material (`d`/`p`/`q`).
+
+    A plausible client misconfiguration — registration only checks that
+    `jwks` is a JSON object — which must be rejected as `invalid_client`
+    rather than crashing the token endpoint.
+    """
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    private_jwk = jwt.algorithms.RSAAlgorithm.to_jwk(private_key, as_dict=True)
+    private_jwk["kid"] = kid
+    return pem, {"keys": [private_jwk]}
 
 
 def assertion_form(assertion: str, **extra) -> dict:
@@ -163,6 +183,26 @@ async def test_private_key_jwt_rejects_hs256_alg(client_app):
     resp = await post_token(client_app, assertion_form(assertion))
     assert resp.status_code == 401, resp.text
     assert resp.json()["error_description"] == "private_key_jwt requires RS256 algorithm"
+
+
+async def test_private_key_jwt_private_jwk_rejected(client_app):
+    """A registered JWKS carrying private key material must not reach
+    `jwt.decode` — `RSAAlgorithm.from_jwk` hands back an `RSAPrivateKey`,
+    whose missing `.verify` would escape as an `AttributeError` (500)
+    rather than the contracted `invalid_client` body."""
+    private_pem, private_jwks = generate_private_rsa_jwks()
+    await reseed_client(
+        client_app,
+        token_endpoint_auth_method="private_key_jwt",
+        jwks=json.dumps(private_jwks),
+    )
+    assertion = make_client_assertion(
+        "client1", private_pem, "RS256", headers={"kid": "client-key-1"}
+    )
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"] == "invalid_client"
+    assert resp.json()["error_description"] == "Client JWKS key is not an RSA public key"
 
 
 async def test_private_key_jwt_without_jwks_rejected(client_app):
@@ -330,6 +370,32 @@ async def test_private_key_jwt_jwks_uri_fetched_once_and_cached(client_app):
     assert fetches == ["https://client.example/jwks.json"]
 
 
+async def test_jwks_fetch_uses_explicit_timeout(client_app):
+    """The 10 s JWKS fetch budget must be `JwksCache`'s own, not whatever
+    timeout the shared outbound client happens to have been built with."""
+    private_pem, jwks = generate_rsa_keypair()
+    timeouts: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions.get("timeout"))
+        return httpx.Response(200, json=jwks)
+
+    _install_mock_jwks_transport(client_app, handler)
+    await reseed_client(
+        client_app,
+        token_endpoint_auth_method="private_key_jwt",
+        jwks_uri="https://client.example/jwks.json",
+    )
+    assertion = make_client_assertion(
+        "client1", private_pem, "RS256", headers={"kid": "client-key-1"}
+    )
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 200, resp.text
+    assert timeouts == [
+        dict.fromkeys(("connect", "pool", "read", "write"), JWKS_FETCH_TIMEOUT_SECS)
+    ]
+
+
 async def test_private_key_jwt_jwks_uri_http_error_rejected(client_app):
     private_pem, _ = generate_rsa_keypair()
 
@@ -442,7 +508,7 @@ async def test_introspection_accepts_client_secret_jwt(client_app):
 
 
 # --------------------------------------------------------------------------
-# Registration + discovery
+# Registration
 # --------------------------------------------------------------------------
 
 
@@ -511,31 +577,6 @@ async def test_registration_private_key_jwt_echoes_jwks_uri(client_app):
     )
     assert resp.status_code == 201, resp.text
     assert resp.json()["jwks_uri"] == "https://app.example/jwks.json"
-
-
-async def test_discovery_advertises_jwt_auth_methods(client_app):
-    resp = await client_app.get("/.well-known/openid-configuration")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["token_endpoint_auth_methods_supported"] == [
-        "client_secret_basic",
-        "client_secret_post",
-        "client_secret_jwt",
-        "private_key_jwt",
-        "none",
-    ]
-    assert body["introspection_endpoint_auth_methods_supported"] == [
-        "client_secret_basic",
-        "client_secret_post",
-        "client_secret_jwt",
-        "private_key_jwt",
-    ]
-    assert body["revocation_endpoint_auth_methods_supported"] == [
-        "client_secret_basic",
-        "client_secret_post",
-        "client_secret_jwt",
-        "private_key_jwt",
-    ]
 
 
 async def test_private_key_jwt_inline_jwks_not_an_object_rejected(client_app):
