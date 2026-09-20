@@ -14,11 +14,13 @@ from oauth2_server.models import Client, IntrospectionResponse, Token
 from oauth2_server.security import (
     INTROSPECTION_JWT_TYP,
     decode_access_token,
+    decode_unverified_claims,
     encode_introspection_jwt,
 )
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.dpop import DpopError, read_dpop_header, validate_dpop_proof
 from oauth2_server.services.events_bus import emit_event
+from oauth2_server.services.mtls import mtls_headers
 
 router = APIRouter()
 
@@ -114,7 +116,7 @@ async def introspect(request: Request) -> Response:
 
     try:
         client = await ClientService.from_app(request.app.state).authenticate(
-            form, request.headers.get("authorization")
+            form, request.headers.get("authorization"), mtls=mtls_headers(request, config)
         )
     except OAuthError as exc:
         return oauth_error(exc.error, exc.description, exc.status)
@@ -159,10 +161,7 @@ async def introspect(request: Request) -> Response:
     # opaque refresh-token value skips the binding check. Accepted parity —
     # a refresh-token holder can already mint a fresh bound access token via
     # the refresh grant without a proof (research-dpop.md, documented gap).
-    try:
-        unverified_claims = jwt.decode(token_value, options={"verify_signature": False})
-    except jwt.PyJWTError:
-        unverified_claims = {}
+    unverified_claims = decode_unverified_claims(token_value)
     claim_cnf = unverified_claims.get("cnf")
     jkt = claim_cnf.get("jkt") if isinstance(claim_cnf, dict) else None
     # RFC 9396 §9.2: echo authorization_details for active tokens, read from
@@ -245,11 +244,12 @@ async def introspect(request: Request) -> Response:
 async def revoke(request: Request) -> ORJSONResponse:
     form = dict(await request.form())
     storage = request.app.state.storage
+    config = request.app.state.config
     event_bus = request.app.state.event_bus
 
     try:
         client = await ClientService.from_app(request.app.state).authenticate(
-            form, request.headers.get("authorization")
+            form, request.headers.get("authorization"), mtls=mtls_headers(request, config)
         )
     except OAuthError as exc:
         return oauth_error(exc.error, exc.description, exc.status)

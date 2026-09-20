@@ -50,6 +50,20 @@ VALID_AUTH_METHODS = frozenset(
 JWKS_URI_ERROR = "jwks_uri must be an absolute https URL"
 
 
+def is_valid_redirect_uri(uri: str) -> bool:
+    """Whether `uri` is acceptable as a client `redirect_uri`.
+
+    Moved here verbatim from `routes/register.py` so every client-intake
+    path — RFC 7591 dynamic registration and the admin JSON API — validates
+    redirect URIs identically, the same reason `VALID_AUTH_METHODS` and
+    `is_valid_jwks_uri` live in this module rather than in a route.
+    """
+    parsed = urlparse(uri)
+    # RFC 6749 §3.1.2 forbids fragments in redirect URIs
+    has_fragment = bool(parsed.fragment) or uri.endswith("#")
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc) and not has_fragment
+
+
 def is_valid_jwks_uri(uri: str) -> bool:
     """Whether `uri` is safe for this server to dereference as a client's
     JWKS endpoint.
@@ -58,9 +72,9 @@ def is_valid_jwks_uri(uri: str) -> bool:
     (`services/jwks_cache.py`), so an unvalidated value is a server-side
     request forgery primitive: a registrant could aim it at an internal
     service or walk it across ports. The rule is an https-only variant of
-    `routes/register.py::_is_valid_redirect_uri` — absolute, `https`, a real
-    netloc, no fragment — plus a rejection of hosts that resolve to the
-    server's own machine or its link-local metadata range:
+    `is_valid_redirect_uri` above — absolute, `https`, a real netloc, no
+    fragment — plus a rejection of hosts that resolve to the server's own
+    machine or its link-local metadata range:
 
     * `localhost` (and any `*.localhost` name, which RFC 6761 §6.3 reserves
       for the loopback interface),
@@ -165,6 +179,9 @@ class ClientService:
         self._issuer = issuer
         self._jwks_cache = jwks_cache
         self._jti_guard = jti_guard
+        # Set per `authenticate()` call from the proxy's mTLS headers; see
+        # that method. Never read as part of an auth decision yet.
+        self._mtls: tuple[str | None, str | None] | None = None
 
     @classmethod
     def from_app(cls, state) -> ClientService:
@@ -198,7 +215,23 @@ class ClientService:
             metadata={"success": "true" if success else "false"},
         )
 
-    async def authenticate(self, request_form: dict, authorization_header: str | None) -> Client:
+    async def authenticate(
+        self,
+        request_form: dict,
+        authorization_header: str | None,
+        *,
+        mtls: tuple[str | None, str | None] | None = None,
+    ) -> Client:
+        """Authenticate the client behind a request.
+
+        `mtls` is the `(thumbprint, subject_dn)` pair read off the proxy's
+        client-certificate headers by `services/mtls.py::mtls_headers` — it
+        is `(None, None)` unless `trust_proxy_headers` is set (divergence
+        47). It is recorded on the service for the RFC 8705 certificate-bound
+        auth methods to consume; no authentication decision depends on it
+        yet, so passing it changes nothing for existing clients.
+        """
+        self._mtls = mtls
         basic = _parse_basic_auth(authorization_header)
         form_client_id = request_form.get("client_id")
         form_client_secret = request_form.get("client_secret")

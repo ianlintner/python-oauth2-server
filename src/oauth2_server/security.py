@@ -28,6 +28,28 @@ _ACCESS_TOKEN_TYP = "at+JWT"
 _SESSION_KEY_INFO = b"oauth2-session-cookie"
 
 
+def decode_unverified_claims(token: str) -> dict:
+    """Decode a JWT's claims WITHOUT verifying its signature.
+
+    Shared by the handful of deliberate unverified reads this server makes
+    (the refresh grant's `cnf` carry-over in `routes/token.py`, introspection's
+    `cnf`/`authorization_details` echo). Every caller already gated the token
+    on something else — a storage row, a stored refresh token — and only needs
+    to read claims back out of it, so a decode failure is never an error:
+    anything that isn't a parseable JWT (an opaque token, a non-string) simply
+    yields no claims.
+
+    Never use this to make a trust decision about a token's contents.
+    """
+    if not isinstance(token, str):
+        return {}
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
 def half_hash(value: str) -> str:
     """OIDC Core §3.3.2.11 / §3.1.3.6: base64url-no-pad(left-half(SHA-256(value))).
 

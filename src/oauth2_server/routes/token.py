@@ -40,7 +40,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote_plus
 
-import jwt
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
@@ -48,6 +47,7 @@ from oauth2_server.config import Config
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.keys import KeySet
 from oauth2_server.models import Client, User
+from oauth2_server.security import decode_unverified_claims
 from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.auth import scope_is_subset
 from oauth2_server.services.client_assertion import unverified_assertion_subject
@@ -60,6 +60,7 @@ from oauth2_server.services.dpop import (
 )
 from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
 from oauth2_server.services.events_bus import emit_event
+from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource
 from oauth2_server.services.tokens import TokenService
@@ -178,12 +179,10 @@ def _salvage_old_cnf(access_token: str) -> dict | None:
     access token WITHOUT verifying its signature and returns its `cnf` claim
     verbatim, so a DPoP-bound token stays bound across a refresh with no
     fresh proof required. Returns `None` for an opaque old access token (not
-    a JWT — `jwt.decode` raises) or a JWT with no (or non-dict) `cnf` claim.
+    a JWT — it decodes to no claims) or a JWT with no (or non-dict) `cnf`
+    claim.
     """
-    try:
-        old_claims = jwt.decode(access_token, options={"verify_signature": False})
-    except jwt.PyJWTError:
-        return None
+    old_claims = decode_unverified_claims(access_token)
     cnf = old_claims.get("cnf")
     return cnf if isinstance(cnf, dict) else None
 
@@ -235,7 +234,7 @@ async def token(request: Request) -> ORJSONResponse:
 
     try:
         client = await ClientService.from_app(request.app.state).authenticate(
-            form, request.headers.get("authorization")
+            form, request.headers.get("authorization"), mtls=mtls_headers(request, config)
         )
     except OAuthError as exc:
         # Rust parity site (oauth.rs bad-client-auth): every client-auth

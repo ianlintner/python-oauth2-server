@@ -6,14 +6,18 @@ import json
 import secrets
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 from pydantic import ValidationError
 
 from oauth2_server.models import Client, ClientRegistration, ClientRegistrationResponse
-from oauth2_server.services.clients import JWKS_URI_ERROR, VALID_AUTH_METHODS, is_valid_jwks_uri
+from oauth2_server.services.clients import (
+    JWKS_URI_ERROR,
+    VALID_AUTH_METHODS,
+    is_valid_jwks_uri,
+    is_valid_redirect_uri,
+)
 from oauth2_server.services.events_bus import emit_event
 
 router = APIRouter()
@@ -27,11 +31,9 @@ def _registration_error(description: str) -> ORJSONResponse:
     )
 
 
-def _is_valid_redirect_uri(uri: str) -> bool:
-    parsed = urlparse(uri)
-    # RFC 6749 §3.1.2 forbids fragments in redirect URIs
-    has_fragment = bool(parsed.fragment) or uri.endswith("#")
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc) and not has_fragment
+# Moved to `services/clients.py` so the admin client API can share it; the
+# module-local name stays as the call sites (and tests) already spell it.
+_is_valid_redirect_uri = is_valid_redirect_uri
 
 
 @router.post("/register")
