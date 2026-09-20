@@ -59,6 +59,16 @@ class Config(BaseSettings):
     # actually enforces it (research-rar-token-exchange.md gotchas, backlog
     # gap #20) — the Python port makes this config-driven and enforced.
     rar_types_supported: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["openid"])
+    # RFC 9470 step-up: the Authentication Context Class References this
+    # server can attest to. `[0]` is what a successful login stamps on the
+    # session (`sessions.set_login`), and `GET /oauth/authorize` satisfies an
+    # `acr_values` request iff the session's stamped value is one of the
+    # requested ones. Rust hardcodes the bronze URN; divergence 42 makes it
+    # config-driven (comma-separated env, like `rar_types_supported`) so a
+    # deployment that really does run a stronger authenticator can say so.
+    acr_values_supported: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["urn:mace:incommon:iap:bronze"]
+    )
     # Rate limiting (services/limiter.py::TokenBucketLimiter) +
     # resilience (services/resilience.py, middleware_ratelimit.py) — ported
     # from `oauth2-ratelimit`/`oauth2-resilience` (research doc
@@ -164,6 +174,21 @@ class Config(BaseSettings):
     def _split_rar_types(cls, v: object) -> object:
         if isinstance(v, str):
             return [t.strip() for t in v.split(",") if t.strip()]
+        return v
+
+    @property
+    def default_acr(self) -> str | None:
+        """The `acr` a successful login stamps on the session — the first
+        supported value, or `None` when the list was configured empty (in
+        which case every `acr_values` request is unsatisfiable rather than an
+        IndexError)."""
+        return self.acr_values_supported[0] if self.acr_values_supported else None
+
+    @field_validator("acr_values_supported", mode="before")
+    @classmethod
+    def _split_acr_values(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [a.strip() for a in v.split(",") if a.strip()]
         return v
 
     @field_validator("admin_client_ids", mode="before")

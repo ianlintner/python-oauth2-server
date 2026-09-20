@@ -54,6 +54,11 @@ Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
    flow REQUIRES `nonce`, and a missing one is an `invalid_request` redirect.
 5. Unauthenticated (or `prompt=login`/expired `max_age`) -> save `return_to` in the
    session and 302 to `/auth/login`.
+5b. RFC 9470 step-up: an `acr_values` request (query, PAR or JAR) is
+   satisfied only when the session's login-stamped `acr` is one of the
+   requested values; otherwise `insufficient_user_authentication` through
+   the redirect channel. It runs AFTER the login gate so it is never an
+   oracle for an unauthenticated caller.
 6. Success -> the authorization response (`code`, `state` if given, and `iss`
    — RFC 9207, to prevent authorization-response mix-up attacks) delivered in
    the resolved `response_mode` (see `services/authorize_response.py`), plus
@@ -84,7 +89,7 @@ from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.jar import process_jar
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource
-from oauth2_server.sessions import current_user_id
+from oauth2_server.sessions import current_acr, current_amr, current_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -449,6 +454,29 @@ async def authorize(request: Request):
         request.session["return_to_ts"] = int(time.time())
         return RedirectResponse("/auth/login", status_code=302)
 
+    # --- 5b. RFC 9470 step-up: `acr_values` must be satisfied by the session ---
+    # Deliberately after the login gate above: an unauthenticated caller is
+    # sent to `/auth/login` first, so this error never doubles as a "who is
+    # logged in, and how strongly" oracle for an unauthenticated request. The
+    # value comes from `merged`, so a query param, a PAR-pushed value and a
+    # JAR claim are all enforced identically.
+    #
+    # Rust parity: satisfied iff the session's stamped `acr` is EXACTLY one of
+    # the space-separated requested values — no ordering/"at least as strong
+    # as" semantics, and an unknown or unparseable value is simply unsatisfied
+    # (an error through the redirect channel, never a 500). A session with no
+    # `acr` at all fails closed for the same reason.
+    acr_values = merged.get("acr_values")
+    if acr_values is not None and current_acr(request) not in acr_values.split():
+        return _deliver_error(
+            response_mode,
+            redirect_uri,
+            "insufficient_user_authentication",
+            "Authentication Context Class does not satisfy acr_values",
+            state,
+            config.issuer,
+        )
+
     # --- 6. Success: mint the authorization code and redirect back to the client ---
     auth_code = await AuthorizeService(storage, config).issue_code(
         client,
@@ -474,8 +502,9 @@ async def authorize(request: Request):
     # the EFFECTIVE scope (the code's, i.e. what was actually granted) rather
     # than the request's, and bound to the code via `c_hash` — no access
     # token is delivered here, so there is no `at_hash` (Rust parity). The
-    # minter and TTL are the token endpoint's (divergence 40). `acr`/`amr`
-    # stay `None` until Task 5 records them on the session.
+    # minter and TTL are the token endpoint's (divergence 40), and `acr`/`amr`
+    # /`auth_time` are the session's — what this authentication event actually
+    # attested to, stamped at login.
     id_token: str | None = None
     if hybrid and "openid" in auth_code.scope.split():
         user = await storage.get_user_by_id(user_id)
@@ -489,8 +518,8 @@ async def authorize(request: Request):
                 scope=auth_code.scope,
                 nonce=nonce,
                 code=auth_code.code,
-                acr=None,
-                amr=None,
+                acr=current_acr(request),
+                amr=current_amr(request),
                 auth_time=request.session.get("auth_time"),
             )
         except ValueError as exc:
