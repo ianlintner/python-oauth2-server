@@ -558,3 +558,22 @@ introspection JWT (divergence 34) is signed with the server's own `jwt_secret` �
 the same key `id_token`s use (divergence 11) — so the requesting client, which does not hold
 `jwt_secret`, cannot verify the signature itself. Candidates: sign with the client's own secret
 instead, or require RS256 (keyset key) for this response type regardless of `id_token_alg`.
+
+### Residuals from the Phase 4a final review (parked, non-blocking)
+
+- `services/clients.py::is_valid_jwks_uri` blocks canonical loopback/link-local literals but not
+  alternative IPv4 spellings (`https://2130706433/`, `https://0177.0.0.1/`, `https://127.1/`) —
+  `ipaddress.ip_address` rejects those forms, so they fall through as "registered names" while
+  `getaddrinfo` resolves them to 127.0.0.1. DNS-resolution bypasses are out of scope by design;
+  normalising these literal spellings is a cheap Phase 4b/4c hardening item. The inline comment
+  claiming `.hostname` raises on a malformed port is inaccurate on CPython 3.12 (only `.port` raises).
+- Admin `POST /admin/api/clients` echoes `jwks` as the submitted object while `GET` returns the raw
+  stored JSON string (module convention) — shapes disagree between create and detail.
+- Admin `PUT` now validates `token_endpoint_auth_method` against the merged row, so a legacy row with
+  an unknown method 400s on any update until a valid method is supplied in the same call.
+- `tests/test_introspection_jwt.py` still uses a 16-byte HS256 test secret (PyJWT
+  `InsecureKeyLengthWarning`); `tests/test_client_assertion.py` was fixed in the final fix wave.
+- Refresh without `resource` widens `aud` back to `client_id` (Rust parity, "Phase 6.3" note in Rust);
+  carrying the old token's `aud` forward via the existing unverified-decode salvage and enforcing
+  "new resource ⊆ old aud" is a zero-migration Phase 4c candidate. Relatedly, `userinfo` validates
+  via the storage row and accepts resource-bound tokens regardless of `aud`.
