@@ -105,6 +105,47 @@ def encode_id_token(
     return jwt.encode(claims.model_dump(exclude_none=True), secret, algorithm="HS256")
 
 
+# RFC 9701 §4 JOSE header typ for a JWT-secured introspection response. Also
+# the response's Content-Type — a caller negotiates the format by sending it
+# in `Accept` (see routes/introspect.py).
+INTROSPECTION_JWT_TYP = "token-introspection+jwt"
+
+
+def encode_introspection_jwt(payload: dict, config: "Config", keyset: KeySet | None) -> str:
+    """Sign an RFC 9701 JWT-secured introspection response.
+
+    Key selection follows the same rule as `encode_id_token` above
+    (divergence 11): RS256 from `keyset.current_for_alg("RS256")` — with
+    that key's `kid` in the header, so the JWT stays verifiable via JWKS
+    across rotation — when `config.id_token_alg == "RS256"` and the keyset
+    has a current RS256 key; otherwise kid-less HS256 over
+    `config.jwt_secret`.
+
+    Unlike `encode_id_token` there is no `config.id_token_private_key_pem`
+    fallback: `seed_keyset` always seeds the keyset from that PEM whenever
+    it is configured, so the only way to reach RS256-mode-without-a-keyset-
+    key is a caller that forced `id_token_alg="RS256"` with no key material
+    at all — for which raising would turn introspection into a 500, where
+    falling back to the shared-secret HS256 signature still yields a
+    verifiable response.
+    """
+    signing_key = (
+        keyset.current_for_alg("RS256")
+        if keyset is not None and config.id_token_alg == "RS256"
+        else None
+    )
+    if signing_key is not None:
+        return jwt.encode(
+            payload,
+            signing_key.key_material,
+            algorithm="RS256",
+            headers={"typ": INTROSPECTION_JWT_TYP, "kid": signing_key.kid},
+        )
+    return jwt.encode(
+        payload, config.jwt_secret, algorithm="HS256", headers={"typ": INTROSPECTION_JWT_TYP}
+    )
+
+
 def decode_access_token(
     token: str, secret: str, issuer: str, *, keyset: KeySet | None = None
 ) -> Claims:

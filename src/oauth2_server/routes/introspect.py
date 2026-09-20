@@ -5,13 +5,17 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.config import Config
 from oauth2_server.errors import OAuthError, oauth_error
-from oauth2_server.models import IntrospectionResponse, Token
-from oauth2_server.security import decode_access_token
+from oauth2_server.models import Client, IntrospectionResponse, Token
+from oauth2_server.security import (
+    INTROSPECTION_JWT_TYP,
+    decode_access_token,
+    encode_introspection_jwt,
+)
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.dpop import DpopError, read_dpop_header, validate_dpop_proof
 from oauth2_server.services.events_bus import emit_event
@@ -45,14 +49,53 @@ def _is_active(row: Token | None, deadline: datetime | None) -> bool:
     return deadline > datetime.now(timezone.utc)
 
 
-def _inactive_response() -> ORJSONResponse:
-    response = ORJSONResponse(IntrospectionResponse(active=False).model_dump(exclude_none=True))
+# RFC 9701 §3: the media type a caller puts in `Accept` to ask for a
+# JWT-secured introspection response, and the Content-Type it gets back.
+INTROSPECTION_JWT_MEDIA_TYPE = f"application/{INTROSPECTION_JWT_TYP}"
+
+
+def _introspection_response(request: Request, body: dict, client: Client) -> Response:
+    """Render an introspection RESULT as JSON or, when the caller asked for
+    it via `Accept: application/token-introspection+jwt`, as an RFC 9701
+    JWT-secured introspection response.
+
+    Every path that returns an introspection result goes through here —
+    including the inactive ones. That is divergence 34 (deliberate): Rust
+    only wraps the active result, leaving a JWT-negotiating caller to parse
+    a bare JSON `{"active": false}` for the inactive answer. Wrapping both
+    keeps one media type per request, and an unwrapped inactive response
+    would also be unauthenticated — a network attacker could downgrade any
+    active answer to a forgeable `{"active": false}`.
+
+    Client-authentication failures (`invalid_client`) are NOT results and
+    stay JSON: at that point there is no authenticated `aud` to sign for.
+    """
+    if INTROSPECTION_JWT_MEDIA_TYPE in request.headers.get("accept", ""):
+        config = request.app.state.config
+        payload = {
+            "iss": config.issuer,
+            "aud": client.client_id,
+            "iat": int(datetime.now(timezone.utc).timestamp()),
+            "token_introspection": body,
+        }
+        response: Response = Response(
+            content=encode_introspection_jwt(payload, config, request.app.state.keyset),
+            media_type=INTROSPECTION_JWT_MEDIA_TYPE,
+        )
+    else:
+        response = ORJSONResponse(body)
     response.headers["Cache-Control"] = "no-store"
     return response
 
 
+def _inactive_response(request: Request, client: Client) -> Response:
+    return _introspection_response(
+        request, IntrospectionResponse(active=False).model_dump(exclude_none=True), client
+    )
+
+
 @router.post("/introspect")
-async def introspect(request: Request) -> ORJSONResponse:
+async def introspect(request: Request) -> Response:
     form = dict(await request.form())
     storage = request.app.state.storage
     config = request.app.state.config
@@ -85,7 +128,7 @@ async def introspect(request: Request) -> ORJSONResponse:
             client_id=row.client_id,
         )
     if inactive or row.client_id != client.client_id:
-        return _inactive_response()
+        return _inactive_response(request, client)
 
     # RFC 9449 §7.1: an access token bound to a DPoP key (a `cnf.jkt` claim)
     # requires the introspection request itself to carry a valid, matching
@@ -126,7 +169,7 @@ async def introspect(request: Request) -> ORJSONResponse:
             return oauth_error(exc.error, exc.description)
 
         if dpop_header is None:
-            return _inactive_response()
+            return _inactive_response(request, client)
 
         try:
             validated = validate_dpop_proof(
@@ -136,10 +179,10 @@ async def introspect(request: Request) -> ORJSONResponse:
                 request.app.state.dpop_replay,
             )
         except DpopError:
-            return _inactive_response()
+            return _inactive_response(request, client)
 
         if validated.jkt != jkt:
-            return _inactive_response()
+            return _inactive_response(request, client)
 
         cnf = claim_cnf
 
@@ -184,9 +227,7 @@ async def introspect(request: Request) -> ORJSONResponse:
         cnf=cnf,
         authorization_details=claim_authorization_details,
     )
-    response = ORJSONResponse(body.model_dump(exclude_none=True))
-    response.headers["Cache-Control"] = "no-store"
-    return response
+    return _introspection_response(request, body.model_dump(exclude_none=True), client)
 
 
 @router.post("/revoke")
