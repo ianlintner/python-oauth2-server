@@ -292,12 +292,19 @@ for a future Phase 3c/3d hardening pass, not as bugs introduced by the port:
 - **No `ath` claim** — the access-token-hash confirmation claim (RFC 9449 §4.3, recommended for
   resource-server-side proof binding at protected resources other than this AS) is never computed or
   required on any DPoP proof.
+  **Done (4c):** Task 4 (commit `cd1ec3f`, divergence 50) — `ath` is computed and REQUIRED on
+  every proof presented at `/oauth/userinfo`; token/introspect proofs still ignore it.
 - **No resource-side DPoP at userinfo** — `GET /oauth/userinfo` accepts a plain `Bearer` token even
   when the underlying access token is `cnf`-bound; only `/oauth/token` (binding) and
   `/oauth/introspect` (binding enforcement) are DPoP-aware.
+  **Done (4c):** Task 4 (commit `cd1ec3f`, divergences 51/49) — `/oauth/userinfo` accepts
+  `Authorization: DPoP` and enforces `cnf.jkt` (and `cnf.x5t#S256`); unbound tokens keep Bearer.
 - **No `dpop_jkt` at authorize/PAR** — RFC 9449 §10 lets a client pre-declare the DPoP key it intends
   to use via a `dpop_jkt` authorization parameter, checked against the actual proof at redemption.
   Neither `GET /oauth/authorize` nor `POST /oauth/par` accept or store it.
+  **Done (4c):** Task 5 (commit `9671dd2`, divergence 52) — accepted at authorize (query/PAR/JAR),
+  bound in `app.state.dpop_code_bindings` and enforced at redemption. Single-process: a code
+  redeemed on another instance skips the check (Rust-side `V22 dpop_jkt` column is the follow-up).
 - **Device grant never cnf-bound** — a DPoP proof presented on `POST /oauth/token` with
   `grant_type=urn:ietf:params:oauth:grant-type:device_code` is accepted and validated but its `cnf`
   is discarded; the issued token is always a plain Bearer token. Pinned by
@@ -307,11 +314,16 @@ for a future Phase 3c/3d hardening pass, not as bugs introduced by the port:
   RFC 9449 doesn't mandate a fresh proof per refresh, but not requiring one means a stolen refresh
   token alone (no DPoP key needed) is enough to keep minting DPoP-labeled tokens. Pinned by
   `tests/test_dpop_token.py::test_refresh_carries_cnf_forward`.
+  **Done (4c):** (partly) Task 5 (commit `9671dd2`, divergence 54) — a PUBLIC client must now present
+  a fresh proof with the same key, checked before the old token is revoked. CONFIDENTIAL clients
+  keep the salvage (their secret is the second factor), so the gap persists for them by design.
 - **No `DPoP-Nonce` header on success responses** — RFC 9449 §8 allows (and many deployments use) an
   authorization server that rotates the nonce on every response, including successful ones, so a
   client always has a fresh nonce ready for its next request. This server only ever sends
   `DPoP-Nonce` on the `use_dpop_nonce` 400 challenge; a client must always expect (and handle) one
   challenge/retry round trip per proof, never a proactively-refreshed nonce on a 200.
+  **Done (4c):** Task 5 (commit `9671dd2`, divergence 53) — a successful token/userinfo response
+  carries a fresh `DPoP-Nonce` when the client has `dpop_nonce_required` and sent a valid proof.
 - **Opaque-token mode silently drops `cnf`/`authorization_details` from both the JWT and the response
   body** — `access_tokens_opaque` is a Python-only mode with no equivalent in Rust; an opaque access
   token is a bare random string with nowhere to carry either claim, so `TokenService.issue` drops both
@@ -327,6 +339,9 @@ for a future Phase 3c/3d hardening pass, not as bugs introduced by the port:
   second exchanging client rather than nested per RFC 8693 §4.1's `act.act` delegation-chain shape.
   Noted at Task 6 review (`.superpowers/sdd/progress.md` "3b Task 6" minor(open)) — no test currently
   exercises a two-hop exchange chain.
+  **Done (4c):** Task 6 (commit `66d174e`, divergence 55) — `act` now nests per RFC 8693 §4.1; the
+  same client re-exchanging collapses instead of nesting, and chains deeper than 10 are
+  `invalid_request`.
 - **Introspection via a refresh-token value skips the `cnf` binding check** — `POST /oauth/introspect`
   decodes the PRESENTED `token` value for its unverified-claims `cnf` lookup (`routes/introspect.py`);
   when that value is an opaque refresh token rather than the JWT access token, `jwt.decode` fails, so
@@ -383,6 +398,10 @@ not as bugs introduced by the port:
   local (password-based) account that happens to share the same verified email address. Logging
   in with Google and then with GitHub using the same email address creates two independent
   `User` rows.
+  **Done (4c):** (opt-in) Task 7 (commits `aa8b469`, `c4c3861`, `12e7ea5`, divergence 56) — with
+  `OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL=true`, a provider-verified email links to a single
+  matching, non-admin, enabled local account. Default false; provider-to-provider linking still
+  creates independent rows.
 - **No `id_token`/nonce validation for social providers** — identity is established purely via
   each provider's authenticated userinfo REST endpoint (Google `/oauth2/v2/userinfo`, Microsoft/
   Azure Graph `/me`, GitHub `/user` + `/user/emails`), never by validating a provider-issued
@@ -546,6 +565,67 @@ From Phase 4b (`docs/plans/2026-09-20-python-oauth2-port-phase-4b.md` → "Globa
     (OIDC Core §3.3.2.3 MUST NOT deliver an id_token in the query string); Rust accepts it. Task 2
     (commit `7926ca3`).
 
+From Phase 4c (`docs/plans/2026-09-20-python-oauth2-port-phase-4c.md` → "Global Constraints"):
+47. `X-Client-Cert-Thumbprint` / `X-SSL-Client-S-DN` are honored ONLY when
+    `config.trust_proxy_headers` (`OAUTH2_SERVER_TRUST_PROXY_HEADERS`) is true; otherwise both are
+    treated as absent (mTLS clients then fail closed with the "certificate missing" error). Rust
+    reads them unconditionally, so anyone reaching the app directly can forge client auth and a
+    `cnf` binding. Task 1 (commit `a032f56`).
+48. `self_signed_tls_client_auth` verifies the presented thumbprint against the client's registered
+    JWKS (a key whose `x5t#S256` member equals the header value); no JWKS or no match →
+    `invalid_client` "self_signed_tls_client_auth: certificate does not match a registered JWK"
+    (RFC 8705 §2.2). Rust accepts any thumbprint. Task 2 (commit `efed63b`).
+49. Certificate-bound (`cnf.x5t#S256`) access tokens are ENFORCED at introspection and userinfo
+    (RFC 8705 §3.2): the request must carry a matching `X-Client-Cert-Thumbprint` (subject to
+    divergence 47). Rust binds but never enforces. Tasks 3+4 (commits `6985733`, `bc7bf4f`,
+    `cd1ec3f`).
+50. DPoP proofs presented at userinfo MUST carry `ath` = base64url(SHA-256(access token))
+    (RFC 9449 §4.3); token/introspect proofs ignore `ath`. Task 4 (commit `cd1ec3f`).
+51. `GET|POST /oauth/userinfo` accepts `Authorization: DPoP <token>` and enforces `cnf.jkt`
+    (RFC 9449 §7.1/§7.2): a bound token presented as Bearer, without a proof, with an invalid
+    proof, an `ath` mismatch, or a `jkt` mismatch → 401 `WWW-Authenticate: DPoP
+    error="invalid_token"` with distinct `error_description`s. Unbound tokens keep Bearer
+    behavior. Task 4 (commit `cd1ec3f`).
+52. `dpop_jkt` (RFC 9449 §10) is accepted at authorize (query/PAR/JAR overlay), validated as a
+    43-char base64url string, bound to the code in `app.state.dpop_code_bindings` (single-process;
+    a code redeemed on another instance skips the check — the Rust-side `V22 dpop_jkt` column is
+    the follow-up), and enforced at redemption: missing proof or `jkt` mismatch → `invalid_grant`.
+    Task 5 (commit `9671dd2`).
+53. `DPoP-Nonce` is set on SUCCESSFUL token and userinfo responses when the client has
+    `dpop_nonce_required` and presented a valid proof (RFC 9449 §8). Rust/Python 3b only sent it on
+    the `use_dpop_nonce` challenge. Task 5 (commit `9671dd2`).
+54. Public-client refresh of a `jkt`-bound token requires a fresh DPoP proof with the SAME key
+    (RFC 9449 §5); otherwise `invalid_grant`, checked before the old token is revoked. Confidential
+    clients keep the salvage behavior. Task 5 (commit `9671dd2`).
+55. RFC 8693 §4.1 `act` chains nest: a subject token already carrying `act` yields
+    `{"sub": <exchanging client>, "act": <prior act>}`; the same client re-exchanging collapses
+    instead of nesting; chains deeper than 10 → `invalid_request`. Response-body `act` echoes the
+    JWT claim (Rust never writes `act` to the JWT). Task 6 (commit `66d174e`).
+56. Social login may link to an existing local account by email only when ALL hold:
+    `OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL=true` (default false), the provider asserts a verified
+    email (Google, GitHub; never Microsoft/Azure), the folded emails match exactly, exactly one
+    local row matches, that row is neither `role == "admin"` nor in `config.admin_emails`, and the
+    row is enabled. Linking is implicit (no provider-link record; the row's username is untouched).
+    Task 7 (commits `aa8b469`, `c4c3861`, `12e7ea5`).
+57. Client-supplied JSON/URI parameters are bounded: `claims` ≤ 8192 / depth 10,
+    `authorization_details` ≤ 16384 / depth 10, `resource` ≤ 2048 characters; violations use each
+    parameter's existing error channel/code with the text "`<name>` exceeds the maximum length of
+    N characters" / "… nesting depth of 10"; `RecursionError` is never reachable. Tasks 1+8
+    (commit `a032f56` + this task).
+58. Admin client create/update validate every `redirect_uris`/logout-URI element with the same rule
+    DCR uses (an empty admin `redirect_uris` list stays allowed). The admin API also accepts and
+    persists `backchannel_logout_uri`/`frontchannel_logout_uri`/`post_logout_redirect_uris`, which
+    were previously settable only through RFC 7591 registration. Task 8 (this task).
+59. The stored `claims_request` is honored for the id_token minted at code redemption: `acr`,
+    `auth_time`, `email`, `preferred_username` under the `id_token` member, only when the granted
+    scope already permits the claim (never widening), `essential` unmet → still succeed,
+    `value`/`values` mismatch → omit. `acr`/`auth_time` have no session value at the token endpoint
+    and are therefore always absent there. The `userinfo` member is NOT yet honored and
+    `claims_parameter_supported` stays unadvertised. Task 8 (this task).
+60. Refresh enforces RFC 8707 §2.2: a `resource` not in the old token's `aud` → `invalid_target`
+    before any revocation; no `resource` → the old `aud` is carried forward instead of widening to
+    `[client_id]`; opaque/non-JWT old tokens keep the previous behavior. Task 8 (this task).
+
 ### Known Phase 3d gaps (deliberate/parity, MongoDB backend)
 
 - **App-side full-collection scans for every list/page method.** `list_all_*`/`list_*_page`/
@@ -596,32 +676,47 @@ branch/PR:
 |---|---|
 | **4a** (this phase) | RFC 7523 JWT client auth (`client_secret_jwt`, `private_key_jwt`) + jti replay + `jwks_uri` cache; RFC 8707 resource indicators → `aud`; RFC 9728 protected-resource metadata + status-list stub + discovery/userinfo field parity; RFC 9701 JWT introspection responses; RFC 8628 `slow_down`. |
 | **4b** (done) | Authorize front-channel parity: `response_mode` `query`/`form_post`/`fragment`; OIDC hybrid `code id_token`; JAR `request` objects (unsigned public / HS256 / RS256-via-client-JWKS); `acr_values` step-up (RFC 9470) + `claims` request + `acr`/`amr`/`auth_time` claims. |
-| **4c** | RFC 8705 mTLS (`tls_client_auth`, `self_signed_tls_client_auth`, `X-Client-Cert-Thumbprint`/`X-SSL-Client-S-DN`, `cnf.x5t#S256`); DPoP hardening beyond Rust (`ath`, resource-side DPoP at userinfo, `dpop_jkt` at authorize/PAR, `DPoP-Nonce` on 200s); nested `act` chains; social account-linking by email. |
+| **4c** (done) | RFC 8705 mTLS (`tls_client_auth`, `self_signed_tls_client_auth`, `X-Client-Cert-Thumbprint`/`X-SSL-Client-S-DN`, `cnf.x5t#S256` bound AND enforced); DPoP hardening beyond Rust (`ath`, resource-side DPoP at userinfo, `dpop_jkt` at authorize/PAR, `DPoP-Nonce` on 200s, fresh proof on public-client refresh); nested `act` chains; opt-in social account-linking by verified email; the Phase 4b residuals (input caps, admin redirect validation, `claims` in the id_token, refresh `aud` subset). Divergences 47–60. |
 
 Out of scope for all of Phase 4 (unchanged from earlier phases): Redis/Kafka/RabbitMQ event
 backends, bulkheads, OTel span export, multi-instance persistence of in-process stores,
 admin-session server-side revocation.
 
+Known to remain after 4c (candidates for a later phase):
+
+- **Rust-side `V22` `dpop_jkt` column** — the only way the divergence-52 code binding survives a
+  multi-instance deployment; this repo authors no migrations, so it has to land in the Rust repo
+  first (until then `app.state.dpop_code_bindings` is single-process and a cross-instance
+  redemption skips the check).
+- **`mtls_endpoint_aliases`** (RFC 8705 §5) are not advertised — mTLS clients use the ordinary
+  endpoints (Rust parity).
+- **The `claims` `userinfo` member** is still not honored, so `claims_parameter_supported` stays
+  unadvertised even though the id_token half now works (divergence 59).
+- **No nonce enforcement at userinfo** — `userinfo` validates the access token via the storage row
+  and accepts resource-bound tokens regardless of `aud`.
+- **PKCE is still required only for public clients** (`token_endpoint_auth_method == "none"`);
+  Rust requires it unconditionally.
+
 ### Remaining Phase 4b gaps (carried to 4c or later)
 
-- `claims` (RFC-style OIDC claims request) is parsed and stored on the authorization code
-  (`claims_request`, Task 6) but not yet honored at `/oauth/userinfo` or `/oauth/token` —
-  requested individual claims currently have no effect on the response.
+- ~~`claims` … not yet honored at `/oauth/userinfo` or `/oauth/token`~~ — **id_token half done
+  (4c)**, Task 8 (divergence 59): the stored request is honored for the id_token minted at code
+  redemption (scope-gated, never widening; `value`/`values` mismatch omits the claim). The
+  `userinfo` member is STILL not honored, which is why `claims_parameter_supported` stays
+  unadvertised.
 - PKCE is still required only for public clients (`token_endpoint_auth_method == "none"`); Rust
   requires PKCE unconditionally, for confidential clients too.
 - `request_uri=` (RFC 9101 §5.2, a JAR fetched from a URL rather than passed inline via
   `request=`) remains unsupported; only PAR's own `request_uri` value is accepted at
   `/oauth/authorize`.
-- No size cap is enforced on the `claims`, `authorization_details` (RAR), or `resource` parameter
-  values — an oversized value is stored/processed as-is rather than rejected up front. Relatedly,
-  deeply nested `claims`/`authorization_details` JSON can raise `RecursionError` (→ an unhandled
-  500) during parsing/validation; the size/depth cap above needs to bound nesting depth too, not
-  just payload length.
-- `POST /admin/api/clients` and `PUT` do not run `_is_valid_redirect_uri` over the submitted
-  `redirect_uris` (pre-existing Phase 3 gap), so an admin can register a `redirect_uri` containing
-  a fragment or otherwise malformed value; this is now more relevant with response_mode
-  fragment/form_post delivery, where such a value is rejected only at authorize time via the
-  `"redirect_uri must not contain a fragment"` guard rather than at registration.
+- ~~No size cap on `claims`/`authorization_details`/`resource`; deep nesting can raise
+  `RecursionError`~~ — **Done (4c)**, Tasks 1+8 (divergence 57): `services/limits.py` bounds
+  length and nesting depth (`claims` 8192/10, `authorization_details` 16384/10, `resource` 2048)
+  at every call site, before `json.loads` runs.
+- ~~`POST`/`PUT /admin/api/clients` do not validate the submitted `redirect_uris`~~ —
+  **Done (4c)**, Task 8 (divergence 58): both now run the shared
+  `services/clients.py::is_valid_redirect_uri` over `redirect_uris` and the logout URIs (which
+  the admin API also accepts and persists now). An empty `redirect_uris` list stays allowed.
 
 ### Residuals from the Phase 4a final review (parked, non-blocking)
 
@@ -634,7 +729,7 @@ admin-session server-side revocation.
   stored JSON string (module convention) — shapes disagree between create and detail.
 - Admin `PUT` now validates `token_endpoint_auth_method` against the merged row, so a legacy row with
   an unknown method 400s on any update until a valid method is supplied in the same call.
-- Refresh without `resource` widens `aud` back to `client_id` (Rust parity, "Phase 6.3" note in Rust);
-  carrying the old token's `aud` forward via the existing unverified-decode salvage and enforcing
-  "new resource ⊆ old aud" is a zero-migration Phase 4c candidate. Relatedly, `userinfo` validates
-  via the storage row and accepts resource-bound tokens regardless of `aud`.
+- ~~Refresh without `resource` widens `aud` back to `client_id`~~ — **Done (4c)**, Task 8
+  (divergence 60): the old token's `aud` is carried forward and a `resource` outside it is
+  `invalid_target` (before any revocation). Still open: `userinfo` validates via the storage row
+  and accepts resource-bound tokens regardless of `aud`.

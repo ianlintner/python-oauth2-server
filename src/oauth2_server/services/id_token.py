@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 from oauth2_server.keys import KeySet
 from oauth2_server.models import Client, IdTokenClaims, User
+from oauth2_server.services.claims_request import ClaimsSelection
 from oauth2_server.security import encode_id_token, half_hash
 
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ def mint_id_token(
     acr: str | None = None,
     amr: list[str] | None = None,
     auth_time: int | None = None,
+    claims_selection: ClaimsSelection | None = None,
 ) -> str:
     """Build and encode an id_token for `user_id` as `sub`.
 
@@ -64,6 +66,12 @@ def mint_id_token(
     `ValueError` (turned into a 500 `server_error` by every call site) when
     `config.id_token_alg == "RS256"` but neither the keyset nor
     `config.id_token_private_key_pem` can supply a signing key.
+
+    `claims_selection` (divergence 59) is the OIDC Core §5.5 `claims` request
+    distilled by `services/claims_request.py`. It only ever SUBTRACTS: a
+    claim whose requested `value`/`values` the actual value does not satisfy
+    is dropped. It cannot add a claim the scope did not already permit, which
+    is why it is applied last, over the scope-gated assignments above.
     """
     scope_set = set(scope.split())
     now = int(datetime.now(timezone.utc).timestamp())
@@ -87,4 +95,9 @@ def mint_id_token(
             claims.email = user.email
         if "profile" in scope_set:
             claims.preferred_username = user.username
+    if claims_selection is not None:
+        for name in ("acr", "auth_time", "email", "preferred_username"):
+            value = getattr(claims, name)
+            if value is not None and not claims_selection.allows(name, value):
+                setattr(claims, name, None)
     return encode_id_token(claims, config.jwt_secret, config=config, keyset=keyset)

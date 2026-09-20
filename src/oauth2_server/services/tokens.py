@@ -31,6 +31,7 @@ class TokenService:
         authorization_details: list[dict] | None = None,
         act: dict | None = None,
         resource: str | None = None,
+        audience: list[str] | None = None,
     ) -> TokenResponse:
         """Issue an access (+ optional refresh) token.
 
@@ -67,6 +68,11 @@ class TokenService:
         claims above: an opaque token is a bare random string with no `aud`
         to bind. The stored `Token` row is unaffected either way — the
         audience lives only in the JWT.
+
+        `audience` sets `aud` verbatim and takes precedence over `resource`.
+        Its one caller is the refresh grant (divergence 60), which carries
+        the audience set the grant was originally issued for forward when the
+        refresh request names no `resource` of its own.
         """
         config = self._config
         subject = user_id or client.client_id
@@ -87,6 +93,7 @@ class TokenService:
                 authorization_details=bound_details,
                 act=bound_act,
                 resource=resource,
+                audience=audience,
             )
             # Prefer the current RS256 key so access+refresh tokens follow
             # RS256 rotation automatically whenever one is configured; fall

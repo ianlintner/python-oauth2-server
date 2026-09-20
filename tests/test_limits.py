@@ -90,3 +90,18 @@ def test_check_json_param_propagates_invalid_json():
     # sites keep their own invalid-JSON error messages (Task 8).
     with pytest.raises(json.JSONDecodeError):
         check_json_param("not json", name="claims", max_len=100, max_depth=10)
+
+
+async def test_over_long_resource_invalid_target(client_app):
+    """Divergence 57: a `resource` over 2048 characters is `invalid_target`."""
+    from tests.helpers import post_token
+
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials", "resource": "https://api.test/" + "a" * 2100},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["error"] == "invalid_target"
+    assert "`resource` exceeds the maximum length of 2048 characters" == body["error_description"]

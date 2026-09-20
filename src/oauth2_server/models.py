@@ -228,6 +228,7 @@ class Claims(BaseModel):
         authorization_details: list[dict] | None = None,
         act: dict | None = None,
         resource: str | None = None,
+        audience: list[str] | None = None,
     ) -> "Claims":
         """Build access-token claims.
 
@@ -235,12 +236,17 @@ class Claims(BaseModel):
         REPLACES `client_id` as the audience, so the token is only accepted
         by the resource server it was requested for. Absent, `aud` stays
         `[client_id]` (Rust parity — see `services/resource.py`).
+
+        `audience` is an explicit audience LIST and wins over `resource`: it
+        is how the refresh grant carries an already-granted audience set
+        forward (divergence 60) rather than re-deriving it from a single
+        resource indicator.
         """
         iat = int(_now().timestamp())
         return cls(
             sub=subject,
             iss=issuer,
-            aud=[resource] if resource else [client_id],
+            aud=audience or ([resource] if resource else [client_id]),
             exp=iat + duration_seconds,
             iat=iat,
             scope=scope,

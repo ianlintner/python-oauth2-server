@@ -701,3 +701,90 @@ async def test_admin_update_to_self_signed_without_keys_rejected():
         assert resp.json()["error_description"] == (
             "self_signed_tls_client_auth requires jwks or jwks_uri"
         )
+
+
+# --- Divergence 58: redirect / logout URI validation ---
+
+
+async def test_admin_create_rejects_fragment_redirect_uri():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={"name": "Bad Redirect", "redirect_uris": ["https://a.example/cb#frag"]},
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["error"] == "invalid_request"
+        assert "redirect_uris" in body["error_description"]
+
+
+async def test_admin_create_rejects_non_http_redirect_uri():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={"name": "Bad Scheme", "redirect_uris": ["javascript:alert(1)"]},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_request"
+
+
+async def test_admin_create_allows_empty_redirect_uris():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post("/admin/api/clients", json={"name": "No Redirects"})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["redirect_uris"] == []
+
+
+async def test_admin_update_rejects_bad_redirect_uri():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+        resp = await client.put(
+            f"/admin/api/clients/{seeded.id}", json={"redirect_uris": ["/relative/cb"]}
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_request"
+        reloaded = await client.storage.get_client("client1")
+        assert reloaded.redirect_uri_list() == ["https://a.example/cb"]
+
+
+async def test_admin_update_rejects_bad_logout_uri():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+
+        for field, value in (
+            ("backchannel_logout_uri", "not-a-url"),
+            ("frontchannel_logout_uri", "https://a.example/fc#frag"),
+            ("post_logout_redirect_uris", ["https://ok.example/out", "ftp://bad.example/out"]),
+        ):
+            resp = await client.put(f"/admin/api/clients/{seeded.id}", json={field: value})
+            assert resp.status_code == 400, (field, resp.text)
+            assert resp.json()["error"] == "invalid_request"
+            assert field in resp.json()["error_description"]
+
+        reloaded = await client.storage.get_client("client1")
+        assert reloaded.backchannel_logout_uri == ""
+        assert reloaded.frontchannel_logout_uri == ""
+
+
+async def test_admin_update_accepts_valid_logout_uris():
+    async with build_client_app() as client:
+        await _login(client)
+        seeded = await client.storage.get_client("client1")
+        resp = await client.put(
+            f"/admin/api/clients/{seeded.id}",
+            json={
+                "backchannel_logout_uri": "https://a.example/bc",
+                "frontchannel_logout_uri": "https://a.example/fc",
+                "post_logout_redirect_uris": ["https://a.example/out"],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        reloaded = await client.storage.get_client("client1")
+        assert reloaded.backchannel_logout_uri == "https://a.example/bc"
+        assert reloaded.frontchannel_logout_uri == "https://a.example/fc"
+        assert reloaded.get_post_logout_redirect_uris() == ["https://a.example/out"]

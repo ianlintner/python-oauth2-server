@@ -37,6 +37,7 @@ from oauth2_server.services.clients import (
     SELF_SIGNED_REQUIRES_JWKS_ERROR,
     VALID_AUTH_METHODS,
     is_valid_jwks_uri,
+    is_valid_redirect_uri,
 )
 from oauth2_server.storage.paging import ListQuery, page_envelope
 
@@ -74,6 +75,12 @@ class ClientUpdateBody(BaseModel):
     # makes a `tls_client_auth` client accept any certificate the proxy
     # vouched for (see `services/clients.py::_authenticate_tls_client_auth`).
     tls_client_certificate_subject_dn: StrictStr | None = None
+    # OIDC logout endpoints. Accepted here (they were previously only
+    # settable via RFC 7591 registration) and validated with exactly the
+    # rule registration uses — divergence 58. "" clears a single URI.
+    backchannel_logout_uri: StrictStr | None = None
+    frontchannel_logout_uri: StrictStr | None = None
+    post_logout_redirect_uris: list[StrictStr] | None = None
 
 
 def _client_not_found() -> ORJSONResponse:
@@ -84,6 +91,55 @@ def _bad_request(description: str) -> ORJSONResponse:
     return ORJSONResponse(
         {"error": "invalid_request", "error_description": description}, status_code=400
     )
+
+
+def _validate_redirect_uris(
+    redirect_uris: object,
+    *,
+    backchannel_logout_uri: str | None = None,
+    frontchannel_logout_uri: str | None = None,
+    post_logout_redirect_uris: object = None,
+) -> ORJSONResponse | None:
+    """Divergence 58: the admin API validates client URIs the way RFC 7591
+    dynamic registration does.
+
+    Before this, `POST`/`PUT /admin/api/clients` persisted `redirect_uris`
+    verbatim — so an admin (or anything that reached the admin API) could
+    register `javascript:` or fragment-bearing callbacks that
+    `/oauth/authorize` would then happily redirect to. The one difference
+    from registration is that an EMPTY admin `redirect_uris` list stays
+    allowed: the admin API is also how non-redirect clients
+    (client_credentials, device) are created.
+
+    Each argument is skipped when it is `None` ("not provided"); `""` clears
+    a single-URI field and is likewise not validated. Returns the 400 to
+    return verbatim, or `None` when everything is acceptable.
+    """
+    if redirect_uris is not None:
+        if not isinstance(redirect_uris, list) or not all(
+            isinstance(uri, str) for uri in redirect_uris
+        ):
+            return _bad_request("redirect_uris must be a list of strings")
+        if not all(is_valid_redirect_uri(uri) for uri in redirect_uris):
+            return _bad_request("redirect_uris must be absolute http(s) URLs without fragments")
+
+    for name, uri in (
+        ("backchannel_logout_uri", backchannel_logout_uri),
+        ("frontchannel_logout_uri", frontchannel_logout_uri),
+    ):
+        if uri and not is_valid_redirect_uri(uri):
+            return _bad_request(f"{name} must be an absolute http(s) URL without a fragment")
+
+    if post_logout_redirect_uris is not None:
+        if not isinstance(post_logout_redirect_uris, list) or not all(
+            isinstance(uri, str) for uri in post_logout_redirect_uris
+        ):
+            return _bad_request("post_logout_redirect_uris must be a list of strings")
+        if not all(is_valid_redirect_uri(uri) for uri in post_logout_redirect_uris):
+            return _bad_request(
+                "post_logout_redirect_uris must be absolute http(s) URLs without fragments"
+            )
+    return None
 
 
 def _validate_key_material(
@@ -229,6 +285,21 @@ async def create_client(
     grant_types = body["grant_types"] if "grant_types" in body else list(_DEFAULT_GRANT_TYPES)
     scope = body.get("scope") or ""
 
+    backchannel_logout_uri = body.get("backchannel_logout_uri") or ""
+    frontchannel_logout_uri = body.get("frontchannel_logout_uri") or ""
+    post_logout_redirect_uris = body.get("post_logout_redirect_uris")
+    if not isinstance(backchannel_logout_uri, str) or not isinstance(frontchannel_logout_uri, str):
+        return _bad_request("logout URIs must be strings")
+
+    invalid = _validate_redirect_uris(
+        redirect_uris,
+        backchannel_logout_uri=backchannel_logout_uri,
+        frontchannel_logout_uri=frontchannel_logout_uri,
+        post_logout_redirect_uris=post_logout_redirect_uris,
+    )
+    if invalid is not None:
+        return invalid
+
     now = datetime.now(timezone.utc)
     client = Client(
         id=uuid.uuid4().hex,
@@ -244,6 +315,11 @@ async def create_client(
         jwks=jwks_json,
         jwks_uri=jwks_uri,
         tls_client_certificate_subject_dn=subject_dn,
+        backchannel_logout_uri=backchannel_logout_uri,
+        frontchannel_logout_uri=frontchannel_logout_uri,
+        post_logout_redirect_uris=(
+            json.dumps(post_logout_redirect_uris) if post_logout_redirect_uris else ""
+        ),
         enabled=True,
     )
     await storage.save_client(client)
@@ -324,6 +400,27 @@ async def update_client(
         updates["jwks_uri"] = body_model.jwks_uri
     if "tls_client_certificate_subject_dn" in fields_set:
         updates["tls_client_certificate_subject_dn"] = body_model.tls_client_certificate_subject_dn
+    if "backchannel_logout_uri" in fields_set:
+        updates["backchannel_logout_uri"] = body_model.backchannel_logout_uri
+    if "frontchannel_logout_uri" in fields_set:
+        updates["frontchannel_logout_uri"] = body_model.frontchannel_logout_uri
+    if "post_logout_redirect_uris" in fields_set:
+        updates["post_logout_redirect_uris"] = (
+            json.dumps(body_model.post_logout_redirect_uris)
+            if body_model.post_logout_redirect_uris
+            else ""
+        )
+
+    # Divergence 58: only the SUBMITTED URIs are validated — a stored row that
+    # predates this rule keeps working until someone edits it.
+    invalid = _validate_redirect_uris(
+        body_model.redirect_uris if "redirect_uris" in fields_set else None,
+        backchannel_logout_uri=body_model.backchannel_logout_uri,
+        frontchannel_logout_uri=body_model.frontchannel_logout_uri,
+        post_logout_redirect_uris=body_model.post_logout_redirect_uris,
+    )
+    if invalid is not None:
+        return invalid
 
     # Validate the row as it would be AFTER the merge, so a partial update
     # cannot combine with the stored values into an unusable client.

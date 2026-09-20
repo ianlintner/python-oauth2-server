@@ -4,8 +4,9 @@ Parity notes (Rust `crates/oauth2-actix/src/actors/token_actor.rs`):
 - no resource -> `aud` stays `[client_id]`;
 - the authorization_code grant uses the resource STORED on the code, ignoring
   any form value at redemption;
-- refresh passes its own `resource` straight through (no "subset of the
-  originally authorized resources" check).
+- refresh used to pass its own `resource` straight through; divergence 60
+  now enforces RFC 8707 §2.2's "subset of the originally granted audience"
+  rule and carries the old `aud` forward when no `resource` is sent.
 
 Divergence 32 (beyond Rust): the value is validated as an absolute URI with no
 fragment and rejected with `invalid_target` (RFC 8707 §2); Rust accepts any string.
@@ -16,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 import jwt
 
+from tests.conftest import build_client_app
 from tests.helpers import login_session, post_token
 from tests.test_device_flow import start_device_flow
 from tests.test_token_endpoint import _pkce_pair, run_code_flow
@@ -105,23 +107,90 @@ async def test_resource_on_authorize_is_stored_on_code_and_bound_to_token_aud(cl
     assert _claims(token_resp.json()["access_token"])["aud"] == RESOURCE
 
 
-async def test_resource_on_refresh_rebinds_aud(client_app):
-    resp, _ = await run_code_flow(client_app)
-    assert resp.status_code == 200, resp.text
-    refresh_token = resp.json()["refresh_token"]
-    assert _claims(resp.json()["access_token"])["aud"] == "client1"
-
-    refreshed = await post_token(
+async def _code_flow(client_app, resource: str | None = None) -> dict:
+    """Full authorization_code flow with an optional `resource`; token body."""
+    resp, verifier = await _authorize(client_app, resource)
+    assert resp.status_code == 302, resp.text
+    code = parse_qs(urlparse(resp.headers["location"]).query)["code"][0]
+    token_resp = await post_token(
         client_app,
         {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "resource": RESOURCE,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": REDIRECT_URI,
+            "client_id": "client1",
+            "code_verifier": verifier,
         },
         basic_auth=BASIC,
     )
+    assert token_resp.status_code == 200, token_resp.text
+    return token_resp.json()
+
+
+async def _refresh(client_app, refresh_token: str, resource: str | None = None):
+    data = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+    if resource is not None:
+        data["resource"] = resource
+    return await post_token(client_app, data, basic_auth=BASIC)
+
+
+async def test_refresh_with_in_set_resource_narrows(client_app):
+    """Divergence 60: a `resource` already in the old token's `aud` is honored."""
+    issued = await _code_flow(client_app, RESOURCE)
+    assert _claims(issued["access_token"])["aud"] == RESOURCE
+
+    refreshed = await _refresh(client_app, issued["refresh_token"], RESOURCE)
     assert refreshed.status_code == 200, refreshed.text
     assert _claims(refreshed.json()["access_token"])["aud"] == RESOURCE
+
+
+async def test_refresh_with_out_of_set_resource_invalid_target_and_token_survives(client_app):
+    """RFC 8707 §2.2: refresh may narrow the granted audience set, never widen it.
+
+    The rejection lands BEFORE any revocation, so the refresh token (and its
+    family) survives for the client's corrected retry.
+    """
+    issued = await _code_flow(client_app, RESOURCE)
+    refresh_token = issued["refresh_token"]
+
+    rejected = await _refresh(client_app, refresh_token, OTHER_RESOURCE)
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["error"] == "invalid_target"
+    assert "originally granted" in rejected.json()["error_description"]
+
+    retried = await _refresh(client_app, refresh_token)
+    assert retried.status_code == 200, retried.text
+    assert _claims(retried.json()["access_token"])["aud"] == RESOURCE
+
+
+async def test_refresh_without_resource_keeps_old_aud(client_app):
+    """No `resource` on refresh carries the old `aud` forward (it does NOT
+    widen back to `[client_id]`, which is what this port did through 4b)."""
+    issued = await _code_flow(client_app, RESOURCE)
+    refreshed = await _refresh(client_app, issued["refresh_token"])
+    assert refreshed.status_code == 200, refreshed.text
+    assert _claims(refreshed.json()["access_token"])["aud"] == RESOURCE
+
+
+async def test_refresh_without_granted_resource_still_rejects_new_one(client_app):
+    """A grant with no `resource` has `aud == [client_id]`; refresh cannot
+    invent a resource audience that was never granted."""
+    issued = await _code_flow(client_app)
+    assert _claims(issued["access_token"])["aud"] == "client1"
+
+    rejected = await _refresh(client_app, issued["refresh_token"], RESOURCE)
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["error"] == "invalid_target"
+
+
+async def test_refresh_opaque_mode_unchanged(client_app):
+    """An opaque old access token carries no readable `aud`, so the subset
+    check cannot apply and today's pass-through behavior is kept."""
+    async with build_client_app({"access_tokens_opaque": True}) as opaque_app:
+        issued = await _code_flow(opaque_app)
+        refreshed = await _refresh(opaque_app, issued["refresh_token"], RESOURCE)
+        assert refreshed.status_code == 200, refreshed.text
+        assert "." not in refreshed.json()["access_token"]
 
 
 async def test_resource_on_device_grant_binds_aud(client_app):

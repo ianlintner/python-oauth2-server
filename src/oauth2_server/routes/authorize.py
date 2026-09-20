@@ -90,6 +90,7 @@ from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.jar import process_jar
 from oauth2_server.services.rar import RarError, validate_authorization_details
+from oauth2_server.services.limits import LimitError, check_json_param
 from oauth2_server.services.resource import validate_resource
 from oauth2_server.sessions import current_acr, current_amr, current_user_id
 
@@ -409,12 +410,26 @@ async def authorize(request: Request):
     # or JAR-overlaid value) must parse as a JSON *object* — an array,
     # string, number or malformed JSON is an `invalid_request` redirect. The
     # raw string (not the parsed dict) is what gets stored on the
-    # authorization code below; nothing downstream reads it yet, and
+    # authorization code below, where `services/claims_request.py` reads it
+    # back when the id_token is minted (divergence 59, id_token member only);
     # `claims_parameter_supported` is deliberately not advertised.
     claims_request = merged.get("claims")
     if claims_request is not None:
         try:
-            parsed_claims = json.loads(claims_request)
+            parsed_claims = check_json_param(
+                claims_request, name="claims", max_len=8192, max_depth=10
+            )
+        except LimitError as exc:
+            # Divergence 57: over-long / over-nested input is rejected through
+            # the same redirect channel, with the limits helper's wording.
+            return _deliver_error(
+                response_mode,
+                redirect_uri,
+                "invalid_request",
+                exc.description,
+                state,
+                config.issuer,
+            )
         except json.JSONDecodeError:
             parsed_claims = None
         if not isinstance(parsed_claims, dict):

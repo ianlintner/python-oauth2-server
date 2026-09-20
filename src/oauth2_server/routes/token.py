@@ -51,6 +51,7 @@ from oauth2_server.models import Client, User
 from oauth2_server.security import decode_unverified_claims
 from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.auth import scope_is_subset
+from oauth2_server.services.claims_request import ClaimsSelection, select_id_token_claims
 from oauth2_server.services.client_assertion import unverified_assertion_subject
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.dpop import (
@@ -189,6 +190,29 @@ def _salvage_old_cnf(access_token: str) -> dict | None:
     return cnf if isinstance(cnf, dict) else None
 
 
+def _salvage_old_aud(access_token: str) -> list[str] | None:
+    """The audience the OLD access token was issued for, or `None`.
+
+    Divergence 60 needs the originally granted audience set to enforce
+    RFC 8707 §2.2 on refresh. It is read out of the old access token's `aud`
+    claim WITHOUT verifying the signature — the token came straight out of
+    this server's own storage row, and the alternative (a dedicated column)
+    would be a schema change this repo does not own.
+
+    `None` means "unknown", which is the honest answer for an opaque access
+    token (a bare random string with no claims at all) and for a JWT with no
+    usable `aud`; callers then keep the pre-divergence behavior. A bare
+    string `aud` — how a single audience is serialized, Rust serde parity —
+    is normalized to a one-element list.
+    """
+    aud = decode_unverified_claims(access_token).get("aud")
+    if isinstance(aud, str):
+        return [aud]
+    if isinstance(aud, list) and all(isinstance(entry, str) for entry in aud) and aud:
+        return list(aud)
+    return None
+
+
 def _with_dpop_nonce(
     response: ORJSONResponse,
     client: Client,
@@ -221,6 +245,7 @@ def _mint_id_token(
     *,
     nonce: str | None = None,
     code: str | None = None,
+    claims_selection: ClaimsSelection | None = None,
 ) -> str:
     """Thin wrapper over `services.id_token.mint_id_token` for this endpoint's
     three grant branches (authorization_code, refresh_token, device_code).
@@ -231,6 +256,9 @@ def _mint_id_token(
     code to hash on refresh). `acr`/`amr`/`auth_time` are front-channel
     session facts that the token endpoint has no session to read, so they
     stay unset here — the authorize endpoint's hybrid branch supplies them.
+    `claims_selection` (divergence 59) is supplied on the authorization_code
+    branch only: it is derived from the `claims` request stored on the code,
+    and there is no stored request to honor on refresh or device_code.
     Raises `ValueError` (caught by all three call sites and turned into a 500
     `server_error`) when RS256 is configured with no usable signing key.
     """
@@ -244,6 +272,7 @@ def _mint_id_token(
         nonce=nonce,
         access_token=access_token,
         code=code,
+        claims_selection=claims_selection,
     )
 
 
@@ -534,6 +563,9 @@ async def token(request: Request) -> ORJSONResponse:
                     keyset,
                     nonce=auth_code.nonce,
                     code=auth_code.code,
+                    claims_selection=select_id_token_claims(
+                        auth_code.claims_request, scope=auth_code.scope
+                    ),
                 )
             except ValueError as exc:
                 return oauth_error("server_error", str(exc), status=500)
@@ -596,6 +628,27 @@ async def token(request: Request) -> ORJSONResponse:
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
+        # RFC 8707 §2.2 / divergence 60: a refresh may NARROW the audience the
+        # grant was originally issued for, never widen it. The old token's
+        # `aud` is the authoritative record of that set (`_salvage_old_aud`);
+        # when it is unknown (opaque access tokens) the pre-divergence
+        # pass-through is kept. Like the `resource` validation above, this
+        # runs BEFORE `revoke_token` so a rejected request leaves the refresh
+        # token — and its family — usable for the corrected retry.
+        old_audience = _salvage_old_aud(old_token.access_token)
+        carried_audience: list[str] | None = None
+        if old_audience is not None:
+            if resource is not None:
+                if resource not in old_audience:
+                    return oauth_error(
+                        "invalid_target",
+                        "resource is not among the audiences originally granted",
+                    )
+            else:
+                # No `resource` on this request: carry the granted audience
+                # forward instead of silently widening back to [client_id].
+                carried_audience = old_audience
+
         # Refresh carries the OLD access token's cnf forward; `cnf` (from this
         # request's own header, if any) is deliberately unused — see
         # `_salvage_old_cnf` and the module docstring. Salvaged HERE, before
@@ -640,6 +693,7 @@ async def token(request: Request) -> ORJSONResponse:
             token_family=family,
             cnf=refresh_cnf,
             resource=resource,
+            audience=carried_audience,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
         emit_event(
