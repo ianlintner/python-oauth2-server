@@ -32,6 +32,7 @@ from oauth2_server.models import Client
 from oauth2_server.routes.admin._util import _json_body, _parse_body
 from oauth2_server.routes.admin.guard import AdminActor, require_admin
 from oauth2_server.services.audit import build_audit, record_audit
+from oauth2_server.services.clients import JWKS_URI_ERROR, VALID_AUTH_METHODS, is_valid_jwks_uri
 from oauth2_server.storage.paging import ListQuery, page_envelope
 
 router = APIRouter()
@@ -57,10 +58,46 @@ class ClientUpdateBody(BaseModel):
     scope: StrictStr | None = None
     token_endpoint_auth_method: StrictStr | None = None
     enabled: StrictBool | None = None
+    # RFC 7523 §3 key material. An empty object / empty string CLEARS the
+    # column (an explicit JSON `null` is refused by `_parse_body`), which is
+    # why `_validate_key_material` below runs against the merged row: a
+    # `private_key_jwt` client must not be left with nothing to verify
+    # assertions against.
+    jwks: dict | None = None
+    jwks_uri: StrictStr | None = None
 
 
 def _client_not_found() -> ORJSONResponse:
     return ORJSONResponse({"error": "client not found"}, status_code=404)
+
+
+def _bad_request(description: str) -> ORJSONResponse:
+    return ORJSONResponse(
+        {"error": "invalid_request", "error_description": description}, status_code=400
+    )
+
+
+def _validate_key_material(
+    auth_method: str, jwks_json: str, jwks_uri: str
+) -> ORJSONResponse | None:
+    """The three client-metadata rules `routes/register.py` applies to
+    RFC 7591 registrations, enforced identically here.
+
+    Callers pass the values that WILL be persisted — for an update that
+    means the merged (existing + updated) row, not just the submitted
+    fields. Returns the 400 to return verbatim, or `None` when valid.
+    """
+    if auth_method not in VALID_AUTH_METHODS:
+        return _bad_request(
+            f"token_endpoint_auth_method must be one of {sorted(VALID_AUTH_METHODS)}"
+        )
+    if jwks_json and jwks_uri:
+        return _bad_request("jwks and jwks_uri are mutually exclusive")
+    if jwks_uri and not is_valid_jwks_uri(jwks_uri):
+        return _bad_request(JWKS_URI_ERROR)
+    if auth_method == "private_key_jwt" and not jwks_json and not jwks_uri:
+        return _bad_request("private_key_jwt requires jwks or jwks_uri")
+    return None
 
 
 async def _resolve_client(storage, client_uuid: str) -> Client | None:
@@ -79,6 +116,7 @@ def _client_info(client: Client) -> dict:
         "grant_types": client.grant_types,
         "token_endpoint_auth_method": client.token_endpoint_auth_method,
         "redirect_uris": client.redirect_uris,
+        "jwks_uri": client.jwks_uri,
         "created_at": client.created_at.isoformat(),
     }
 
@@ -98,6 +136,8 @@ def _client_detail(client: Client) -> dict:
         "client_uri": client.client_uri,
         "policy_uri": client.policy_uri,
         "tos_uri": client.tos_uri,
+        "jwks": client.jwks,
+        "jwks_uri": client.jwks_uri,
         "created_at": client.created_at.isoformat(),
         "updated_at": client.updated_at.isoformat(),
     }
@@ -151,6 +191,21 @@ async def create_client(
         )
     client_id = requested_client_id or f"client-{uuid.uuid4().hex[:12]}"
     auth_method = body.get("token_endpoint_auth_method") or _DEFAULT_AUTH_METHOD
+    if not isinstance(auth_method, str):
+        return _bad_request("token_endpoint_auth_method must be a string")
+
+    jwks = body.get("jwks")
+    if jwks is not None and not isinstance(jwks, dict):
+        return _bad_request("jwks must be a JSON object")
+    jwks_uri = body.get("jwks_uri") or ""
+    if not isinstance(jwks_uri, str):
+        return _bad_request("jwks_uri must be a string")
+    jwks_json = json.dumps(jwks) if jwks else ""
+
+    invalid = _validate_key_material(auth_method, jwks_json, jwks_uri)
+    if invalid is not None:
+        return invalid
+
     is_public = auth_method == "none"
     client_secret = "" if is_public else str(body.get("client_secret") or uuid.uuid4().hex)
 
@@ -170,6 +225,8 @@ async def create_client(
         created_at=now,
         updated_at=now,
         token_endpoint_auth_method=auth_method,
+        jwks=jwks_json,
+        jwks_uri=jwks_uri,
         enabled=True,
     )
     await storage.save_client(client)
@@ -197,6 +254,8 @@ async def create_client(
             "grant_types": grant_types,
             "scope": scope,
             "token_endpoint_auth_method": auth_method,
+            "jwks": jwks,
+            "jwks_uri": jwks_uri,
             "enabled": True,
             "created_at": now.isoformat(),
         },
@@ -241,6 +300,20 @@ async def update_client(
         updates["token_endpoint_auth_method"] = body_model.token_endpoint_auth_method
     if "enabled" in fields_set:
         updates["enabled"] = body_model.enabled
+    if "jwks" in fields_set:
+        updates["jwks"] = json.dumps(body_model.jwks) if body_model.jwks else ""
+    if "jwks_uri" in fields_set:
+        updates["jwks_uri"] = body_model.jwks_uri
+
+    # Validate the row as it would be AFTER the merge, so a partial update
+    # cannot combine with the stored values into an unusable client.
+    invalid = _validate_key_material(
+        updates.get("token_endpoint_auth_method", client.token_endpoint_auth_method),
+        updates.get("jwks", client.jwks),
+        updates.get("jwks_uri", client.jwks_uri),
+    )
+    if invalid is not None:
+        return invalid
 
     now = datetime.now(timezone.utc)
     updated = client.model_copy(update={**updates, "updated_at": now})

@@ -64,9 +64,8 @@ async def par(request: Request) -> ORJSONResponse:
     if not response_type:
         return _par_error(400, "invalid_request", "Missing response_type in PAR request")
 
-    storage = request.app.state.storage
     try:
-        await ClientService(storage, request.app.state.event_bus).authenticate(
+        await ClientService.from_app(request.app.state).authenticate(
             params, request.headers.get("authorization")
         )
     except OAuthError as exc:

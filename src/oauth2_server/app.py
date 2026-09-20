@@ -31,10 +31,13 @@ from oauth2_server.routes.system import router as system_router
 from oauth2_server.routes.token import router as token_router
 from oauth2_server.routes.wellknown import router as wellknown_router
 from oauth2_server.security import derive_session_key
+from oauth2_server.services.client_assertion import JtiReplayGuard
+from oauth2_server.services.device_poll import DevicePollTracker
 from oauth2_server.services.dpop import DpopReplayStore
 from oauth2_server.services.dpop_nonce import DpopNonceIssuer, decode_dpop_nonce_secret
 from oauth2_server.services.events import RecentEventsStore
 from oauth2_server.services.events_bus import IdempotencyStore, build_event_bus
+from oauth2_server.services.jwks_cache import JwksCache
 from oauth2_server.services.limiter import TokenBucketLimiter
 from oauth2_server.services.metrics import Metrics
 from oauth2_server.services.par import ParStore
@@ -121,6 +124,16 @@ def create_app(
     # `app.state.dpop_replay`/`dpop_nonce_issuer` is a hard `AttributeError`
     # rather than a silent security downgrade (divergence 14).
     app.state.dpop_replay = DpopReplayStore()
+    # RFC 8628 §3.5: one shared, single-process poll-interval tracker per app
+    # instance (services/device_poll.py) — enforces `slow_down` on the
+    # device_code grant branch of routes/token.py (divergence 35: the Rust
+    # server never implements slow_down, so there's no parity constraint
+    # here). Same single-process caveat as `dpop_replay` above.
+    app.state.device_poll = DevicePollTracker()
+    # RFC 7523 §3: one shared client-assertion replay guard per app instance,
+    # so every endpoint that accepts `client_secret_jwt`/`private_key_jwt`
+    # sees the same `(client_id, jti)` history.
+    app.state.jti_guard = JtiReplayGuard()
     app.state.dpop_nonce_issuer = DpopNonceIssuer(
         decode_dpop_nonce_secret(config.dpop_nonce_secret), config.dpop_nonce_lifetime_secs
     )
@@ -130,6 +143,9 @@ def create_app(
     # I/O. Not closed here — `create_app` has no lifespan of its own in the
     # test path, so it's `build()`'s lifespan that owns closing it.
     app.state.http_client = httpx.AsyncClient(timeout=10)
+    # RFC 7523 §3 `private_key_jwt`: shared TTL cache for clients registered
+    # with a `jwks_uri`, fetching through the same outbound client above.
+    app.state.jwks_cache = JwksCache(app.state.http_client)
 
     # FastAPI dependencies (e.g. require_admin, see routes/admin/guard.py)
     # can't short-circuit a request by returning a Response directly, so the

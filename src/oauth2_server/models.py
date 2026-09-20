@@ -216,12 +216,20 @@ class Claims(BaseModel):
         cnf: dict | None = None,
         authorization_details: list[dict] | None = None,
         act: dict | None = None,
+        resource: str | None = None,
     ) -> "Claims":
+        """Build access-token claims.
+
+        `resource` is the RFC 8707 resource indicator: when present it
+        REPLACES `client_id` as the audience, so the token is only accepted
+        by the resource server it was requested for. Absent, `aud` stays
+        `[client_id]` (Rust parity — see `services/resource.py`).
+        """
         iat = int(_now().timestamp())
         return cls(
             sub=subject,
             iss=issuer,
-            aud=[client_id],
+            aud=[resource] if resource else [client_id],
             exp=iat + duration_seconds,
             iat=iat,
             scope=scope,
@@ -352,6 +360,10 @@ class ClientRegistrationResponse(BaseModel):
     token_endpoint_auth_method: str
     client_name: str = ""
     scope: str = ""
+    # RFC 7591 §3.2.1: echoed back only when the client registered them
+    # (`model_dump(exclude_none=True)` drops them otherwise).
+    jwks: dict | None = None
+    jwks_uri: str | None = None
     backchannel_logout_uri: str | None = None
     backchannel_logout_session_required: bool = False
     frontchannel_logout_uri: str | None = None

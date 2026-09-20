@@ -7,8 +7,9 @@ from argon2.exceptions import VerifyMismatchError
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from oauth2_server.errors import OAuthError
 from oauth2_server.keys import KeySet, SigningKey, rsa_public_key
-from oauth2_server.models import Claims, IdTokenClaims
+from oauth2_server.models import Claims, Client, IdTokenClaims
 
 if TYPE_CHECKING:
     from oauth2_server.config import Config
@@ -103,6 +104,65 @@ def encode_id_token(
             headers=headers,
         )
     return jwt.encode(claims.model_dump(exclude_none=True), secret, algorithm="HS256")
+
+
+# RFC 9701 §4 JOSE header typ for a JWT-secured introspection response. Also
+# the response's Content-Type — a caller negotiates the format by sending it
+# in `Accept` (see routes/introspect.py).
+INTROSPECTION_JWT_TYP = "token-introspection+jwt"
+
+
+def encode_introspection_jwt(payload: dict, *, keyset: KeySet | None, client: Client) -> str:
+    """Sign an RFC 9701 JWT-secured introspection response with a key the
+    REQUESTING CLIENT can actually verify.
+
+    Divergence 34 (security over parity): Rust signs this response with the
+    server's own `jwt_secret`, which no client holds — the signature is then
+    decorative, and a relying party cannot tell a genuine introspection
+    result from a forged one. The rule here instead follows RFC 9701 §5 and
+    the OIDC Core §10.1 symmetric-key convention:
+
+    1. RS256 with `keyset.current_for_alg("RS256")` whenever the keyset has
+       one — regardless of `config.id_token_alg`, because that key's public
+       half is published in JWKS, so any client can verify it and it follows
+       key rotation via the `kid` header.
+    2. Otherwise HS256 with the requesting client's own `client_secret`
+       (OIDC Core §10.1: the symmetric signing key is the client secret).
+       Only the server and that client hold it, and `aud` is that client, so
+       the response is both verifiable and unforgeable by third parties.
+    3. A public client holds no key at all, so with no RS256 key there is no
+       verifiable JWT to produce. Silently answering in JSON instead would
+       hand a JWT-negotiating caller an unauthenticated result it cannot
+       distinguish from a downgrade attack — so this raises `OAuthError` and
+       the caller turns it into a 400.
+
+    Step 2 dispatches on `client.is_public()` (the REGISTERED
+    `token_endpoint_auth_method`), the same predicate client authentication
+    uses, rather than on whether the secret column happens to be non-empty:
+    a confidential row with an empty secret is a misconfiguration, and
+    HMAC-signing under an empty key would be the worst possible answer to
+    it. Such a row raises here too, which the error description covers.
+    """
+    signing_key = keyset.current_for_alg("RS256") if keyset is not None else None
+    if signing_key is not None:
+        return jwt.encode(
+            payload,
+            signing_key.key_material,
+            algorithm="RS256",
+            headers={"typ": INTROSPECTION_JWT_TYP, "kid": signing_key.kid},
+        )
+    if not client.is_public() and client.client_secret:
+        return jwt.encode(
+            payload,
+            client.client_secret,
+            algorithm="HS256",
+            headers={"typ": INTROSPECTION_JWT_TYP},
+        )
+    raise OAuthError(
+        "invalid_request",
+        "JWT introspection responses require an RS256 signing key or a client secret",
+        400,
+    )
 
 
 def decode_access_token(
