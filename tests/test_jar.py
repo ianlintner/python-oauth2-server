@@ -29,10 +29,13 @@ import json
 import time
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import jwt
 import pytest
 
+from oauth2_server.services.jwks_cache import JwksCache
 from tests.helpers import generate_rsa_keypair, login_session, reseed_client
+from tests.test_client_assertion import generate_private_rsa_jwks
 from tests.test_token_endpoint import _pkce_pair
 
 ISSUER = "https://auth.example.com"
@@ -471,6 +474,173 @@ async def test_jar_private_key_jwt_unknown_kid_is_rejected(client_app):
     body = resp.json()
     assert body["error"] == "invalid_request"
     assert body["error_description"] == "No matching kid in client JWKS for JAR"
+
+
+# --- private_key_jwt clients: RS256 via jwks_uri cache (RFC 9700 vector r) ---
+
+
+def _install_mock_jwks_transport(client_app, handler) -> None:
+    """Point `app.state.jwks_cache` at a fresh `JwksCache` built on a
+    `MockTransport`, mirroring `tests/test_client_assertion.py`'s helper of
+    the same name so a JWKS fetch never leaves the process."""
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client_app.app.state.http_client = mock_client
+    client_app.app.state.jwks_cache = JwksCache(mock_client)
+
+
+async def test_vector_r_jar_private_key_jwt_jwks_cache(client_app):
+    """RFC 9700 test vector r: a `private_key_jwt` client with no inline
+    `jwks`, only a `jwks_uri`, gets its JAR-signing key from the `jwks_uri`
+    TTL cache. Two JARs differing only in `state` must both verify off a
+    SINGLE upstream fetch — the second is served from cache."""
+    pem, jwks = generate_rsa_keypair(kid="jar-key-1")
+    fetches: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fetches.append(str(request.url))
+        return httpx.Response(200, json=jwks, headers={"Cache-Control": "max-age=300"})
+
+    _install_mock_jwks_transport(client_app, handler)
+    await reseed_client(
+        client_app,
+        token_endpoint_auth_method="private_key_jwt",
+        jwks="",
+        jwks_uri="https://keys.example/jwks",
+    )
+    await login_session(client_app)
+    _, challenge = _pkce_pair()
+
+    for state in ("state-one", "state-two"):
+        jar = make_rs256_jar(
+            _signed_claims(
+                "client1",
+                redirect_uri=REDIRECT_URI,
+                scope="read",
+                state=state,
+                code_challenge=challenge,
+                code_challenge_method="S256",
+            ),
+            pem,
+            kid="jar-key-1",
+        )
+        resp = await _authorize(
+            client_app,
+            response_type="code",
+            client_id="client1",
+            redirect_uri=REDIRECT_URI,
+            request=jar,
+        )
+        assert resp.status_code == 302, resp.text
+        query = _query(resp.headers["location"])
+        assert "code" in query
+        assert query["state"] == [state]
+
+    assert fetches == ["https://keys.example/jwks"]
+
+
+async def test_jar_rs256_inline_jwks_beats_jwks_uri(client_app):
+    """When a `private_key_jwt` client has BOTH an inline `jwks` and a
+    `jwks_uri` registered, `resolve_client_jwks` prefers the inline document
+    and the `jwks_uri` is never fetched."""
+    pem, jwks = generate_rsa_keypair(kid="jar-key-1")
+    fetches: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fetches.append(str(request.url))
+        return httpx.Response(200, json={"keys": []})
+
+    _install_mock_jwks_transport(client_app, handler)
+    await reseed_client(
+        client_app,
+        token_endpoint_auth_method="private_key_jwt",
+        jwks=json.dumps(jwks),
+        jwks_uri="https://keys.example/jwks",
+    )
+    await login_session(client_app)
+    _, challenge = _pkce_pair()
+    jar = make_rs256_jar(
+        _signed_claims(
+            "client1",
+            redirect_uri=REDIRECT_URI,
+            scope="read",
+            code_challenge=challenge,
+            code_challenge_method="S256",
+        ),
+        pem,
+        kid="jar-key-1",
+    )
+    resp = await _authorize(
+        client_app,
+        response_type="code",
+        client_id="client1",
+        redirect_uri=REDIRECT_URI,
+        request=jar,
+    )
+    assert resp.status_code == 302, resp.text
+    assert "code" in _query(resp.headers["location"])
+    assert fetches == []
+
+
+async def test_jar_rs256_private_jwk_rejected(client_app):
+    """A JWKS whose key carries PRIVATE RSA material (`d`/`p`/`q`) is a
+    plausible client misconfiguration, not a valid verification key —
+    reject it (Phase 4a's `rsa_key_from_jwks` guard), surfaced here as a
+    JAR `invalid_request`/`invalid_request_object` 400 rather than the
+    token endpoint's `invalid_client` 401."""
+    private_pem, private_jwks = generate_private_rsa_jwks()
+    await reseed_client(
+        client_app,
+        token_endpoint_auth_method="private_key_jwt",
+        jwks=json.dumps(private_jwks),
+    )
+    await login_session(client_app)
+    jar = make_rs256_jar(_signed_claims("client1", scope="read"), private_pem, kid="client-key-1")
+    resp = await _authorize(
+        client_app,
+        response_type="code",
+        client_id="client1",
+        redirect_uri=REDIRECT_URI,
+        request=jar,
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["error"] in ("invalid_request", "invalid_request_object")
+    assert "RSA public key" in body["error_description"]
+
+
+async def test_jar_rs256_jwks_uri_fetch_failure_is_non_echoing(client_app):
+    """A `jwks_uri` fetch failure must not leak the URL, status code, or
+    transport error text into the 400 body (SSRF / port-scan oracle,
+    Phase 4a's `jwks_cache` divergence note)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    _install_mock_jwks_transport(client_app, handler)
+    await reseed_client(
+        client_app,
+        token_endpoint_auth_method="private_key_jwt",
+        jwks="",
+        jwks_uri="https://keys.example/jwks",
+    )
+    await login_session(client_app)
+    # The fetch fails before any signature is checked, so the signing key
+    # and kid here are never actually verified against.
+    pem, _ = generate_rsa_keypair(kid="whatever")
+    jar = make_rs256_jar(_signed_claims("client1", scope="read"), pem, kid="whatever")
+    resp = await _authorize(
+        client_app,
+        response_type="code",
+        client_id="client1",
+        redirect_uri=REDIRECT_URI,
+        request=jar,
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    description = body["error_description"]
+    assert "keys.example" not in description
+    assert "500" not in description
+    assert "boom" not in description
 
 
 # --- overlay precedence -------------------------------------------------------
