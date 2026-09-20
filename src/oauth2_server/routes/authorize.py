@@ -1,7 +1,8 @@
 """GET /oauth/authorize — RFC 6749 §4.1.1 authorization endpoint (PKCE + RFC 9207 iss).
 
-Ported from `crates/oauth2-actix/src/handlers/oauth.rs::authorize`. This is a
-Phase-1 subset: authorization_code + PKCE (+ RFC 9126 PAR) only — no JAR/hybrid.
+Ported from `crates/oauth2-actix/src/handlers/oauth.rs::authorize`. Supports
+`response_type=code` (authorization_code + PKCE, + RFC 9126 PAR) and the OIDC
+hybrid `response_type=code id_token` — no JAR, no implicit (`token`/`id_token`).
 
 Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
 0. Any repeated query key (e.g. `?response_type=code&response_type=code`) ->
@@ -24,20 +25,24 @@ Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
 3. `redirect_uri` not an exact match against the client's registered list -> 400
    JSON, never redirect, for the same reason.
 3b. `response_mode` (read from the QUERY only, never the PAR-merged params)
-   is resolved next: `query` (default), `fragment` or `form_post`. An
-   unsupported value is a 400 JSON `invalid_request` — a valid mode is what
-   tells us *how* to redirect, so this one error can't use the redirect
-   channel (Rust parity). From here on, `_deliver_error` shapes every error
-   according to the resolved mode (divergence 37: Rust honors `form_post`
-   only for the `login_required` case and `fragment` only inside its own
-   error-redirect builder).
+   is resolved next: `query`, `fragment` or `form_post`, defaulting to
+   `fragment` for the hybrid flow and `query` otherwise (OIDC Core
+   §3.3.2.3). An unsupported value is a 400 JSON `invalid_request` — a valid
+   mode is what tells us *how* to redirect, so this one error can't use the
+   redirect channel (Rust parity). From here on, `_deliver_error` shapes
+   every error according to the resolved mode (divergence 37: Rust honors
+   `form_post` only for the `login_required` case and `fragment` only inside
+   its own error-redirect builder).
 4. Everything else is delivered via redirect to `redirect_uri` (`error=...`), since
-   the redirect target is now trusted.
+   the redirect target is now trusted — including divergence 39: the hybrid
+   flow REQUIRES `nonce`, and a missing one is an `invalid_request` redirect.
 5. Unauthenticated (or `prompt=login`/expired `max_age`) -> save `return_to` in the
    session and 302 to `/auth/login`.
 6. Success -> the authorization response (`code`, `state` if given, and `iss`
    — RFC 9207, to prevent authorization-response mix-up attacks) delivered in
-   the resolved `response_mode` (see `services/authorize_response.py`).
+   the resolved `response_mode` (see `services/authorize_response.py`), plus
+   an `id_token` for the hybrid flow when the granted scope has `openid`
+   (minted by `services/id_token.py`, bound to the code via `c_hash`).
 """
 
 from __future__ import annotations
@@ -59,6 +64,7 @@ from oauth2_server.services.authorize_response import (
     success_response,
 )
 from oauth2_server.services.events_bus import emit_event
+from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource
 from oauth2_server.sessions import current_user_id
@@ -66,6 +72,12 @@ from oauth2_server.sessions import current_user_id
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# The only `response_type` values this port supports: plain code, and the
+# OIDC hybrid flow that adds a front-channel id_token. `token`/`id_token`
+# (implicit) are deliberately unsupported.
+_HYBRID_RESPONSE_TYPE = "code id_token"
+_SUPPORTED_RESPONSE_TYPES = ("code", _HYBRID_RESPONSE_TYPE)
 
 _MIN_CODE_CHALLENGE_LEN = 43
 _MAX_CODE_CHALLENGE_LEN = 128
@@ -195,11 +207,16 @@ async def authorize(request: Request):
 
     # --- 3b. Resolve response_mode — the last error that can't be redirected ---
     # Read from the raw query only, never the PAR-merged params (Rust parity:
-    # `response_mode` is not in the PAR merge whitelist). `hybrid=False`: this
-    # port supports `response_type=code` only, so the default is always
-    # `query`.
+    # `response_mode` is not in the PAR merge whitelist). `response_type` is
+    # read from the query too (never PAR-merged) and decides the default:
+    # OIDC Core §3.3.2.3 defaults the hybrid `code id_token` flow to
+    # `fragment`, everything else to `query`. The response_type is only
+    # *validated* below, through the redirect channel — an unsupported value
+    # still resolves its mode here so that error can be delivered.
+    response_type = params.get("response_type")
+    hybrid = response_type == _HYBRID_RESPONSE_TYPE
     try:
-        response_mode = resolve_response_mode(params.get("response_mode"), hybrid=False)
+        response_mode = resolve_response_mode(params.get("response_mode"), hybrid=hybrid)
     except OAuthError as exc:
         return _oauth_error_page(exc)
 
@@ -214,13 +231,29 @@ async def authorize(request: Request):
             config.issuer,
         )
 
-    response_type = params.get("response_type")
-    if response_type != "code":
+    if response_type not in _SUPPORTED_RESPONSE_TYPES:
         return _deliver_error(
             response_mode,
             redirect_uri,
             "unsupported_response_type",
-            "only the 'code' response_type is supported",
+            "only the 'code' and 'code id_token' response_types are supported",
+            state,
+            config.issuer,
+        )
+
+    # Divergence 39: the hybrid flow REQUIRES `nonce`. OIDC Core §3.3.2.11
+    # makes it mandatory for any flow that delivers an id_token through the
+    # front channel (it is the client's only replay defense there), but Rust
+    # mints the hybrid id_token with whatever `nonce` it was given, including
+    # none. Missing `nonce` is delivered through the (now trusted) redirect
+    # channel like every other post-`redirect_uri` error.
+    nonce = merged.get("nonce")
+    if hybrid and not nonce:
+        return _deliver_error(
+            response_mode,
+            redirect_uri,
+            "invalid_request",
+            "nonce is required for response_type=code id_token",
             state,
             config.issuer,
         )
@@ -360,7 +393,7 @@ async def authorize(request: Request):
         scope,
         code_challenge=code_challenge,
         code_challenge_method=code_challenge_method,
-        nonce=merged.get("nonce"),
+        nonce=nonce,
         authorization_details=authorization_details,
         resource=resource,
     )
@@ -373,6 +406,36 @@ async def authorize(request: Request):
         metadata={"scope": scope, "redirect_uri": redirect_uri},
     )
 
+    # Hybrid: mint the front-channel id_token alongside the code. Gated on
+    # the EFFECTIVE scope (the code's, i.e. what was actually granted) rather
+    # than the request's, and bound to the code via `c_hash` — no access
+    # token is delivered here, so there is no `at_hash` (Rust parity). The
+    # minter and TTL are the token endpoint's (divergence 40). `acr`/`amr`
+    # stay `None` until Task 5 records them on the session.
+    id_token: str | None = None
+    if hybrid and "openid" in auth_code.scope.split():
+        user = await storage.get_user_by_id(user_id)
+        try:
+            id_token = mint_id_token(
+                config=config,
+                keyset=request.app.state.keyset,
+                client=client,
+                user_id=user_id,
+                user=user,
+                scope=auth_code.scope,
+                nonce=nonce,
+                code=auth_code.code,
+                acr=None,
+                amr=None,
+                auth_time=request.session.get("auth_time"),
+            )
+        except ValueError as exc:
+            # RS256 configured with no usable signing key — a server-side
+            # misconfiguration, not the client's fault, and not something to
+            # hand to the redirect channel.
+            logger.error("hybrid id_token minting failed: %s", exc)
+            return _error_page(500, "server_error", str(exc))
+
     try:
         return success_response(
             response_mode,
@@ -380,6 +443,7 @@ async def authorize(request: Request):
             code=auth_code.code,
             state=state,
             iss=config.issuer,
+            id_token=id_token,
         )
     except OAuthError as exc:
         return _oauth_error_page(exc)

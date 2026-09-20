@@ -1,3 +1,5 @@
+import base64
+import hashlib
 from typing import TYPE_CHECKING
 
 import anyio.to_thread
@@ -24,6 +26,16 @@ _ACCESS_TOKEN_TYP = "at+JWT"
 # the JWT-signing use of `jwt_secret` so a leaked session cookie key (or vice
 # versa) doesn't directly hand over the other secret.
 _SESSION_KEY_INFO = b"oauth2-session-cookie"
+
+
+def half_hash(value: str) -> str:
+    """OIDC Core §3.3.2.11 / §3.1.3.6: base64url-no-pad(left-half(SHA-256(value))).
+
+    The `at_hash`/`c_hash` construction, shared by the token endpoint and the
+    authorize endpoint's hybrid branch (via `services/id_token.py`).
+    """
+    digest = hashlib.sha256(value.encode()).digest()
+    return base64.urlsafe_b64encode(digest[:16]).rstrip(b"=").decode()
 
 
 def derive_session_key(jwt_secret: str) -> str:

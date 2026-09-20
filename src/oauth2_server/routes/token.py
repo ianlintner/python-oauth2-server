@@ -47,8 +47,8 @@ from fastapi.responses import ORJSONResponse
 from oauth2_server.config import Config
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.keys import KeySet
-from oauth2_server.models import Client, IdTokenClaims, User
-from oauth2_server.security import encode_id_token
+from oauth2_server.models import Client, User
+from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.auth import scope_is_subset
 from oauth2_server.services.client_assertion import unverified_assertion_subject
 from oauth2_server.services.clients import ClientService
@@ -148,12 +148,6 @@ def _invalid_client_response(
     return oauth_error("invalid_client", description)
 
 
-def _half_hash(value: str) -> str:
-    """OIDC Core §3.3.2.11 / §3.1.3.6: base64url-no-pad(left-half(SHA-256(value)))."""
-    digest = hashlib.sha256(value.encode()).digest()
-    return base64.urlsafe_b64encode(digest[:16]).rstrip(b"=").decode()
-
-
 def _pkce_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
@@ -206,42 +200,29 @@ def _mint_id_token(
     nonce: str | None = None,
     code: str | None = None,
 ) -> str:
-    """Build and encode an OIDC id_token (OIDC Core §2).
+    """Thin wrapper over `services.id_token.mint_id_token` for this endpoint's
+    three grant branches (authorization_code, refresh_token, device_code).
 
-    Shared by the authorization_code and refresh_token grant branches. Callers
-    must check `"openid" in scope` before calling; the id_token is minted
-    unconditionally for openid scope, using `user_id` as `sub`. `user` is an
-    optional best-effort lookup (`get_user_by_id`) — when the user row is
-    missing (e.g. the user was deleted after the token was issued), `sub` is
-    still set from `user_id` and email/preferred_username are simply omitted.
-    `nonce`/`code` are only supplied on the initial code exchange — OIDC Core
+    Every token-endpoint id_token hashes an access token into `at_hash`;
+    `nonce`/`code` are only supplied on the initial code exchange (OIDC Core
     §12.2 forbids echoing `nonce` on a refreshed id_token, and there is no
-    code to hash on refresh. `keyset` (from `app.state.keyset`) lets RS256
-    id_tokens sign with the current rotated key instead of always the static
-    env PEM — see `encode_id_token`. Raises `ValueError` (caught by both call
-    sites, turned into a 500 `server_error`) when `config.id_token_alg ==
-    "RS256"` but neither the keyset nor `config.id_token_private_key_pem`
-    can supply a signing key.
+    code to hash on refresh). `acr`/`amr`/`auth_time` are front-channel
+    session facts that the token endpoint has no session to read, so they
+    stay unset here — the authorize endpoint's hybrid branch supplies them.
+    Raises `ValueError` (caught by all three call sites and turned into a 500
+    `server_error`) when RS256 is configured with no usable signing key.
     """
-    scope_set = set(scope.split())
-    now = int(datetime.now(timezone.utc).timestamp())
-    id_claims = IdTokenClaims(
-        iss=config.issuer,
-        sub=user_id,
-        aud=client.client_id,
-        exp=now + config.access_token_ttl_secs,
-        iat=now,
+    return mint_id_token(
+        config=config,
+        keyset=keyset,
+        client=client,
+        user_id=user_id,
+        user=user,
+        scope=scope,
         nonce=nonce,
-        at_hash=_half_hash(access_token),
+        access_token=access_token,
+        code=code,
     )
-    if code is not None:
-        id_claims.c_hash = _half_hash(code)
-    if user is not None:
-        if "email" in scope_set:
-            id_claims.email = user.email
-        if "profile" in scope_set:
-            id_claims.preferred_username = user.username
-    return encode_id_token(id_claims, config.jwt_secret, config=config, keyset=keyset)
 
 
 @router.post("/token")
