@@ -152,7 +152,7 @@ def _deliver_error(
     response_mode: str,
     redirect_uri: str,
     error: str,
-    description: str,
+    description: str | None,
     state: str | None,
     issuer: str,
 ) -> Response:

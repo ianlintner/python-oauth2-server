@@ -510,9 +510,11 @@ out:
   equivalents ignore it).
 - **OIDC hybrid `code id_token`** — `response_type=code id_token` mints an id_token at the
   authorize endpoint via a minter shared with the token endpoint (`services/id_token.py::
-  mint_id_token`), so the hybrid and token-endpoint id_tokens carry identical claims and use the
-  same TTL (`config.access_token_ttl_secs`) instead of Rust's hardcoded one-hour expiry
-  (divergence 40). The id_token's `c_hash` is `base64url(SHA-256(code)[:16])` with no padding;
+  mint_id_token`), so the hybrid and token-endpoint id_tokens share the same claim construction
+  and TTL (`config.access_token_ttl_secs`) instead of Rust's hardcoded one-hour expiry (divergence
+  40); the hybrid id_token additionally carries `acr`, `amr`, and `auth_time` from the session,
+  which the token endpoint omits since it has no session to draw from. The id_token's `c_hash` is
+  `base64url(SHA-256(code)[:16])` with no padding;
   `at_hash` is omitted (no access token is issued on this path). `nonce` is REQUIRED for the
   hybrid response type per OIDC Core §3.3.2.11 — a missing `nonce` is a redirect error
   `invalid_request` (divergence 39; Rust issues the id_token anyway). An explicit

@@ -531,7 +531,7 @@ From Phase 4b (`docs/plans/2026-09-20-python-oauth2-port-phase-4b.md` → "Globa
     `amr = ["fed"]`) into the session; `acr_values_supported` is config-driven
     (`OAUTH2_ACR_VALUES_SUPPORTED`, default `["urn:mace:incommon:iap:bronze"]`) and advertises only
     achievable values. Rust advertises silver+bronze but never sets `acr`, so every `acr_values`
-    request fails. Task 4 (commit `595ae62`).
+    request fails. Task 5 (commit `595ae62`).
 43. `request_object_signing_alg_values_supported` advertises `["RS256", "HS256", "none"]` — what is
     implemented — not Rust's `["RS256", "ES256", "HS256"]` (ES256 unimplemented there, `none`
     implemented but unadvertised). Task 7 (this task).
@@ -613,7 +613,15 @@ admin-session server-side revocation.
   `request=`) remains unsupported; only PAR's own `request_uri` value is accepted at
   `/oauth/authorize`.
 - No size cap is enforced on the `claims`, `authorization_details` (RAR), or `resource` parameter
-  values — an oversized value is stored/processed as-is rather than rejected up front.
+  values — an oversized value is stored/processed as-is rather than rejected up front. Relatedly,
+  deeply nested `claims`/`authorization_details` JSON can raise `RecursionError` (→ an unhandled
+  500) during parsing/validation; the size/depth cap above needs to bound nesting depth too, not
+  just payload length.
+- `POST /admin/api/clients` and `PUT` do not run `_is_valid_redirect_uri` over the submitted
+  `redirect_uris` (pre-existing Phase 3 gap), so an admin can register a `redirect_uri` containing
+  a fragment or otherwise malformed value; this is now more relevant with response_mode
+  fragment/form_post delivery, where such a value is rejected only at authorize time via the
+  `"redirect_uri must not contain a fragment"` guard rather than at registration.
 
 ### Residuals from the Phase 4a final review (parked, non-blocking)
 

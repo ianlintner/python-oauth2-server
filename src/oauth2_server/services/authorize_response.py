@@ -132,6 +132,12 @@ def _present(pairs: list[tuple[str, str | None]]) -> list[tuple[str, str]]:
 
 
 def _deliver(mode: str, redirect_uri: str, params: list[tuple[str, str]]) -> Response:
+    # Applies to every mode: a redirect_uri that already carries a fragment
+    # leaves no safe channel to deliver through — query would collide with
+    # the fragment, and fragment/form_post would silently discard or
+    # overwrite it.
+    if urlsplit(redirect_uri).fragment:
+        raise OAuthError("invalid_request", "redirect_uri must not contain a fragment", 400)
     if mode == "form_post":
         return HTMLResponse(
             _form_post_body(redirect_uri, params),
@@ -148,8 +154,6 @@ def _deliver(mode: str, redirect_uri: str, params: list[tuple[str, str]]) -> Res
 def _query_location(redirect_uri: str, params: list[tuple[str, str]]) -> str:
     """Append `params` to `redirect_uri`, preserving any existing query string."""
     split = urlsplit(redirect_uri)
-    if split.fragment:
-        raise OAuthError("invalid_request", "redirect_uri must not contain a fragment", 400)
     query = parse_qsl(split.query, keep_blank_values=True)
     query.extend(params)
     return urlunsplit((split.scheme, split.netloc, split.path, urlencode(query), ""))

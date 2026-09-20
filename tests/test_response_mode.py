@@ -13,7 +13,11 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from oauth2_server.errors import OAuthError
-from oauth2_server.services.authorize_response import resolve_response_mode
+from oauth2_server.services.authorize_response import (
+    error_response,
+    resolve_response_mode,
+    success_response,
+)
 from tests.helpers import login_session, reseed_client
 
 _SECURITY_HEADERS = {
@@ -188,6 +192,74 @@ async def test_query_mode_rejects_redirect_uri_with_fragment(app_with_session):
     await login_session(app_with_session)
     resp = await app_with_session.get(
         "/oauth/authorize", params=_authorize_params(redirect_uri="https://a.example/cb#frag")
+    )
+    assert resp.status_code == 400
+    assert "location" not in resp.headers
+    body = resp.json()
+    assert body["error"] == "invalid_request"
+    assert body["error_description"] == "redirect_uri must not contain a fragment"
+
+
+@pytest.mark.parametrize("mode", ["fragment", "form_post"])
+def test_success_response_rejects_redirect_uri_with_fragment(mode):
+    # The "redirect_uri must not contain a fragment" guard must hold for
+    # every response_mode, not just query — a redirect_uri that already
+    # carries a fragment leaves no safe channel to deliver through.
+    with pytest.raises(OAuthError) as excinfo:
+        success_response(
+            mode,
+            "https://a.example/cb#frag",
+            code="abc",
+            state="xyz",
+            iss="https://auth.example.com",
+        )
+    assert excinfo.value.error == "invalid_request"
+    assert excinfo.value.status == 400
+    assert excinfo.value.description == "redirect_uri must not contain a fragment"
+
+
+@pytest.mark.parametrize("mode", ["fragment", "form_post"])
+def test_error_response_rejects_redirect_uri_with_fragment(mode):
+    with pytest.raises(OAuthError) as excinfo:
+        error_response(
+            mode,
+            "https://a.example/cb#frag",
+            error="invalid_scope",
+            error_description="bad scope",
+            state="xyz",
+            iss="https://auth.example.com",
+        )
+    assert excinfo.value.error == "invalid_request"
+    assert excinfo.value.status == 400
+    assert excinfo.value.description == "redirect_uri must not contain a fragment"
+
+
+async def test_fragment_mode_rejects_redirect_uri_with_fragment_end_to_end(app_with_session):
+    # End-to-end: the route's _deliver_error fallback still returns a JSON
+    # 400 (never a 500) when the builder raises for a non-query mode.
+    await reseed_client(app_with_session, redirect_uris='["https://a.example/cb#frag"]')
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params=_authorize_params(
+            redirect_uri="https://a.example/cb#frag", response_mode="fragment"
+        ),
+    )
+    assert resp.status_code == 400
+    assert "location" not in resp.headers
+    body = resp.json()
+    assert body["error"] == "invalid_request"
+    assert body["error_description"] == "redirect_uri must not contain a fragment"
+
+
+async def test_form_post_mode_rejects_redirect_uri_with_fragment_end_to_end(app_with_session):
+    await reseed_client(app_with_session, redirect_uris='["https://a.example/cb#frag"]')
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params=_authorize_params(
+            redirect_uri="https://a.example/cb#frag", response_mode="form_post"
+        ),
     )
     assert resp.status_code == 400
     assert "location" not in resp.headers
