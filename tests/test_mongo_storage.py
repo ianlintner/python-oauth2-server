@@ -224,6 +224,31 @@ async def test_delete_user(storage):
     assert await storage.get_user_by_id(u.id) is None
 
 
+async def test_get_users_by_email_case_insensitive(storage):
+    """Mongo half of the `get_users_by_email` contract (SQL half lives in
+    `tests/test_storage.py`) — exact, case-insensitive equality, regex
+    metacharacters in the address matched literally, all matches returned."""
+    await storage.save_user(
+        User(id="e1", username="e_one", password_hash="x", email="Mixed@Example.Test")
+    )
+    await storage.save_user(
+        User(id="e2", username="e_two", password_hash="x", email="other@example.test")
+    )
+    assert [u.id for u in await storage.get_users_by_email("mixed@example.test")] == ["e1"]
+    assert await storage.get_users_by_email("nobody@example.test") == []
+
+    await storage.save_user(
+        User(id="e3", username="e_three", password_hash="x", email="a.b+c@example.test")
+    )
+    assert [u.id for u in await storage.get_users_by_email("a.b+c@example.test")] == ["e3"]
+    assert await storage.get_users_by_email("axb+c@example.test") == []
+
+    await storage.save_user(
+        User(id="e4", username="e_four", password_hash="x", email="MIXED@example.test")
+    )
+    assert {u.id for u in await storage.get_users_by_email("mixed@example.test")} == {"e1", "e4"}
+
+
 # --- tokens ---
 
 

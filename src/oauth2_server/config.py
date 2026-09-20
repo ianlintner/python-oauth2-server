@@ -125,6 +125,14 @@ class Config(BaseSettings):
     # `azure_tenant_id` either way. Okta/Auth0 stay 503 stubs (divergence
     # 25) — their client_id/secret/redirect_uri fields are accepted for
     # forward-compat but never read by any handler.
+    # Divergence 56 (opt-in, default OFF): when True, a social callback
+    # whose provider-VERIFIED email folds to exactly one existing local
+    # user reuses that row instead of provisioning a `provider:id`
+    # account. Off by default because a wrong "yes" here is an account
+    # takeover — see `routes/social.py`'s linking branch for the four
+    # conditions that must ALL hold, and README's "Security note:
+    # admin-by-email and social login".
+    social_link_by_verified_email: bool = False
     google_client_id: str | None = None
     google_client_secret: str | None = None
     google_redirect_uri: str | None = None

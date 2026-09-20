@@ -278,6 +278,29 @@ does not expose a verification flag for it). Operators who list any address in
 confirm that provider actually verifies email ownership before granting the OAuth app access to
 production.
 
+**Account linking by verified email** (`OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL`, default `false` —
+divergence 56) is the opt-in counterpart. With it off (the default), every social login provisions
+its own `provider:id` user row, so a social identity can never reach an existing password account.
+With it on, a callback whose email matches an existing local user signs that user in directly,
+reusing the row exactly as it is — same username, same role, no link record, `amr` still `["fed"]`.
+
+Because a wrong match here is an account takeover, linking happens only when **all four** of the
+following hold, and falls back to provisioning a new account otherwise:
+
+1. `OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL=true`.
+2. The provider **verified** the address, and this server enforced that itself: Google
+   (`verified_email: true`) and GitHub (`primary` + `verified` from `/user/emails`) qualify.
+   **Microsoft and Azure never link** — Graph's `/me` exposes no verification signal for
+   `userPrincipalName` — and the Okta/Auth0 stubs never reach the callback at all.
+3. Exactly **one** local user matches after folding both addresses (`strip()` + `casefold()`).
+   No match means there is nothing to link; two or more are ambiguous and are refused rather than
+   resolved by picking one.
+4. The matched account is **not privileged**: its role is not `admin` and its address is not in
+   `OAUTH2_ADMIN_EMAILS`.
+
+Leave it off unless every provider you have configured is one whose email verification you trust
+for the accounts in your user table.
+
 ## Phase 3d: MongoDB Backend
 
 Phase 3d (see `docs/plans/2026-07-20-python-oauth2-port-phase-3d.md` and `docs/PHASE2-BACKLOG.md` →

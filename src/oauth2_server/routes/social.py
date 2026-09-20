@@ -117,6 +117,62 @@ async def social_login(provider: str, request: Request):
     return RedirectResponse(build_authorize_url(rc, state, code_challenge), status_code=302)
 
 
+def _fold_email(email: str) -> str:
+    """The single normalization used on BOTH sides of an account-linking
+    comparison: strip surrounding whitespace, then `casefold()`. Never
+    `lower()` — `casefold` is the Unicode-correct case-insensitive form."""
+    return email.strip().casefold()
+
+
+async def _link_by_verified_email(config, storage, userinfo) -> User | None:
+    """The existing local user this social login may be linked to, or
+    `None` to provision a fresh `provider:id` account as before
+    (divergence 56).
+
+    Linking is IMPLICIT — the matched row is reused exactly as it is: its
+    username, role and password hash are untouched and no link record is
+    written, so the only effect is which row the session points at. That
+    makes a wrong "yes" here an account takeover, so this fails closed
+    unless ALL FOUR of the following hold:
+
+    1. `config.social_link_by_verified_email` is on (default OFF).
+    2. The provider VERIFIED the address (`services/social.py` sets
+       `email_verified` only where it enforced verification itself —
+       Microsoft/Azure never do, so they never link).
+    3. Exactly ONE local row folds to the same address. Zero matches means
+       nothing to link; two or more are ambiguous and are refused rather
+       than resolved by picking one. `storage.get_users_by_email` is a
+       candidate prefilter whose case semantics belong to the database, so
+       every candidate is re-checked here against `_fold_email` before it
+       counts.
+    4. The candidate is not privileged: neither `role == "admin"` nor an
+       address in `config.admin_emails` (already lowercased by its
+       validator — an admin-by-email account is exactly the row an
+       attacker who can assert an address at a provider would want).
+    """
+    if not config.social_link_by_verified_email or not userinfo.email_verified:
+        return None
+    folded = _fold_email(userinfo.email)
+    if not folded:
+        return None
+    candidates = [
+        u for u in await storage.get_users_by_email(folded) if _fold_email(u.email) == folded
+    ]
+    if len(candidates) != 1:
+        if candidates:
+            logger.warning(
+                "social login email %r matches %d local accounts; refusing to link",
+                folded,
+                len(candidates),
+            )
+        return None
+    candidate = candidates[0]
+    if candidate.role == "admin" or folded in config.admin_emails:
+        logger.warning("refusing to link social login to privileged account %r", candidate.username)
+        return None
+    return candidate
+
+
 @router.get("/callback/{provider}")
 async def social_callback(provider: str, request: Request):
     params = request.query_params
@@ -177,8 +233,11 @@ async def social_callback(provider: str, request: Request):
     await breaker.record_success()
 
     storage = request.app.state.storage
+    config = request.app.state.config
     username = f"{provider}:{userinfo.provider_user_id}"
     user = await storage.get_user_by_username(username)
+    if user is None:
+        user = await _link_by_verified_email(config, storage, userinfo)
     if user is None:
         # Placeholder password: an Argon2id hash of a random UUIDv4, never
         # logged or returned — social users authenticate solely via the
@@ -202,7 +261,7 @@ async def social_callback(provider: str, request: Request):
     set_login(
         request,
         user,
-        acr=request.app.state.config.default_acr,
+        acr=config.default_acr,
         amr=["fed"],
     )
 

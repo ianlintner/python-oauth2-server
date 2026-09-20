@@ -270,6 +270,35 @@ class SqlStorage:
             )
         return User(**row) if row else None
 
+    async def get_users_by_email(self, email: str) -> list[User]:
+        """Every user row whose email matches `email` case-insensitively,
+        ignoring surrounding whitespace on the STORED value too
+        (`lower(trim(email))`). Used by social account linking
+        (divergence 56), which passes an already-folded address and then
+        re-verifies each row with Python's own `strip().casefold()` — the
+        SQL side is a candidate prefilter whose exact case semantics are
+        the database's (`lower()` is ASCII-only on SQLite, locale-aware on
+        Postgres), never the sole authority.
+
+        `email` is a BOUND parameter, so a provider-supplied address is
+        only ever compared for equality and can never alter the statement.
+        Returns all matches (there is no unique index on `users.email`) so
+        callers can refuse an ambiguous match rather than pick one.
+        """
+        folded = email.strip().lower()
+        async with self._engine.connect() as conn:
+            rows = (
+                (
+                    await conn.execute(
+                        text(f"SELECT {_USER_COLS} FROM users WHERE lower(trim(email)) = :e"),
+                        {"e": folded},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [User(**r) for r in rows]
+
     async def update_user(self, user: User) -> None:
         set_clause = ", ".join(f"{c} = :{c}" for c in _USER_UPDATE_COLS)
         async with self._engine.begin() as conn:
