@@ -395,6 +395,90 @@ registered client_id=client_...
 == Result: PASS ==
 ```
 
+## Phase 4a: JWT client auth, resource indicators, metadata parity
+
+Phase 4a (see `docs/plans/2026-09-20-python-oauth2-port-phase-4a.md` and `docs/PHASE2-BACKLOG.md` →
+"Accepted divergences" 32–36) is the first of three sub-phases (4a/4b/4c — see the plan's roadmap
+table, also reproduced in `docs/PHASE2-BACKLOG.md` → "Phase 4 roadmap") closing the RFC gaps the
+earlier phases deliberately left open:
+
+- **RFC 7523 JWT client authentication** — `services/client_assertion.py` adds
+  `client_secret_jwt` (HS256, verified against the client secret) and `private_key_jwt` (RS256,
+  verified against the client's JWKS) as `token_endpoint_auth_method` values, dispatched from
+  `ClientService.authenticate` on the client's *registered* method (a `client_secret_jwt` client
+  presenting Basic auth still fails). `validate_client_assertion` enforces `alg` pinned to the
+  registered method, required claims `exp`/`sub`/`iss`/`aud`, `aud` equal to the token endpoint
+  URL for every endpoint that authenticates a client this way (token, introspect, revoke, PAR,
+  device authorization), `iss`/`sub` equal to `client_id`, and jti replay protection via
+  `JtiReplayGuard`. A JWT assertion may omit form `client_id`, resolving the client from the
+  assertion's `sub` instead (divergence 36). `services/jwks_cache.py::JwksCache` fetches and
+  caches a `private_key_jwt` client's `jwks_uri` document, TTL clamped to `[30, 86400]` seconds
+  (default 300, from `Cache-Control: max-age`), with a 10 s fetch timeout; an inline registered
+  `jwks` column is preferred over `jwks_uri` when both would apply. `ClientService.from_app`
+  wires a `ClientService` up from `app.state` (storage, jti guard, jwks cache) for routes that
+  need one. `POST /connect/register` accepts `client_secret_jwt`/`private_key_jwt`, requiring
+  `jwks` or `jwks_uri` (mutually exclusive) for `private_key_jwt`. Discovery
+  (`token_endpoint_auth_methods_supported`) and the new
+  `introspection_endpoint_auth_methods_supported` /
+  `revocation_endpoint_auth_methods_supported` fields list both methods alongside the existing
+  ones.
+- **RFC 8707 resource indicators** — `services/resource.py::validate_resource` requires an
+  absolute, fragment-free URI and rejects anything else with `invalid_target` (divergence 32,
+  stricter than Rust). A validated `resource` threads through to the issued access token's `aud`
+  claim on every grant (authorization_code redemption uses the `resource` stored on the
+  authorization code at issuance, not a value re-supplied at the token request); introspection
+  echoes the token's own `aud`. Discovery advertises `resource_indicators_supported: true`.
+- **RFC 9728 / metadata parity** — `GET /.well-known/oauth-protected-resource` and
+  `GET /.well-known/oauth-authorization-server/status` (a static, all-valid RFC 9701-adjacent
+  status-list stub) are new endpoints; discovery gains `token_introspection_endpoint` /
+  `token_revocation_endpoint` aliases, `service_documentation`, a widened `claims_supported`
+  list, and userinfo now returns `iss` and `aud` (the token's `client_id`). Divergence 33: neither
+  discovery nor the new protected-resource document advertise mTLS
+  (`tls_client_certificate_bound_access_tokens`, `tls_client_auth`,
+  `self_signed_tls_client_auth`) or the front-channel fields (`request_parameter_supported`,
+  `response_modes_supported`, wider `response_types_supported`, `acr_values_supported`,
+  `request_object_signing_alg_values_supported`) until Phase 4c/4b implement them.
+- **RFC 9701 JWT-secured introspection responses** — `POST /oauth/introspect` with
+  `Accept: application/token-introspection+jwt` returns a signed JWT
+  (`security.py::encode_introspection_jwt`) wrapping the introspection body for BOTH active and
+  inactive results (divergence 34 — Rust only wraps the active case). Signing follows divergence
+  11: the keyset's current RS256 key (with `kid`) when `id_token_alg == "RS256"`, else HS256 with
+  `jwt_secret`.
+- **RFC 8628 §3.5 `slow_down`** — `services/device_poll.py::DevicePollTracker` tracks the most
+  recent poll time and currently-required interval per `device_code`; a poll that arrives sooner
+  than that interval gets `slow_down` back with the interval grown by 5 seconds (uncapped,
+  divergence 35 — Rust never returns `slow_down` at all). Entries expire after 24 hours of
+  inactivity and are dropped on redemption.
+
+New single-process, in-memory stores on `app.state`: `app.state.jti_guard` (`JtiReplayGuard`)
+and `app.state.jwks_cache` (`JwksCache`) for JWT client auth, and `app.state.device_poll`
+(`DevicePollTracker`) for `slow_down` — see "Single-process state caveats (Phase 4a additions)"
+below.
+
+### New environment variables (Phase 4a)
+
+None — Phase 4a adds no new environment variables; all new behavior is either always-on (resource
+validation, metadata fields) or driven entirely by per-client registration data
+(`token_endpoint_auth_method`, `jwks`/`jwks_uri`).
+
+### Single-process state caveats (Phase 4a additions)
+
+Same caveat pattern as the Phase 2/3b/3c stores above: each of the following lives on
+`app.state` as an in-process, in-memory singleton, **not** shared across worker processes or
+server instances — run `OAUTH2_WORKERS=1` or a sticky-session load balancer until these gain
+shared persistence:
+
+- **`JtiReplayGuard`** (`services/client_assertion.py`, `app.state.jti_guard`) — the
+  `(client_id, jti)` replay map for JWT client assertions; a captured assertion replayed against
+  a different worker than the one that first saw it is not caught.
+- **`JwksCache`** (`services/jwks_cache.py`, `app.state.jwks_cache`) — the `jwks_uri` TTL cache;
+  each worker fetches and caches independently, so a `private_key_jwt` client's JWKS endpoint
+  sees up to `N ×` the request volume of a single worker.
+- **`DevicePollTracker`** (`services/device_poll.py`, `app.state.device_poll`) — the per-
+  `device_code` poll-interval tracker backing `slow_down`; a client polling different workers
+  effectively gets a looser, per-worker-independent interval rather than one enforced
+  server-wide.
+
 ## Running
 
 ```bash

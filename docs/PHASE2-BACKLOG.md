@@ -338,6 +338,10 @@ for a future Phase 3c/3d hardening pass, not as bugs introduced by the port:
   protected-resource metadata endpoint at all. Relatedly, token exchange (`routes/token.py`) never reads
   or validates a `resource` request parameter — RFC 8707 (Resource Indicators) is entirely absent
   server-wide, not just from token exchange.
+  **Done (4a):** `GET /.well-known/oauth-protected-resource` is now implemented, and `resource`
+  (RFC 8707) is validated and bound to the issued access token's `aud` on every grant — see the
+  README "Phase 4a" section and divergences 32–33 above. The JAR/`request` parameter remains
+  unported, tracked for Phase 4b.
 
 ### Known Phase 3c gaps (deliberate)
 
@@ -369,6 +373,9 @@ not as bugs introduced by the port:
   client polling faster than `interval` only ever sees `authorization_pending`, never the
   `slow_down` escalation §3.5 describes for repeated over-fast polling — matching a gap already
   present in the Rust server (not introduced or fixed by Phase 3c).
+  **Done (4a) (divergence 35):** `services/device_poll.py::DevicePollTracker` now enforces
+  `slow_down`, growing the required interval by 5 s per violation — see the README "Phase 4a"
+  section.
 - **No social account-linking by email** — a social login always provisions/matches on
   `username = "{provider}:{provider_user_id}"`; there is no lookup-or-merge against an existing
   local (password-based) account that happens to share the same verified email address. Logging
@@ -467,6 +474,29 @@ writeup (install, backend selection, caveats).
     `MongoStorage` — Rust hard-rejects it (a hickory-proto DNS-resolver security advisory that
     doesn't apply to this driver/motor stack). Task 1 (commit `c08c550`).
 
+From Phase 4a (`docs/plans/2026-09-20-python-oauth2-port-phase-4a.md` → "Global Constraints"):
+32. `resource` values are validated (absolute URI, no fragment) and rejected with
+    `invalid_target` (RFC 8707 §2) — Rust accepts any string. Task 2 (commits `0667c65`,
+    `6bbd22e`).
+33. Discovery and protected-resource metadata do NOT advertise
+    `tls_client_certificate_bound_access_tokens`, `tls_client_auth`, or
+    `self_signed_tls_client_auth` until Phase 4c implements them — Rust advertises all
+    three. Likewise `request_parameter_supported`, `response_modes_supported`,
+    `response_types_supported: ["code", "code id_token"]`, `acr_values_supported`,
+    `request_object_signing_alg_values_supported` stay at their Phase 3 values until 4b.
+    Kept as-is; no code change in Phase 4a.
+34. RFC 9701: an `Accept: application/token-introspection+jwt` caller gets a signed JWT
+    for BOTH active and inactive results — Rust only wraps the active path and returns
+    plain JSON `{"active": false}` otherwise. Signing follows divergence 11 (keyset's
+    current RS256 key with its `kid` when `id_token_alg == "RS256"`, else HS256
+    `jwt_secret`) rather than Rust's static env PEM. Task 4 (commit `b247529`).
+35. RFC 8628 §3.5 `slow_down` is implemented (Rust never returns it — recorded as a shared
+    gap in "Known Phase 3c gaps"). The required interval grows by 5 s per `slow_down`.
+    Task 5 (commit `2c034c3`).
+36. A JWT client assertion may omit form `client_id`; the client is then resolved from the
+    assertion's `sub` (RFC 7523 §2.2 says `client_id` is unnecessary). Rust requires
+    `client_id` in the form. Task 1 (commits `1fc7171`, `4537833`).
+
 ### Known Phase 3d gaps (deliberate/parity, MongoDB backend)
 
 - **App-side full-collection scans for every list/page method.** `list_all_*`/`list_*_page`/
@@ -505,3 +535,26 @@ writeup (install, backend selection, caveats).
   introspect + revoke over real HTTP against a real mongod; it is intentionally NOT wired into
   `scripts/gate.sh` or the CI `db-tests` job (mirrors the existing Postgres cross-server smoke in
   the README, which is also manual-only).
+
+## Phase 4 roadmap
+
+Full detail: `docs/plans/2026-09-20-python-oauth2-port-phase-4a.md` → "Phase 4 design (roadmap)".
+Phase 4 closes the remaining Rust-vs-Python gaps (this backlog's divergence 8 and the "Known …
+gaps" sections above) plus a few RFC gaps both servers share, in three sub-phases, each its own
+branch/PR:
+
+| Sub-phase | Scope |
+|---|---|
+| **4a** (this phase) | RFC 7523 JWT client auth (`client_secret_jwt`, `private_key_jwt`) + jti replay + `jwks_uri` cache; RFC 8707 resource indicators → `aud`; RFC 9728 protected-resource metadata + status-list stub + discovery/userinfo field parity; RFC 9701 JWT introspection responses; RFC 8628 `slow_down`. |
+| **4b** | Authorize front-channel parity: `response_mode` `query`/`form_post`/`fragment`; OIDC hybrid `code id_token`; JAR `request` objects (unsigned public / HS256 / RS256-via-client-JWKS); `acr_values` step-up (RFC 9470) + `claims` request + `acr`/`amr`/`auth_time` claims. |
+| **4c** | RFC 8705 mTLS (`tls_client_auth`, `self_signed_tls_client_auth`, `X-Client-Cert-Thumbprint`/`X-SSL-Client-S-DN`, `cnf.x5t#S256`); DPoP hardening beyond Rust (`ath`, resource-side DPoP at userinfo, `dpop_jkt` at authorize/PAR, `DPoP-Nonce` on 200s); nested `act` chains; social account-linking by email. |
+
+Out of scope for all of Phase 4 (unchanged from earlier phases): Redis/Kafka/RabbitMQ event
+backends, bulkheads, OTel span export, multi-instance persistence of in-process stores,
+admin-session server-side revocation.
+
+**Open question surfaced in review (candidate for 4b/4c):** in HS256 deployments, the RFC 9701
+introspection JWT (divergence 34) is signed with the server's own `jwt_secret` — Rust parity,
+the same key `id_token`s use (divergence 11) — so the requesting client, which does not hold
+`jwt_secret`, cannot verify the signature itself. Candidates: sign with the client's own secret
+instead, or require RS256 (keyset key) for this response type regardless of `id_token_alg`.
