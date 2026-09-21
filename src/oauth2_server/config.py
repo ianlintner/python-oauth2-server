@@ -133,6 +133,12 @@ class Config(BaseSettings):
     # conditions that must ALL hold, and README's "Security note:
     # admin-by-email and social login".
     social_link_by_verified_email: bool = False
+    # RFC 8705 §5: optional separate base URL (e.g. `https://mtls.auth.example`)
+    # where a TLS-terminating proxy demands client certificates. When set AND
+    # `trust_proxy_headers` is on, discovery advertises `mtls_endpoint_aliases`
+    # under it (divergence 61). Unset = no aliases (mTLS clients use the
+    # ordinary endpoints, as before).
+    mtls_endpoint_base_url: str | None = None
     google_client_id: str | None = None
     google_client_secret: str | None = None
     google_redirect_uri: str | None = None

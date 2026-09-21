@@ -2,7 +2,7 @@ import json
 import secrets
 from urllib.parse import parse_qs, urlparse
 
-from tests.helpers import login_session, reseed_client, seed_client
+from tests.helpers import PKCE_CHALLENGE, login_session, reseed_client, seed_client
 
 
 async def test_rfc9207_iss_included_in_authorization_response(app_with_session):
@@ -12,6 +12,8 @@ async def test_rfc9207_iss_included_in_authorization_response(app_with_session):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
             "state": "xyz",
@@ -151,6 +153,8 @@ async def test_implicit_response_type_rejected(app_with_session):
 _AUTHORIZE_PARAMS = {
     "response_type": "code",
     "client_id": "client1",
+    "code_challenge": PKCE_CHALLENGE,
+    "code_challenge_method": "S256",
     "redirect_uri": "https://a.example/cb",
     "scope": "read",
 }
@@ -225,6 +229,8 @@ async def test_claims_request_stored_on_code(app_with_session):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
             "claims": json.dumps(claims),
@@ -252,6 +258,8 @@ async def test_malformed_claims_rejected_via_redirect(app_with_session):
             params={
                 "response_type": "code",
                 "client_id": "client1",
+                "code_challenge": PKCE_CHALLENGE,
+                "code_challenge_method": "S256",
                 "redirect_uri": "https://a.example/cb",
                 "scope": "read",
                 "claims": bad_claims,
@@ -275,6 +283,8 @@ async def test_oversized_claims_rejected_via_redirect(app_with_session):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
             "claims": oversized,
@@ -295,6 +305,8 @@ async def test_over_nested_claims_no_500(app_with_session):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
             "claims": "[" * 50 + "]" * 50,

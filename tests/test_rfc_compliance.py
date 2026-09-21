@@ -37,6 +37,7 @@ from oauth2_server.models import DenylistEntry, Token
 from oauth2_server.services.dpop import jwk_thumbprint
 from tests.conftest import build_client_app
 from tests.helpers import (
+    PKCE_CHALLENGE,
     build_mongo_client_app,
     generate_dpop_key,
     login_admin,
@@ -523,6 +524,8 @@ async def test_prompt_none_with_expired_max_age_returns_login_required(app_with_
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
             "prompt": "none",
@@ -568,6 +571,8 @@ async def test_prompt_none_with_fresh_session_issues_code(app_with_session):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
             "prompt": "none",
@@ -716,6 +721,8 @@ async def test_prompt_none_expired_max_age_login_required(app_with_session):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
             "prompt": "none",
@@ -983,6 +990,8 @@ async def test_denylisted_username_blocked_at_login(client_app):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
         },
@@ -1135,6 +1144,8 @@ async def test_rar_full_flow_with_type_validation(client_app):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
             "authorization_details": json.dumps([{"type": "payment_initiation"}]),

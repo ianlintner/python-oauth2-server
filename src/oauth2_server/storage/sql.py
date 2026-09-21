@@ -546,6 +546,23 @@ class SqlStorage:
             )
         return AuthorizationCode(**row) if row else None
 
+    async def get_authorization_code_by_token_family(self, family: str) -> AuthorizationCode | None:
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_AUTH_CODE_COLS} FROM authorization_codes "
+                            "WHERE token_family = :f"
+                        ),
+                        {"f": family},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return AuthorizationCode(**row) if row else None
+
     async def mark_authorization_code_used(self, code: str) -> int:
         async with self._engine.begin() as conn:
             result = await conn.execute(

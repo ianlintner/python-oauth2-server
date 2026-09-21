@@ -154,6 +154,7 @@ class AuthorizationCode(BaseModel):
     authorization_details: str | None = None
     claims_request: str | None = None
     token_family: str | None = None
+    dpop_jkt: str | None = None
 
 
 class DeviceAuthorization(BaseModel):

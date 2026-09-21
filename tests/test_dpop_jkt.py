@@ -3,18 +3,16 @@
 `/oauth/authorize` accepts `dpop_jkt` from the query string, from a PAR-pushed
 body, and from a JAR overlay; it must be a 43-character base64url SHA-256 JWK
 thumbprint (anything else is an `invalid_request` through the redirect
-channel). The accepted value is recorded in `app.state.dpop_code_bindings`
-(`services/dpop_bindings.py`) against the issued authorization code, and
+channel). The accepted value is recorded in the `dpop_jkt` column of the
+issued authorization code's row, and
 `/oauth/token` refuses to redeem that code unless the request carries a DPoP
 proof from the SAME key.
 
 The Rust server implements none of this — it parses `dpop_jkt` nowhere, so
 there is no parity constraint here and no Rust test to port.
 
-**Single-process caveat**: the binding lives in process memory (the
-`AuthorizationCode` table is Rust-owned and may not grow a column), so a code
-redeemed on a different instance from the one that issued it finds no binding
-and skips the check. Same limitation as `ParStore` and `DpopReplayStore`.
+The binding is persisted on the code row (Rust migration V22), so a code redeemed
+on a different instance from the one that issued it is still checked.
 """
 
 from __future__ import annotations
@@ -80,6 +78,13 @@ async def _redeem(client_app, code: str, verifier: str, proof: str | None = None
     )
 
 
+async def _stored_jkt(client_app, code: str) -> str | None:
+    """The `dpop_jkt` persisted on the authorization code row."""
+    row = await client_app.app.state.storage.get_authorization_code(code)
+    assert row is not None
+    return row.dpop_jkt
+
+
 # --- the three request channels `dpop_jkt` can arrive through ----------------
 
 
@@ -88,9 +93,7 @@ async def test_dpop_jkt_via_query_binds_code_and_matching_proof_redeems(client_a
     jkt = jwk_thumbprint(key[1])
 
     code, verifier = await _authorize_code(client_app, dpop_jkt=jkt)
-    assert client_app.app.state.dpop_code_bindings.take(code) == jkt
-    # `take` above consumed it; re-bind so the redemption below sees it.
-    client_app.app.state.dpop_code_bindings.bind(code, jkt)
+    assert await _stored_jkt(client_app, code) == jkt
 
     proof, _ = make_dpop_proof(TOKEN_URL, "POST", key)
     resp = await _redeem(client_app, code, verifier, proof)
@@ -131,8 +134,7 @@ async def test_dpop_jkt_via_par(client_app):
     code = parse_qs(urlparse(resp.headers["location"]).query)["code"][0]
 
     # The PAR-pushed `dpop_jkt` survived the merge onto the authorize request.
-    assert client_app.app.state.dpop_code_bindings.take(code) == jkt
-    client_app.app.state.dpop_code_bindings.bind(code, jkt)
+    assert await _stored_jkt(client_app, code) == jkt
     proof, _ = make_dpop_proof(TOKEN_URL, "POST", key)
     assert (await _redeem(client_app, code, verifier, proof)).status_code == 200
 
@@ -166,8 +168,7 @@ async def test_dpop_jkt_via_jar_overlay(client_app):
     assert resp.status_code == 302, resp.text
     code = parse_qs(urlparse(resp.headers["location"]).query)["code"][0]
 
-    assert client_app.app.state.dpop_code_bindings.take(code) == jkt
-    client_app.app.state.dpop_code_bindings.bind(code, jkt)
+    assert await _stored_jkt(client_app, code) == jkt
     proof, _ = make_dpop_proof(TOKEN_URL, "POST", key)
     assert (await _redeem(client_app, code, verifier, proof)).status_code == 200
 
@@ -282,7 +283,7 @@ async def test_no_dpop_jkt_leaves_code_unbound(client_app):
     """Regression guard: without `dpop_jkt` nothing is bound, so a plain
     redemption (no proof) keeps working exactly as before."""
     code, verifier = await _authorize_code(client_app)
-    assert client_app.app.state.dpop_code_bindings.take(code) is None
+    assert await _stored_jkt(client_app, code) is None
     assert (await _redeem(client_app, code, verifier)).status_code == 200
 
 

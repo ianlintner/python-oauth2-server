@@ -51,6 +51,7 @@ class AuthorizeService:
         authorization_details: str | None = None,
         resource: str | None = None,
         claims_request: str | None = None,
+        dpop_jkt: str | None = None,
     ) -> AuthorizationCode:
         now = datetime.now(timezone.utc)
         auth_code = AuthorizationCode(
@@ -68,6 +69,7 @@ class AuthorizeService:
             authorization_details=authorization_details,
             claims_request=claims_request,
             token_family=uuid.uuid4().hex,
+            dpop_jkt=dpop_jkt,
         )
         await self._storage.save_authorization_code(auth_code)
         return auth_code

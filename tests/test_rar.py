@@ -21,7 +21,7 @@ import jwt
 import pytest
 
 from tests.conftest import build_client_app
-from tests.helpers import login_session, post_token
+from tests.helpers import PKCE_CHALLENGE, PKCE_VERIFIER, login_session, post_token
 
 _VALID_DETAILS = [{"type": "openid", "actions": ["read"]}]
 
@@ -35,6 +35,8 @@ async def _authorize_and_get_code(client_app, **extra_query) -> str:
     await login_session(client_app)
     params = {
         "client_id": "client1",
+        "code_challenge": PKCE_CHALLENGE,
+        "code_challenge_method": "S256",
         "response_type": "code",
         "redirect_uri": "https://a.example/cb",
         "scope": "read",
@@ -65,6 +67,8 @@ async def test_authorize_rejects_unknown_rar_type(client_app):
         "/oauth/authorize",
         params={
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "response_type": "code",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
@@ -85,6 +89,8 @@ async def test_authorize_rejects_malformed_rar(client_app):
         "/oauth/authorize",
         params={
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "response_type": "code",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
@@ -112,6 +118,7 @@ async def test_full_flow_embeds_details_in_jwt_and_response(client_app):
             "code": code,
             "redirect_uri": "https://a.example/cb",
             "client_id": "client1",
+            "code_verifier": PKCE_VERIFIER,
         },
         basic_auth=("client1", "s3cret"),
     )
@@ -150,6 +157,7 @@ async def test_redemption_rejects_altered_details(client_app):
             "code": code,
             "redirect_uri": "https://a.example/cb",
             "client_id": "client1",
+            "code_verifier": PKCE_VERIFIER,
             "authorization_details": altered,
         },
         basic_auth=("client1", "s3cret"),
@@ -172,6 +180,7 @@ async def test_redemption_rejects_altered_details(client_app):
             "code": code,
             "redirect_uri": "https://a.example/cb",
             "client_id": "client1",
+            "code_verifier": PKCE_VERIFIER,
         },
         basic_auth=("client1", "s3cret"),
     )
@@ -227,6 +236,7 @@ async def test_refresh_drops_details(client_app):
             "code": code,
             "redirect_uri": "https://a.example/cb",
             "client_id": "client1",
+            "code_verifier": PKCE_VERIFIER,
         },
         basic_auth=("client1", "s3cret"),
     )
@@ -259,6 +269,8 @@ async def test_par_pushed_details_flow(client_app):
         "/oauth/par",
         data={
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "response_type": "code",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
@@ -285,6 +297,7 @@ async def test_par_pushed_details_flow(client_app):
             "code": code,
             "redirect_uri": "https://a.example/cb",
             "client_id": "client1",
+            "code_verifier": PKCE_VERIFIER,
         },
         basic_auth=("client1", "s3cret"),
     )
@@ -343,6 +356,8 @@ async def test_oversized_authorization_details_rejected(client_app):
         "/oauth/authorize",
         params={
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "response_type": "code",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",

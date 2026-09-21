@@ -442,6 +442,10 @@ class MongoStorage:
         doc = await self.authorization_codes.find_one({"code": code})
         return _from_doc(AuthorizationCode, doc)
 
+    async def get_authorization_code_by_token_family(self, family: str) -> AuthorizationCode | None:
+        doc = await self.authorization_codes.find_one({"token_family": family})
+        return _from_doc(AuthorizationCode, doc)
+
     async def mark_authorization_code_used(self, code: str) -> int:
         # Atomic single-claim (divergence 30) — Rust does a bare
         # `update_one({code}, {$set:{used:true}})` with no `used: false`

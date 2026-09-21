@@ -303,8 +303,8 @@ for a future Phase 3c/3d hardening pass, not as bugs introduced by the port:
   to use via a `dpop_jkt` authorization parameter, checked against the actual proof at redemption.
   Neither `GET /oauth/authorize` nor `POST /oauth/par` accept or store it.
   **Done (4c):** Task 5 (commit `9671dd2`, divergence 52) — accepted at authorize (query/PAR/JAR),
-  bound in `app.state.dpop_code_bindings` and enforced at redemption. Single-process: a code
-  redeemed on another instance skips the check (Rust-side `V22 dpop_jkt` column is the follow-up).
+  bound and enforced at redemption. **Phase 4d:** persisted in the `authorization_codes.dpop_jkt`
+  column (Rust migration `V22`), so it is no longer single-process.
 - **Device grant never cnf-bound** — a DPoP proof presented on `POST /oauth/token` with
   `grant_type=urn:ietf:params:oauth:grant-type:device_code` is accepted and validated but its `cnf`
   is discarded; the issued token is always a plain Bearer token. Pinned by
@@ -591,9 +591,9 @@ From Phase 4c (`docs/plans/2026-09-20-python-oauth2-port-phase-4c.md` → "Globa
     error="invalid_token"` with distinct `error_description`s. Unbound tokens keep Bearer
     behavior. Task 4 (commit `cd1ec3f`).
 52. `dpop_jkt` (RFC 9449 §10) is accepted at authorize (query/PAR/JAR overlay), validated as a
-    43-char base64url string, bound to the code in `app.state.dpop_code_bindings` (single-process;
-    a code redeemed on another instance skips the check — the Rust-side `V22 dpop_jkt` column is
-    the follow-up), and enforced at redemption: missing proof or `jkt` mismatch → `invalid_grant`.
+    43-char base64url string, bound to the code (originally in an in-process store; Phase 4d moved
+    it to the `authorization_codes.dpop_jkt` column, Rust migration `V22`, so it holds across
+    instances), and enforced at redemption: missing proof or `jkt` mismatch → `invalid_grant`.
     Task 5 (commit `9671dd2`).
 53. `DPoP-Nonce` is set on SUCCESSFUL token and userinfo responses when the client has
     `dpop_nonce_required` and presented a valid proof (RFC 9449 §8). Rust/Python 3b only sent it on
@@ -686,30 +686,38 @@ Out of scope for all of Phase 4 (unchanged from earlier phases): Redis/Kafka/Rab
 backends, bulkheads, OTel span export, multi-instance persistence of in-process stores,
 admin-session server-side revocation.
 
-Known to remain after 4c (candidates for a later phase):
+**Phase 4d (done)** closed the five items that remained after 4c — divergences 61–64 (52 amended):
 
-- **Rust-side `V22` `dpop_jkt` column** — the only way the divergence-52 code binding survives a
-  multi-instance deployment; this repo authors no migrations, so it has to land in the Rust repo
-  first (until then `app.state.dpop_code_bindings` is single-process and a cross-instance
-  redemption skips the check).
-- **`mtls_endpoint_aliases`** (RFC 8705 §5) are not advertised — mTLS clients use the ordinary
-  endpoints (Rust parity).
-- **The `claims` `userinfo` member** is still not honored, so `claims_parameter_supported` stays
-  unadvertised even though the id_token half now works (divergence 59).
-- **No nonce enforcement at userinfo** — `userinfo` validates the access token via the storage row
-  and accepts resource-bound tokens regardless of `aud`.
-- **PKCE is still required only for public clients** (`token_endpoint_auth_method == "none"`);
-  Rust requires it unconditionally.
+61. `mtls_endpoint_aliases` (RFC 8705 §5) is advertised when `OAUTH2_MTLS_ENDPOINT_BASE_URL` is set
+    AND `trust_proxy_headers` is on: token, revocation, introspection, userinfo, device
+    authorization and PAR endpoints re-based onto that host. Never for browser-facing endpoints.
+    Rust advertises none.
+62. `/oauth/userinfo` enforces DPoP nonces (RFC 9449 §9) for a DPoP-bound token whose client has
+    `dpop_nonce_required`: a missing/stale nonce → 401 `WWW-Authenticate: DPoP error="use_dpop_nonce"`
+    with a fresh `DPoP-Nonce`; a forged one → `invalid_token`. (The item previously described as
+    "no nonce enforcement at userinfo".)
+63. The `userinfo` member of the `claims` request is honored at `/oauth/userinfo`, via the token's
+    `token_family` → authorization code (`get_authorization_code_by_token_family`), with the same
+    never-widen semantics as divergence 59 (`email`/`preferred_username` only; `value`/`values`
+    mismatch omits). `claims_parameter_supported` is now advertised. Tokens without a family/code
+    (client_credentials, exchange) simply have no claims request.
+64. PKCE is required for confidential clients too (Rust parity): `/oauth/authorize` and PAR without
+    `code_challenge` → `invalid_request`; a stored code with no challenge is refused at redemption
+    with `invalid_grant`. This is a **breaking change for confidential clients that never sent PKCE**.
+52 (amended). `dpop_jkt` is persisted on the code row — Rust migration `V22__add_dpop_jkt_to_auth_codes.sql`
+    (vendored here; authored in the Rust repo, the schema owner). `app.state.dpop_code_bindings` and
+    `services/dpop_bindings.py` are gone.
+
+Still out of scope: `request_uri`-as-JAR-URL, and the parity-only items listed above.
 
 ### Remaining Phase 4b gaps (carried to 4c or later)
 
 - ~~`claims` … not yet honored at `/oauth/userinfo` or `/oauth/token`~~ — **id_token half done
   (4c)**, Task 8 (divergence 59): the stored request is honored for the id_token minted at code
   redemption (scope-gated, never widening; `value`/`values` mismatch omits the claim). The
-  `userinfo` member is STILL not honored, which is why `claims_parameter_supported` stays
-  unadvertised.
-- PKCE is still required only for public clients (`token_endpoint_auth_method == "none"`); Rust
-  requires PKCE unconditionally, for confidential clients too.
+  `userinfo` member is honored as of **4d** (divergence 63), and `claims_parameter_supported`
+  is now advertised.
+- ~~PKCE is still required only for public clients~~ — **Done (4d)**, divergence 64.
 - `request_uri=` (RFC 9101 §5.2, a JAR fetched from a URL rather than passed inline via
   `request=`) remains unsupported; only PAR's own `request_uri` value is accepted at
   `/oauth/authorize`.

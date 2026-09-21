@@ -415,10 +415,10 @@ async def test_dpop_nonce_on_successful_userinfo(client_app):
     assert token_resp.status_code == 200, token_resp.text
     access_token = token_resp.json()["access_token"]
 
-    # The resource-server proof needs `ath` (divergence 50) but NOT a nonce —
-    # userinfo does not gate on one; it only hands a fresh one back.
+    # The resource-server proof needs `ath` (divergence 50) and, for a
+    # nonce-requiring client, a fresh nonce (divergence 62).
     resource_proof, _pub2 = make_dpop_proof(
-        USERINFO_URL, "GET", key, extra_claims={"ath": ath_for(access_token)}
+        USERINFO_URL, "GET", key, nonce=nonce, extra_claims={"ath": ath_for(access_token)}
     )
     userinfo = await client_app.get(
         "/oauth/userinfo",
@@ -451,3 +451,63 @@ async def test_no_dpop_nonce_on_unbound_userinfo(client_app):
 
 def _query_param(location: str, name: str) -> str:
     return parse_qs(urlsplit(location).query)[name][0]
+
+
+async def test_userinfo_requires_nonce_for_nonce_client(client_app):
+    """Divergence 62 (RFC 9449 §9): a nonce-requiring client's DPoP-bound token
+    is refused at userinfo without a nonce — 401 `use_dpop_nonce` carrying a
+    fresh `DPoP-Nonce` — and accepted once the client retries with it."""
+    await _seed_nonce_client(client_app)
+    key = generate_dpop_key()
+    nonce = await _bootstrap_nonce(client_app, key)
+
+    await login_session(client_app)
+    verifier, challenge = _pkce_pair()
+    authorize = await client_app.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": NONCE_CLIENT[0],
+            "redirect_uri": "https://a.example/cb",
+            "scope": "openid email",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        },
+    )
+    code = _query_param(authorize.headers["location"], "code")
+    proof, _ = make_dpop_proof(TOKEN_URL, "POST", key, nonce=nonce)
+    token_resp = await post_token(
+        client_app,
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "https://a.example/cb",
+            "client_id": NONCE_CLIENT[0],
+            "code_verifier": verifier,
+        },
+        basic_auth=NONCE_CLIENT,
+        headers={"DPoP": proof},
+    )
+    access_token = token_resp.json()["access_token"]
+
+    no_nonce, _ = make_dpop_proof(
+        USERINFO_URL, "GET", key, extra_claims={"ath": ath_for(access_token)}
+    )
+    refused = await client_app.get(
+        "/oauth/userinfo",
+        headers={"Authorization": f"DPoP {access_token}", "DPoP": no_nonce},
+    )
+    assert refused.status_code == 401
+    assert refused.json()["error"] == "use_dpop_nonce"
+    assert refused.headers["www-authenticate"] == 'DPoP error="use_dpop_nonce"'
+    fresh = refused.headers["dpop-nonce"]
+    client_app.app.state.dpop_nonce_issuer.verify(fresh)
+
+    retry, _ = make_dpop_proof(
+        USERINFO_URL, "GET", key, nonce=fresh, extra_claims={"ath": ath_for(access_token)}
+    )
+    ok = await client_app.get(
+        "/oauth/userinfo",
+        headers={"Authorization": f"DPoP {access_token}", "DPoP": retry},
+    )
+    assert ok.status_code == 200, ok.text

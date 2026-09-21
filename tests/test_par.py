@@ -14,7 +14,7 @@ import secrets
 from urllib.parse import parse_qs, urlparse
 
 from oauth2_server.services import par as par_service
-from tests.helpers import login_session, post_token, seed_client
+from tests.helpers import PKCE_CHALLENGE, login_session, post_token, seed_client
 
 
 def _pkce_pair() -> tuple[str, str]:
@@ -142,6 +142,8 @@ async def test_rfc9126_par_invalid_body_encoding_is_rejected(client_app):
 async def _push_client1_par(client_app, **extra) -> str:
     data = {
         "client_id": "client1",
+        "code_challenge": PKCE_CHALLENGE,
+        "code_challenge_method": "S256",
         "response_type": "code",
         "redirect_uri": "https://a.example/cb",
         "scope": "read",

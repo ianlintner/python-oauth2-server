@@ -350,12 +350,12 @@ async def authorize(request: Request):
     code_challenge = merged.get("code_challenge")
     code_challenge_method = merged.get("code_challenge_method")
 
-    if client.is_public() and not code_challenge:
+    if not code_challenge:
         return _deliver_error(
             response_mode,
             redirect_uri,
             "invalid_request",
-            "public clients must send a PKCE code_challenge",
+            "a PKCE code_challenge is required (RFC 9700 §2.1.1)",
             state,
             config.issuer,
         )
@@ -553,11 +553,8 @@ async def authorize(request: Request):
         authorization_details=authorization_details,
         resource=resource,
         claims_request=claims_request,
+        dpop_jkt=dpop_jkt,
     )
-    if dpop_jkt is not None:
-        # Divergence 52: in-process only — `AuthorizationCode` is a Rust-owned
-        # table and may not grow a column for this (services/dpop_bindings.py).
-        request.app.state.dpop_code_bindings.bind(auth_code.code, dpop_jkt)
     request.app.state.metrics.oauth_authorization_codes_issued.inc()
     emit_event(
         request.app.state.event_bus,
