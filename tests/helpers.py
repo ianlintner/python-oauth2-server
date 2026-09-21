@@ -22,6 +22,11 @@ MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations" / "sql"
 # expected `aud` for introspect/revoke/PAR too.
 TOKEN_ENDPOINT = "https://auth.example.com/oauth/token"
 
+# A fixed PKCE pair (RFC 7636 Appendix B) for tests where PKCE is incidental:
+# every client, confidential included, must present one (RFC 9700 §2.1.1).
+PKCE_VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+PKCE_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
 
 def make_client_assertion(
     client_id: str,

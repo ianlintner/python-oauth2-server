@@ -665,15 +665,19 @@ otherwise (divergence 47 — Rust reads them unconditionally, so anyone who can 
 directly could forge client authentication and a `cnf` binding). Set it only when a
 terminating proxy strips both headers from inbound requests and re-adds them itself.
 
-### Single-process state caveats (Phase 4c)
+### Phase 4d additions
 
-- `app.state.dpop_code_bindings` — the `dpop_jkt` → authorization-code binding (divergence 52)
-  lives in the same in-process store style as the PAR/replay/nonce stores, because
-  `authorization_codes` has no `dpop_jkt` column and the SQL schema is owned by the Rust repo
-  (zero migrations here). A code redeemed on a DIFFERENT instance from the one that issued it
-  skips the binding check rather than failing. The follow-up is a Rust-side `V22` migration adding
-  the column; until then, either run a single instance or pin the authorize/token pair to one
-  instance if you depend on `dpop_jkt`.
+- `OAUTH2_MTLS_ENDPOINT_BASE_URL` — optional base URL of an mTLS-terminating host. With
+  `OAUTH2_SERVER_TRUST_PROXY_HEADERS=true`, discovery advertises RFC 8705 §5
+  `mtls_endpoint_aliases` under it (divergence 61). Unset = not advertised.
+- The `dpop_jkt` → authorization-code binding (divergence 52) is now persisted in the
+  `authorization_codes.dpop_jkt` column (Rust migration `V22`, vendored under `migrations/sql/`),
+  so it survives multiple instances. **Apply V22 before deploying this version** (SQL backends).
+- `/oauth/userinfo` enforces DPoP nonces for `dpop_nonce_required` clients (divergence 62) and
+  honors the `userinfo` member of the `claims` request (divergence 63); discovery advertises
+  `claims_parameter_supported`.
+- PKCE is required for every client, confidential included (divergence 64). Confidential clients
+  that never sent `code_challenge` will now get `invalid_request`.
 
 ### Design note: introspection of certificate-bound tokens
 

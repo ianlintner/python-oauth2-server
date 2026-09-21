@@ -34,7 +34,7 @@ import pytest
 
 from oauth2_server.config import Config
 from tests.conftest import build_client_app
-from tests.helpers import login_session
+from tests.helpers import PKCE_CHALLENGE, login_session
 
 BRONZE = "urn:mace:incommon:iap:bronze"
 SILVER = "urn:mace:incommon:iap:silver"
@@ -66,6 +66,8 @@ def _authorize_params(**overrides) -> dict:
     params = {
         "response_type": "code",
         "client_id": "client1",
+        "code_challenge": PKCE_CHALLENGE,
+        "code_challenge_method": "S256",
         "redirect_uri": REDIRECT_URI,
         "scope": "read",
     }
@@ -230,6 +232,8 @@ async def test_acr_values_from_par_are_enforced(client_app):
         "/oauth/par",
         data={
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "response_type": "code",
             "redirect_uri": REDIRECT_URI,
             "scope": "read",

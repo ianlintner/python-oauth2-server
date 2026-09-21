@@ -18,7 +18,7 @@ from oauth2_server.services.authorize_response import (
     resolve_response_mode,
     success_response,
 )
-from tests.helpers import login_session, reseed_client
+from tests.helpers import PKCE_CHALLENGE, login_session, reseed_client
 
 _SECURITY_HEADERS = {
     "cache-control": "no-store",
@@ -39,6 +39,8 @@ def _authorize_params(**overrides):
     params = {
         "response_type": "code",
         "client_id": "client1",
+        "code_challenge": PKCE_CHALLENGE,
+        "code_challenge_method": "S256",
         "redirect_uri": "https://a.example/cb",
         "scope": "read",
     }

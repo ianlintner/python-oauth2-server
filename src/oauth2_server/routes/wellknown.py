@@ -29,6 +29,8 @@ from oauth2_server.services.dpop import (
     read_dpop_header,
     validate_dpop_proof,
 )
+from oauth2_server.services.claims_request import ClaimsSelection, select_userinfo_claims
+from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
 from oauth2_server.services.mtls import mtls_headers
 
 router = APIRouter()
@@ -71,8 +73,34 @@ def _discovery_document(
     *,
     has_rs256_key: bool,
     acr_values_supported: list[str],
+    mtls_base: str | None = None,
 ) -> dict:
     base = issuer.rstrip("/")
+    doc = _discovery_body(
+        base, id_token_alg, rar_types_supported, has_rs256_key, acr_values_supported
+    )
+    if mtls_base:
+        m = mtls_base.rstrip("/")
+        # RFC 8705 §5: only endpoints that authenticate a client / bind a
+        # token are aliased; browser-facing endpoints stay on the issuer host.
+        doc["mtls_endpoint_aliases"] = {
+            "token_endpoint": f"{m}/oauth/token",
+            "revocation_endpoint": f"{m}/oauth/revoke",
+            "introspection_endpoint": f"{m}/oauth/introspect",
+            "userinfo_endpoint": f"{m}/oauth/userinfo",
+            "device_authorization_endpoint": f"{m}/oauth/device_authorization",
+            "pushed_authorization_request_endpoint": f"{m}/oauth/par",
+        }
+    return doc
+
+
+def _discovery_body(
+    base: str,
+    id_token_alg: str,
+    rar_types_supported: list[str],
+    has_rs256_key: bool,
+    acr_values_supported: list[str],
+) -> dict:
     return {
         "issuer": base,
         "authorization_endpoint": f"{base}/oauth/authorize",
@@ -98,6 +126,7 @@ def _discovery_document(
         # `request_uri=` (RFC 9101 §5.2, a JAR fetched from a URL) remains
         # unsupported; only PAR's own `request_uri` value is accepted there.
         "request_parameter_supported": True,
+        "claims_parameter_supported": True,
         "end_session_endpoint": f"{base}/oauth/logout",
         "check_session_iframe": f"{base}/oauth/check_session",
         "backchannel_logout_supported": True,
@@ -192,6 +221,7 @@ async def openid_configuration(request: Request) -> ORJSONResponse:
             config.rar_types_supported,
             has_rs256_key=keyset.current_for_alg("RS256") is not None,
             acr_values_supported=config.acr_values_supported,
+            mtls_base=config.mtls_endpoint_base_url if config.trust_proxy_headers else None,
         )
     )
 
@@ -290,6 +320,19 @@ def _dpop_invalid_token_response(description: str) -> ORJSONResponse:
         {"error": "invalid_token", "error_description": description},
         status_code=401,
         headers={"WWW-Authenticate": 'DPoP error="invalid_token"'},
+    )
+
+
+def _resource_nonce_challenge(as_challenge: ORJSONResponse) -> ORJSONResponse:
+    """Re-shape the AS-side `use_dpop_nonce` 400 (which carries the fresh
+    `DPoP-Nonce`) into the RFC 9449 §9 resource-server 401."""
+    return ORJSONResponse(
+        {"error": "use_dpop_nonce", "error_description": "DPoP proof nonce required or stale"},
+        status_code=401,
+        headers={
+            "WWW-Authenticate": 'DPoP error="use_dpop_nonce"',
+            "DPoP-Nonce": as_challenge.headers["DPoP-Nonce"],
+        },
     )
 
 
@@ -445,20 +488,39 @@ async def userinfo(request: Request) -> ORJSONResponse:
     scopes = set(row.scope.split())
     response: dict[str, str] = {"sub": subject, "iss": config.issuer, "aud": row.client_id}
 
+    token_client = None
+    if dpop_validated is not None:
+        # Divergences 53/62: userinfo has no client row of its own — look one
+        # up only on the proof path (at most once per request). A deleted
+        # client simply yields no nonce handling.
+        token_client = await storage.get_client(row.client_id)
+        if token_client is not None and token_client.dpop_nonce_required:
+            # RFC 9449 §9: a resource server that requires nonces answers a
+            # missing/stale one with 401 `use_dpop_nonce` + a fresh
+            # `DPoP-Nonce` (the token endpoint's 400 is the AS-side shape).
+            try:
+                challenge = enforce_dpop_nonce(dpop_validated, request.app.state.dpop_nonce_issuer)
+            except DpopError:
+                return _dpop_invalid_token_response("DPoP proof validation failed")
+            if challenge is not None:
+                return _resource_nonce_challenge(challenge)
+
+    # Divergence 63: the `userinfo` member of the `claims` request stored on
+    # the authorization code this token descends from. Only ever subtracts.
+    selection = ClaimsSelection()
+    if row.token_family:
+        code = await storage.get_authorization_code_by_token_family(row.token_family)
+        if code is not None:
+            selection = select_userinfo_claims(code.claims_request, scope=row.scope)
+
     user = await storage.get_user_by_id(subject)
     if user is not None:
-        if "email" in scopes:
+        if "email" in scopes and selection.allows("email", user.email):
             response["email"] = user.email
-        if "profile" in scopes:
+        if "profile" in scopes and selection.allows("preferred_username", user.username):
             response["preferred_username"] = user.username
 
     result = ORJSONResponse(response)
-    if dpop_validated is not None:
-        # Divergence 53: userinfo has no client row of its own — look one up
-        # only on the proof path (at most once per request) so a nonce-
-        # requiring client gets a fresh `DPoP-Nonce` here too, not just from
-        # the token endpoint. A deleted client simply yields no header.
-        token_client = await storage.get_client(row.client_id)
-        if token_client is not None and token_client.dpop_nonce_required:
-            result.headers["DPoP-Nonce"] = request.app.state.dpop_nonce_issuer.issue()
+    if token_client is not None and token_client.dpop_nonce_required:
+        result.headers["DPoP-Nonce"] = request.app.state.dpop_nonce_issuer.issue()
     return result

@@ -9,7 +9,7 @@ of the pre-filled `user_code` input).
 
 from __future__ import annotations
 
-from tests.helpers import login_session
+from tests.helpers import PKCE_CHALLENGE, login_session
 
 
 async def start_device_flow(client_app, *, client_id="client1", client_secret="s3cret"):
@@ -98,6 +98,8 @@ async def test_failed_login_preserves_pending_return_to(client_app):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
         },

@@ -455,8 +455,8 @@ async def token(request: Request) -> ORJSONResponse:
                 )
             if not _pkce_matches(_pkce_challenge(verifier), auth_code.code_challenge):
                 return oauth_error("invalid_grant", "code_verifier does not match code_challenge")
-        elif client.is_public():
-            return oauth_error("invalid_grant", "public clients must use PKCE")
+        else:
+            return oauth_error("invalid_grant", "PKCE is required")
 
         # RFC 9396: the details the user consented to at authorize time
         # (stored on the auth code) win. A token-request value is only
@@ -496,19 +496,13 @@ async def token(request: Request) -> ORJSONResponse:
         # RFC 9449 §10 / divergence 52: enforce the `dpop_jkt` the client
         # pre-bound this code to at /oauth/authorize.
         #
-        # Deliberately AFTER the atomic `mark_authorization_code_used` claim
-        # above: `take` is destructive (a redemption attempt is the one chance
-        # to prove possession of that key), so running it first would let a
-        # concurrent redemption that LOSES the code race still consume the
-        # binding — and the winner would then sail through unbound. Only the
-        # request that actually claimed the code gets to spend the binding.
-        # A mismatch here needs no extra burn: the code is already used, so it
-        # cannot be retried with a different key.
+        # A mismatch needs no extra burn: the code is already claimed above,
+        # so it cannot be retried with a different key.
         #
-        # An absent binding means "never bound" OR "bound on another
-        # instance" (the store is per-process; see services/dpop_bindings.py),
-        # and skips the check.
-        expected_jkt = request.app.state.dpop_code_bindings.take(auth_code.code)
+        # An absent binding means the code was never DPoP-bound. The binding
+        # is persisted on the code row (Rust migration V22), so it holds
+        # across instances (divergence 52).
+        expected_jkt = auth_code.dpop_jkt
         if expected_jkt is not None and (
             dpop_validated is None
             # UTF-8 bytes, not `str`: `compare_digest` raises TypeError on

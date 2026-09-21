@@ -22,7 +22,14 @@ from oauth2_server.app import create_app
 from oauth2_server.config import Config
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import DenylistEntry
-from tests.helpers import login_session, make_storage, post_token, seed_client, seed_user
+from tests.helpers import (
+    PKCE_CHALLENGE,
+    login_session,
+    make_storage,
+    post_token,
+    seed_client,
+    seed_user,
+)
 
 
 def _now() -> datetime:
@@ -281,6 +288,8 @@ async def test_denylisted_username_cannot_login(client_app):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
         },

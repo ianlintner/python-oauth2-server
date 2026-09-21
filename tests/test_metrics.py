@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from oauth2_server import __version__ as _APP_VERSION
 from oauth2_server.services.metrics import CONTENT_TYPE, Metrics
-from tests.helpers import login_admin, login_session, post_token, seed_admin
+from tests.helpers import PKCE_CHALLENGE, login_admin, login_session, post_token, seed_admin
 
 # --- helpers -------------------------------------------------------------
 
@@ -188,6 +188,8 @@ async def test_authorize_increments_codes_issued(app_with_session):
         params={
             "response_type": "code",
             "client_id": "client1",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
             "redirect_uri": "https://a.example/cb",
             "scope": "read",
         },
