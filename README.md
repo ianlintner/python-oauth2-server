@@ -8,7 +8,7 @@ Python port of [rust-oauth2-server](https://github.com/ianlintner/rust-oauth2-se
 
 ## Container deployment
 
-`Dockerfile` builds a production OCI image for Azure Container Apps and other OCI runtimes. It runs as an unprivileged user and starts `python -m oauth2_server` on port `8080`.
+`Dockerfile` builds a production OCI image for Azure Container Apps and other OCI runtimes. It runs as an unprivileged user and starts `python -m oauth2_server` on port `8080`. After a successful `main` build, CI publishes `ghcr.io/ianlintner/python-oauth2-server:latest` and an immutable `sha-<commit>` tag.
 
 The deployment must supply `OAUTH2_JWT_SECRET`, `OAUTH2_PUBLIC_URL`, and the production database configuration through the host's secret/configuration mechanism. The process validates insecure JWT secrets before it listens.
 
