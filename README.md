@@ -6,6 +6,14 @@ Python port of [rust-oauth2-server](https://github.com/ianlintner/rust-oauth2-se
 - RFC compliance tests ported 1:1 from the Rust suite act as the spec.
 - Stack: FastAPI, uvicorn+uvloop, Pydantic v2, SQLAlchemy async (raw SQL), PyJWT, argon2-cffi, cryptography (RS256/JWKS).
 
+## Container deployment
+
+`Dockerfile` builds a production OCI image for Azure Container Apps and other OCI runtimes. It runs as an unprivileged user and starts `python -m oauth2_server` on port `8080`.
+
+The deployment must supply `OAUTH2_JWT_SECRET`, `OAUTH2_PUBLIC_URL`, and the production database configuration through the host's secret/configuration mechanism. The process validates insecure JWT secrets before it listens.
+
+The image defaults `OAUTH2_WORKERS=1`. Until the in-process PAR, key-rotation, DPoP replay, rate-limit, and event stores have shared persistence, deploy it in Azure Container Apps with `minReplicas: 1` and `maxReplicas: 1`; do not override the worker setting.
+
 Plan: `docs/plans/2026-07-19-python-oauth2-port.md` (Phase 1), `docs/plans/2026-07-19-python-oauth2-port-phase-2.md` (Phase 2), `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` (Phase 3a), `docs/plans/2026-07-20-python-oauth2-port-phase-3b.md` (Phase 3b), `docs/plans/2026-07-20-python-oauth2-port-phase-3c.md` (Phase 3c).
 
 ## Phase 2 features
