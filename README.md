@@ -840,3 +840,5 @@ work improves on):
 `/oauth/token` is slower mainly because it issues a JWT and writes a new row
 to SQLite on every request (SQLite serializes writes), while
 `/oauth/introspect` only does a JWT decode plus a read-only row lookup.
+
+<!-- protections verification 2026-09-28T09:32:00Z -->
