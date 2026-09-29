@@ -21,7 +21,7 @@ import json
 import os
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -67,7 +67,7 @@ from tests.test_token_endpoint import run_code_flow
 _RUN_TESTCONTAINERS = os.environ.get("RUN_TESTCONTAINERS") == "1"
 
 try:
-    import motor.motor_asyncio  # noqa: F401
+    import motor.motor_asyncio  # noqa: F401 - import probe: sets _MONGO_DEPS_ERROR when missing
     from testcontainers.mongodb import MongoDbContainer
 
     _MONGO_DEPS_ERROR: Exception | None = None
@@ -127,7 +127,7 @@ async def _issue_code(
 
 async def test_rfc9207_iss_included_in_authorization_response(client_app):
     await login_session(client_app)
-    verifier, challenge = _pkce_pair()
+    _verifier, challenge = _pkce_pair()
     resp = await client_app.get(
         "/oauth/authorize",
         params={
@@ -880,7 +880,7 @@ async def test_admin_rbac_bearer_allowlist(client_app):
             access_token=uuid.uuid4().hex,
             client_id="client1",
             scope="admin read",
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         await app.storage.save_token(allowed)
         resp = await app.get(
@@ -895,7 +895,7 @@ async def test_admin_rbac_bearer_allowlist(client_app):
             access_token=uuid.uuid4().hex,
             client_id="not-allowlisted-client",
             scope="admin read",
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         await app.storage.save_token(denied)
         resp2 = await app.get(
@@ -925,7 +925,7 @@ async def test_denylist_ip_blocked():
                 kind="ip",
                 value="198.51.100.42",
                 reason="pinned compliance test",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
         )
         resp = await client.get("/health")
@@ -975,7 +975,7 @@ async def test_denylisted_username_blocked_at_login(client_app):
             kind="username",
             value="user_rfc",
             reason="pinned compliance test",
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
     )
 
@@ -1215,7 +1215,7 @@ async def test_token_exchange_round_trip(client_app):
         client_id="other-client",
         user_id="u1",
         scope="read",
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     await client_app.storage.save_token(subject_token)
 
@@ -1403,7 +1403,7 @@ async def test_mongo_backend_storage_contract(_mongo_container):
         f"@{host}:{port}/{db_name}?authSource=admin"
     )
     async with build_mongo_client_app(uri) as app:
-        resp, code = await run_code_flow(app)
+        resp, _code = await run_code_flow(app)
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["access_token"]

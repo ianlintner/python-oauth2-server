@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -30,7 +30,7 @@ RUN_TESTCONTAINERS = os.environ.get("RUN_TESTCONTAINERS") == "1"
 # deps are present — before storage/mongo.py exists that import error is
 # meant to surface as a collection ERROR (TDD step 2), not a silent skip.
 try:
-    import motor.motor_asyncio  # noqa: F401
+    import motor.motor_asyncio  # noqa: F401 - import probe: sets _DEPS_ERROR when missing
     from testcontainers.mongodb import MongoDbContainer
 
     _DEPS_ERROR: Exception | None = None
@@ -83,7 +83,7 @@ async def storage(_mongo_container):
 
 
 def _client(client_id: str = "client1") -> Client:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return Client(
         id=uuid.uuid4().hex,
         client_id=client_id,
@@ -107,7 +107,7 @@ def _token(at: str, *, family: str | None = None, refresh_token: str | None = "r
         access_token=at,
         refresh_token=refresh_token,
         client_id="client1",
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
         token_family=family,
     )
 
@@ -120,7 +120,7 @@ def _auth_code(code: str = "c1") -> AuthorizationCode:
         user_id="u1",
         redirect_uri="https://a.example/cb",
         scope="read",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
 
 
@@ -131,7 +131,7 @@ def _device_auth(device_code: str = "dc1", user_code: str = "UC1") -> DeviceAuth
         user_code=user_code,
         client_id="client1",
         scope="read",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
 
 
@@ -469,7 +469,7 @@ async def test_expire_device_authorization_writes_iso_string_in_the_past(storage
     await storage.expire_device_authorization("dc-expire")
 
     got = await storage.get_device_authorization_by_device_code("dc-expire")
-    assert got.expires_at < datetime.now(timezone.utc)
+    assert got.expires_at < datetime.now(UTC)
 
 
 # --- init()/healthcheck() behavior ---

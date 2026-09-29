@@ -22,7 +22,7 @@ row actually existed).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
@@ -41,7 +41,7 @@ def _token_not_found() -> ORJSONResponse:
 
 
 def _token_info(token: Token) -> dict:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
         "id": token.id,
         "client_id": token.client_id,

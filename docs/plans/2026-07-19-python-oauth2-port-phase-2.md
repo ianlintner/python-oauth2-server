@@ -64,14 +64,18 @@ async def test_expired_refresh_token_rejected(client_app):
     refresh = resp.json()["refresh_token"]
     # Age the token row past the refresh TTL directly in storage.
     row = await client_app.storage.get_token_by_refresh_token(refresh)
-    aged = row.model_copy(update={
-        "created_at": row.created_at - timedelta(seconds=86400 + 60)})
+    aged = row.model_copy(update={"created_at": row.created_at - timedelta(seconds=86400 + 60)})
     await client_app.storage.revoke_token(row.access_token)
-    await client_app.storage.save_token(aged.model_copy(update={
-        "id": uuid.uuid4().hex, "access_token": "at-aged", "refresh_token": "rt-aged"}))
-    resp2 = await post_token(client_app, {"grant_type": "refresh_token",
-                                          "refresh_token": "rt-aged"},
-                             basic_auth=("client1", "s3cret"))
+    await client_app.storage.save_token(
+        aged.model_copy(
+            update={"id": uuid.uuid4().hex, "access_token": "at-aged", "refresh_token": "rt-aged"}
+        )
+    )
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": "rt-aged"},
+        basic_auth=("client1", "s3cret"),
+    )
     assert resp2.status_code == 400
     body = resp2.json()
     assert body["error"] == "invalid_grant"
@@ -81,23 +85,27 @@ async def test_expired_refresh_token_rejected(client_app):
 async def test_refresh_reissues_id_token_for_openid_scope(client_app):
     resp, _ = await run_code_flow(client_app, scope="openid email")
     refresh = resp.json()["refresh_token"]
-    resp2 = await post_token(client_app, {"grant_type": "refresh_token",
-                                          "refresh_token": refresh},
-                             basic_auth=("client1", "s3cret"))
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": refresh},
+        basic_auth=("client1", "s3cret"),
+    )
     assert resp2.status_code == 200
     body = resp2.json()
     assert body.get("id_token")
     claims = jwt.decode(body["id_token"], options={"verify_signature": False})
     assert claims["sub"] == "u1"
-    assert "nonce" not in claims          # OIDC Core §12.2: no nonce on refresh
+    assert "nonce" not in claims  # OIDC Core §12.2: no nonce on refresh
     assert claims["aud"] == "client1"
 
 
 async def test_refresh_without_openid_scope_has_no_id_token(client_app):
     resp, _ = await run_code_flow(client_app, scope="read")
-    resp2 = await post_token(client_app, {"grant_type": "refresh_token",
-                                          "refresh_token": resp.json()["refresh_token"]},
-                             basic_auth=("client1", "s3cret"))
+    resp2 = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": resp.json()["refresh_token"]},
+        basic_auth=("client1", "s3cret"),
+    )
     assert resp2.json().get("id_token") is None
 ```
 
@@ -122,10 +130,9 @@ async def test_refresh_token_introspects_with_refresh_expiry(client_app):
 In the refresh branch of `routes/token.py`, after the revoked check and before the scope check, insert:
 
 ```python
-        refresh_deadline = old_token.created_at + timedelta(
-            seconds=config.refresh_token_ttl_secs)
-        if datetime.now(timezone.utc) >= refresh_deadline:
-            return oauth_error("invalid_grant", "refresh token has expired")
+refresh_deadline = old_token.created_at + timedelta(seconds=config.refresh_token_ttl_secs)
+if datetime.now(timezone.utc) >= refresh_deadline:
+    return oauth_error("invalid_grant", "refresh token has expired")
 ```
 
 After issuing the rotated pair, when `"openid"` is in the granted scope and `old_token.user_id` is set, mint an ID token exactly like the auth-code branch does (same `IdTokenClaims` + `encode_id_token` call) with these differences: no `nonce`, no `c_hash`, `at_hash` computed over the **new** access token, `email`/`preferred_username` per scope from `get_user_by_id(old_token.user_id)`. Extract the auth-code branch's id-token construction into a module-level helper `_mint_id_token(config, client, user, scope, access_token, *, nonce=None, code=None) -> str` and call it from both branches so the logic lives once.
@@ -156,30 +163,37 @@ In `routes/introspect.py`: the handler already tries `get_token_by_access_token`
 def test_build_uses_lifespan_not_on_event(monkeypatch):
     monkeypatch.setenv("OAUTH2_JWT_SECRET", "unit-test-secret-not-for-production-0123456789abcdef")
     from oauth2_server.app import build
+
     app = build()
-    assert app.router.on_startup == []       # deprecated hook list must be empty
+    assert app.router.on_startup == []  # deprecated hook list must be empty
     assert app.router.lifespan_context is not None
 
 
 # tests/test_storage.py
 async def test_seed_admin_user_creates_admin_once():
     from oauth2_server.bootstrap import seed_admin_user
+
     storage = await make_storage()
-    config = Config(jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
-                    issuer="https://auth.example.com",
-                    seed_password="seed-password-123")
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+        seed_password="seed-password-123",
+    )
     assert await seed_admin_user(storage, config) is True
     user = await storage.get_user_by_username("admin")
     assert user is not None and user.role == "admin"
     assert user.password_hash.startswith("$argon2")
-    assert await seed_admin_user(storage, config) is False   # idempotent
+    assert await seed_admin_user(storage, config) is False  # idempotent
 
 
 async def test_seed_admin_user_skipped_without_password():
     from oauth2_server.bootstrap import seed_admin_user
+
     storage = await make_storage()
-    config = Config(jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
-                    issuer="https://auth.example.com")
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+    )
     assert await seed_admin_user(storage, config) is False
     assert await storage.get_user_by_username("admin") is None
 ```
@@ -191,17 +205,17 @@ async def test_seed_admin_user_skipped_without_password():
 `storage/migrations.py` — inside `run_migrations`, immediately after `async with engine.begin() as conn:` add:
 
 ```python
-        if engine.dialect.name == "postgresql":
-            # Serialize concurrent migrators (multi-worker startup) for the
-            # duration of this transaction; released automatically at commit.
-            await conn.execute(
-                text("SELECT pg_advisory_xact_lock(:key)"), {"key": 961_748_927})
+if engine.dialect.name == "postgresql":
+    # Serialize concurrent migrators (multi-worker startup) for the
+    # duration of this transaction; released automatically at commit.
+    await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 961_748_927})
 ```
 
 `bootstrap.py`:
 
 ```python
 """Startup seeding — port of the Rust server's OAUTH2_SEED_* admin bootstrap."""
+
 import uuid
 
 from oauth2_server.config import Config
@@ -215,10 +229,15 @@ async def seed_admin_user(storage: Storage, config: Config) -> bool:
         return False
     if await storage.get_user_by_username(config.seed_username) is not None:
         return False
-    await storage.save_user(User(
-        id=uuid.uuid4().hex, username=config.seed_username,
-        password_hash=await hash_password_async(config.seed_password),
-        email=config.seed_email, role="admin"))
+    await storage.save_user(
+        User(
+            id=uuid.uuid4().hex,
+            username=config.seed_username,
+            password_hash=await hash_password_async(config.seed_password),
+            email=config.seed_email,
+            role="admin",
+        )
+    )
     return True
 ```
 (`hash_password_async` lands in Task 3; until then call the sync `hash_password` and switch in Task 3 — or land Tasks 2 and 3 in either order and reconcile.)
@@ -226,13 +245,14 @@ async def seed_admin_user(storage: Storage, config: Config) -> bool:
 `app.py` `build()`: replace the `@app.on_event("startup")` block with a lifespan:
 
 ```python
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        await storage.init()
-        await seed_admin_user(storage, config)
-        yield
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await storage.init()
+    await seed_admin_user(storage, config)
+    yield
 
-    app = create_app(config, storage, lifespan=lifespan)
+
+app = create_app(config, storage, lifespan=lifespan)
 ```
 `create_app` gains a keyword-only `lifespan=None` parameter forwarded to `FastAPI(...)`. The test path (`create_app` without lifespan) is unchanged.
 
@@ -258,24 +278,28 @@ async def seed_admin_user(storage: Storage, config: Config) -> bool:
 # tests/test_security.py
 def test_session_key_is_derived_not_verbatim():
     from oauth2_server.security import derive_session_key
+
     key = derive_session_key(SECRET)
     assert key != SECRET
-    assert key == derive_session_key(SECRET)          # deterministic
+    assert key == derive_session_key(SECRET)  # deterministic
     assert len(bytes.fromhex(key)) == 32
 
 
 def test_id_token_rejected_as_access_token():
     from oauth2_server.security import encode_id_token
     from oauth2_server.models import IdTokenClaims
+
     now = int(datetime.now(timezone.utc).timestamp())
-    idt = encode_id_token(IdTokenClaims(iss=ISS, sub="u1", aud="c1",
-                                        exp=now + 600, iat=now), SECRET)
+    idt = encode_id_token(
+        IdTokenClaims(iss=ISS, sub="u1", aud="c1", exp=now + 600, iat=now), SECRET
+    )
     with pytest.raises(jwt.InvalidTokenError):
         decode_access_token(idt, SECRET, ISS)
 
 
 async def test_verify_password_async_round_trip():
     from oauth2_server.security import hash_password_async, verify_password_async
+
     h = await hash_password_async("hunter2")
     assert await verify_password_async("hunter2", h)
     assert not await verify_password_async("wrong", h)
@@ -304,23 +328,31 @@ Also assert in `tests/test_app.py` that a full login still works end-to-end (exi
 ```python
 async def test_auth_code_grant_requires_allowlist(client_app):
     await reseed_client(client_app, grant_types=["client_credentials"])
-    resp = await post_token(client_app, {"grant_type": "authorization_code",
-                                         "code": "x", "redirect_uri": "https://a.example/cb"},
-                            basic_auth=("client1", "s3cret"))
+    resp = await post_token(
+        client_app,
+        {"grant_type": "authorization_code", "code": "x", "redirect_uri": "https://a.example/cb"},
+        basic_auth=("client1", "s3cret"),
+    )
     assert (resp.status_code, resp.json()["error"]) == (400, "unauthorized_client")
 
 
-async def test_refresh_grant_requires_allowlist(client_app): ...   # same shape
-async def test_device_grant_requires_allowlist(client_app): ...    # token endpoint
-async def test_device_authorization_requires_allowlist(client_app): ...  # /oauth/device_authorization
+async def test_refresh_grant_requires_allowlist(client_app): ...  # same shape
+async def test_device_grant_requires_allowlist(client_app): ...  # token endpoint
+async def test_device_authorization_requires_allowlist(
+    client_app,
+): ...  # /oauth/device_authorization
 async def test_authorize_requires_authorization_code_grant(app_with_session):
     # client with grant_types=["client_credentials"] -> 302 error redirect
     # with error=unauthorized_client (state echoed, iss present)
     ...
+
+
 async def test_client_credentials_excess_scope_rejected(client_app):
-    resp = await post_token(client_app, {"grant_type": "client_credentials",
-                                         "scope": "read admin:everything"},
-                            basic_auth=("client1", "s3cret"))
+    resp = await post_token(
+        client_app,
+        {"grant_type": "client_credentials", "scope": "read admin:everything"},
+        basic_auth=("client1", "s3cret"),
+    )
     assert (resp.status_code, resp.json()["error"]) == (400, "invalid_scope")
 ```
 Add a `reseed_client(client_app, **overrides)` helper to `tests/helpers.py` that deletes + re-saves `client1` with overrides. Update/remove any Phase 1 test that asserted silent intersection for client_credentials.
@@ -343,10 +375,18 @@ Add a `reseed_client(client_app, **overrides)` helper to `tests/helpers.py` that
 ```python
 async def test_prompt_none_with_expired_max_age_returns_login_required(app_with_session):
     await login_session(app_with_session)
-    resp = await app_with_session.get("/oauth/authorize", params={
-        "response_type": "code", "client_id": "client1",
-        "redirect_uri": "https://a.example/cb", "scope": "read",
-        "prompt": "none", "max_age": "0", "state": "s1"})
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "prompt": "none",
+            "max_age": "0",
+            "state": "s1",
+        },
+    )
     assert resp.status_code == 302
     q = parse_qs(urlparse(resp.headers["location"]).query)
     assert q["error"] == ["login_required"]
@@ -356,10 +396,16 @@ async def test_prompt_none_with_expired_max_age_returns_login_required(app_with_
 
 async def test_prompt_none_combined_with_login_is_invalid_request(app_with_session):
     await login_session(app_with_session)
-    resp = await app_with_session.get("/oauth/authorize", params={
-        "response_type": "code", "client_id": "client1",
-        "redirect_uri": "https://a.example/cb", "scope": "read",
-        "prompt": "none login"})
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "prompt": "none login",
+        },
+    )
     assert resp.status_code == 302
     q = parse_qs(parse := urlparse(resp.headers["location"]).query)
     assert q["error"] == ["invalid_request"]
@@ -516,15 +562,18 @@ async def test_prompt_none_combined_with_login_is_invalid_request(app_with_sessi
 ```python
 PAR_TTL_SECS = 60
 
+
 @dataclass
 class ParEntry:
     client_id: str
     params: dict[str, str]
-    created_at: float          # time.monotonic()
+    created_at: float  # time.monotonic()
+
 
 class ParStore:
     def store(self, client_id: str, params: dict[str, str]) -> str:
         """Sweep expired, insert, return 'urn:ietf:params:oauth:request-uri:<uuid4>'."""
+
     def take(self, request_uri: str) -> ParEntry | None:
         """Sweep expired, then destructively pop (single-use)."""
 ```

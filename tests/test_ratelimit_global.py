@@ -13,7 +13,7 @@ Rust tests exist for RateLimitMiddleware itself"). See
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from httpx import ASGITransport, AsyncClient
 
@@ -266,7 +266,7 @@ async def test_denylisted_ip_does_not_consume_quota():
                 kind="ip",
                 value="198.51.100.42",
                 reason="test",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
         )
 

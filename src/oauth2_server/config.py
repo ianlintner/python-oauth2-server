@@ -245,7 +245,7 @@ class Config(BaseSettings):
         return v
 
     @model_validator(mode="after")
-    def _default_id_token_alg(self) -> "Config":
+    def _default_id_token_alg(self) -> Config:
         if self.id_token_alg is None:
             self.id_token_alg = "RS256" if self.id_token_private_key_pem else "HS256"
         return self

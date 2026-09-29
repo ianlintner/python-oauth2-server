@@ -25,9 +25,10 @@ import logging
 import time
 import uuid
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Iterable, Protocol, runtime_checkable
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field, field_validator, model_serializer
 
@@ -46,7 +47,7 @@ def _rfc3339_now() -> str:
     # Matches the rest of the codebase's RFC 3339 convention (e.g.
     # `services/audit.py::build_audit`'s `received_at`) — a `+00:00` offset
     # suffix rather than a literal `Z`, both valid RFC 3339.
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # --- Models (serde-parity with crates/oauth2-events/src/envelope.rs) -------
@@ -125,15 +126,15 @@ class EventFilter:
     types: frozenset[str] = field(default_factory=frozenset)
 
     @classmethod
-    def allow_all(cls) -> "EventFilter":
+    def allow_all(cls) -> EventFilter:
         return cls("allow_all", frozenset())
 
     @classmethod
-    def include_only(cls, types: Iterable[str]) -> "EventFilter":
+    def include_only(cls, types: Iterable[str]) -> EventFilter:
         return cls("include", frozenset(types))
 
     @classmethod
-    def exclude_events(cls, types: Iterable[str]) -> "EventFilter":
+    def exclude_events(cls, types: Iterable[str]) -> EventFilter:
         return cls("exclude", frozenset(types))
 
     def should_emit(self, event_type: str) -> bool:
@@ -210,7 +211,7 @@ class RecentEventsPlugin:
 
     name = "recent_events"
 
-    def __init__(self, store: "RecentEventsStore") -> None:
+    def __init__(self, store: RecentEventsStore) -> None:
         self._store = store
 
     async def emit(self, envelope: EventEnvelope) -> None:
@@ -310,7 +311,7 @@ def emit_event(
     event_bus.publish_best_effort(EventEnvelope(event=event))
 
 
-def build_event_bus(config: "Config", recent_events_store: "RecentEventsStore") -> EventBus:
+def build_event_bus(config: Config, recent_events_store: RecentEventsStore) -> EventBus:
     """Construct the app's `EventBus` from `Config.events_backend`/
     `events_filter_mode`/`events_types` (research doc `config_keys`
     OAUTH2_EVENTS_BACKEND/OAUTH2_EVENTS_FILTER_MODE/OAUTH2_EVENTS_TYPES).

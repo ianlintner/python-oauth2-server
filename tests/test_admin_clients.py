@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from oauth2_server.models import Token
 from oauth2_server.services.client_assertion import JWT_BEARER_ASSERTION_TYPE
@@ -30,11 +30,11 @@ async def _login(client) -> None:
 
 
 def _future(seconds: int = 3600) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return datetime.now(UTC) + timedelta(seconds=seconds)
 
 
 async def _seed_extra_client(storage, name: str, **overrides):
-    fields = dict(id=uuid.uuid4().hex, client_id=f"client-{uuid.uuid4().hex[:8]}", name=name)
+    fields = {"id": uuid.uuid4().hex, "client_id": f"client-{uuid.uuid4().hex[:8]}", "name": name}
     fields.update(overrides)
     return await seed_client(storage, **fields)
 

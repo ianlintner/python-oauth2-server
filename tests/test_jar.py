@@ -723,7 +723,7 @@ async def test_vector_q_tampered_jar_state_is_rejected(client_app):
         ),
         "s3cret",
     )
-    header, payload, signature = jar.split(".")
+    header, _payload, signature = jar.split(".")
     tampered_payload = _b64u(
         json.dumps(
             _signed_claims(

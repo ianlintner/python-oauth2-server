@@ -10,7 +10,7 @@ Every request authenticates as an admin session (`seed_admin` +
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -28,18 +28,18 @@ async def _login(client) -> None:
 
 
 def _future(seconds: int = 3600) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return datetime.now(UTC) + timedelta(seconds=seconds)
 
 
 async def _seed_device(storage, **overrides) -> DeviceAuthorization:
-    fields = dict(
-        id=uuid.uuid4().hex,
-        device_code=uuid.uuid4().hex,
-        user_code="ABCD-EFGH",
-        client_id="client1",
-        scope="read",
-        expires_at=_future(),
-    )
+    fields = {
+        "id": uuid.uuid4().hex,
+        "device_code": uuid.uuid4().hex,
+        "user_code": "ABCD-EFGH",
+        "client_id": "client1",
+        "scope": "read",
+        "expires_at": _future(),
+    }
     fields.update(overrides)
     device = DeviceAuthorization(**fields)
     await storage.save_device_authorization(device)
@@ -241,7 +241,7 @@ async def test_dashboard_counts_active_revoked_expired_tokens():
                 id=uuid.uuid4().hex,
                 access_token=uuid.uuid4().hex,
                 client_id="client1",
-                expires_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+                expires_at=datetime.now(UTC) - timedelta(seconds=10),
             )
         )
 
@@ -263,7 +263,7 @@ async def test_dashboard_counts_pending_device_codes():
         await _seed_device(
             storage,
             user_code="EXPR-0001",
-            expires_at=datetime.now(timezone.utc) - timedelta(seconds=10),
+            expires_at=datetime.now(UTC) - timedelta(seconds=10),
         )
 
         resp = await client.get("/admin/api/dashboard")
@@ -284,7 +284,7 @@ async def test_dashboard_does_not_swallow_storage_errors():
 
         storage.list_all_clients = _broken_list_all_clients
 
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError, match="storage is down"):
             await client.get("/admin/api/dashboard")
 
 

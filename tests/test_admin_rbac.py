@@ -8,7 +8,7 @@ lives in `routes/admin/guard.py` and is shared by every admin endpoint.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from oauth2_server.models import Token
 from oauth2_server.routes.admin.guard import client_id_in_allowlist
@@ -17,7 +17,7 @@ from tests.helpers import login_admin, login_session, seed_admin
 
 
 def _future(seconds: int = 3600) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return datetime.now(UTC) + timedelta(seconds=seconds)
 
 
 async def _seed_token(
@@ -150,7 +150,7 @@ async def test_expired_bearer_401():
             client.storage,
             "client1",
             "admin read",
-            expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
         )
         resp = await client.get(
             "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}

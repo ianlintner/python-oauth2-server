@@ -31,8 +31,7 @@ class ListQuery:
         # gets a safe value for free. Postgres raises on a negative OFFSET
         # (unlike SQLite, which silently no-ops it), so this also prevents a
         # 500 on that backend.
-        if self.offset < 0:
-            self.offset = 0
+        self.offset = max(self.offset, 0)
 
     def effective_limit(self) -> int:
         limit = self.limit if self.limit is not None else _DEFAULT_LIMIT

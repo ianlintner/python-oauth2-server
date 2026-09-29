@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import Request
 
@@ -42,7 +42,7 @@ def build_audit(
         ip=request.client.host if request.client else "",
         user_agent=request.headers.get("user-agent", ""),
         metadata=json.dumps(metadata),
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -57,7 +57,7 @@ async def record_audit(storage, events: RecentEventsStore, entry: AuditLogEntry)
             "event_type": entry.action,
             "source": "admin",
             "idempotency_key": entry.id,
-            "received_at": datetime.now(timezone.utc).isoformat(),
+            "received_at": datetime.now(UTC).isoformat(),
             "actor_id": entry.actor_id,
             "actor_email": entry.actor_email,
             "target_kind": entry.target_kind,

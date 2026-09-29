@@ -208,7 +208,7 @@ async def _dispatch_backchannel_logout(
             content=f"logout_token={logout_token}",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-    except Exception:
+    except Exception:  # noqa: S110, BLE001 - fire-and-forget by design, see comment below
         # Fire-and-forget: a slow/broken/unreachable RP must never fail (or
         # even delay reporting) the caller's logout.
         pass

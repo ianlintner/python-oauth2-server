@@ -16,7 +16,7 @@ listable here but not enforced anywhere (see `middleware.py` docstring).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
@@ -65,11 +65,11 @@ def _parse_expires_at(raw: object) -> tuple[datetime | None, bool]:
     if not isinstance(raw, str) or not raw.strip():
         return None, True
     try:
-        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.strip())
     except ValueError:
         return None, False
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed, True
 
 
@@ -121,7 +121,7 @@ async def add_denylist(
         value=value,
         reason=reason,
         created_by=created_by,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         expires_at=expires_at,
     )
     # Upserts on (kind, value); the DB keeps the original row id on an

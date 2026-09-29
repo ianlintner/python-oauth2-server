@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Closed-loop async benchmark fallback for when `oha`/`wrk` aren't installed.
 
 Usage:
@@ -35,7 +36,8 @@ async def _worker(
             latencies.append((time.perf_counter() - start) * 1000)
             if resp.status_code >= 400:
                 errors.append(resp.status_code)
-        except Exception:  # noqa: BLE001 - count as error, keep benchmarking
+        # Count any transport error as a failure and keep benchmarking.
+        except Exception:  # noqa: BLE001 - benchmark deliberately survives transport errors
             latencies.append((time.perf_counter() - start) * 1000)
             errors.append(-1)
 
@@ -92,7 +94,8 @@ def main() -> None:
 
     body: bytes | None = None
     if args.body_file:
-        body = open(args.body_file, "rb").read()  # noqa: SIM115
+        with open(args.body_file, "rb") as fh:
+            body = fh.read()
     elif args.json_body:
         body = json.dumps(json.loads(args.json_body)).encode()
 

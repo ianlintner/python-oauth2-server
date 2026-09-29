@@ -30,7 +30,12 @@ from tests.conftest import build_client_app
 
 
 def _breaker(**overrides) -> CircuitBreaker:
-    kwargs = dict(failure_threshold=3, success_threshold=2, open_secs=30, half_open_max_probes=2)
+    kwargs = {
+        "failure_threshold": 3,
+        "success_threshold": 2,
+        "open_secs": 30,
+        "half_open_max_probes": 2,
+    }
     kwargs.update(overrides)
     return CircuitBreaker(**kwargs)
 

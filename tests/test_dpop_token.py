@@ -36,13 +36,13 @@ INTROSPECT_URL = "https://auth.example.com/oauth/introspect"
 
 
 async def _seed_nonce_required_client(client_app, **overrides):
-    fields = dict(
-        client_id="dpop-client",
-        client_secret="dpop-secret",
-        dpop_nonce_required=True,
-        grant_types=json.dumps(["client_credentials", "authorization_code", "refresh_token"]),
-        scope="read openid email profile",
-    )
+    fields = {
+        "client_id": "dpop-client",
+        "client_secret": "dpop-secret",
+        "dpop_nonce_required": True,
+        "grant_types": json.dumps(["client_credentials", "authorization_code", "refresh_token"]),
+        "scope": "read openid email profile",
+    }
     fields.update(overrides)
     return await seed_client(client_app.storage, **fields)
 

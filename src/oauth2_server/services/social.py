@@ -102,7 +102,7 @@ class SocialUserInfo:
     email_verified: bool = False
 
 
-def _redirect_uri(config: "Config", provider: str, configured: str | None) -> str:
+def _redirect_uri(config: Config, provider: str, configured: str | None) -> str:
     """`configured` (the provider's own `*_redirect_uri` field) when set,
     else an issuer-based default — Rust hardcodes `http://localhost:8080/
     auth/callback/{provider}` as its fallback (research doc `config_keys`);
@@ -111,7 +111,7 @@ def _redirect_uri(config: "Config", provider: str, configured: str | None) -> st
     return configured or f"{config.issuer}/auth/callback/{provider}"
 
 
-def resolve_provider_config(config: "Config", provider: str) -> ProviderRuntimeConfig | None:
+def resolve_provider_config(config: Config, provider: str) -> ProviderRuntimeConfig | None:
     """Build the runtime OAuth config for `provider`, or `None` when it
     isn't configured. A provider is configured iff both its `_client_id`
     and `_client_secret` are set (Rust parity — see config.py's module

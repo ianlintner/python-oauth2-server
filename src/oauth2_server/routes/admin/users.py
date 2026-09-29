@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
@@ -128,7 +128,7 @@ async def create_user(
     enabled = bool(body.get("enabled", True))
     password_hash = await hash_password_async(password)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     user = User(
         id=uuid.uuid4().hex,
         username=username,
@@ -182,7 +182,7 @@ async def update_user(
     if "enabled" in fields_set:
         updates["enabled"] = body_model.enabled
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     updated = user.model_copy(update={**updates, "updated_at": now})
     await storage.update_user(updated)
 

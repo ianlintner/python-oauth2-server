@@ -4,13 +4,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from oauth2_server.keys import KeySet, SigningKey
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _key(kid: str, algorithm: str, *, is_current: bool = True, expires_at=None) -> SigningKey:

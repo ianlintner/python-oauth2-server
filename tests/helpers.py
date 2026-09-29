@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import jwt
@@ -124,13 +124,13 @@ async def build_mongo_client_app(uri: str, config_overrides: dict | None = None)
 
 
 async def seed_client(storage, **overrides) -> Client:
-    now = datetime.now(timezone.utc)
-    fields = dict(
-        id=uuid.uuid4().hex,
-        client_id="client1",
-        client_secret="s3cret",
-        redirect_uris=json.dumps(["https://a.example/cb"]),
-        grant_types=json.dumps(
+    now = datetime.now(UTC)
+    fields = {
+        "id": uuid.uuid4().hex,
+        "client_id": "client1",
+        "client_secret": "s3cret",
+        "redirect_uris": json.dumps(["https://a.example/cb"]),
+        "grant_types": json.dumps(
             [
                 "authorization_code",
                 "client_credentials",
@@ -138,12 +138,12 @@ async def seed_client(storage, **overrides) -> Client:
                 "urn:ietf:params:oauth:grant-type:device_code",
             ]
         ),
-        scope="read openid email profile",
-        name="test-client",
-        created_at=now,
-        updated_at=now,
-        token_endpoint_auth_method="client_secret_basic",
-    )
+        "scope": "read openid email profile",
+        "name": "test-client",
+        "created_at": now,
+        "updated_at": now,
+        "token_endpoint_auth_method": "client_secret_basic",
+    }
     fields.update(overrides)
     client = Client(**fields)
     await storage.save_client(client)

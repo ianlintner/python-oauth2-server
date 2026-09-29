@@ -18,7 +18,7 @@ still an admin action worth recording.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
@@ -32,7 +32,7 @@ router = APIRouter()
 
 
 def _device_info(device: DeviceAuthorization) -> dict:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
         "id": device.id,
         "device_code": device.device_code,

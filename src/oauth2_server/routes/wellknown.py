@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import hmac
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import jwt
 from fastapi import APIRouter, Request
@@ -23,13 +23,13 @@ from pydantic import ValidationError
 
 from oauth2_server.keys import SigningKey, jwk_from_rs256_key
 from oauth2_server.security import decode_access_token, decode_unverified_claims
+from oauth2_server.services.claims_request import ClaimsSelection, select_userinfo_claims
 from oauth2_server.services.dpop import (
     DpopError,
     DpopValidated,
     read_dpop_header,
     validate_dpop_proof,
 )
-from oauth2_server.services.claims_request import ClaimsSelection, select_userinfo_claims
 from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
 from oauth2_server.services.mtls import mtls_headers
 
@@ -245,7 +245,7 @@ async def jwks(request: Request) -> ORJSONResponse:
             algorithm="RS256",
             key_material=config.id_token_private_key_pem.encode(),
             is_current=True,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         jwk = jwk_from_rs256_key(fallback)
         if not config.id_token_kid:
@@ -474,7 +474,7 @@ async def userinfo(request: Request) -> ORJSONResponse:
         pass
 
     row = await storage.get_token_by_access_token(token_str)
-    if row is None or row.revoked or row.expires_at <= datetime.now(timezone.utc):
+    if row is None or row.revoked or row.expires_at <= datetime.now(UTC):
         return _invalid_token_response("Invalid or expired access token")
 
     binding_failure, dpop_validated = _enforce_token_binding(request, config, token_str)
