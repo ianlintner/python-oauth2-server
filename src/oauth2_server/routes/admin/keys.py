@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.keys import generate_signing_key
 from oauth2_server.routes.admin._util import _json_body
-from oauth2_server.routes.admin.guard import AdminActor, require_admin
+from oauth2_server.routes.admin.guard import AdminActor, AdminDep
 from oauth2_server.services.audit import build_audit, record_audit
 
 router = APIRouter()
@@ -47,9 +47,7 @@ def _invalid_request(message: str) -> ORJSONResponse:
 
 
 @router.post("/keys/rotate")
-async def rotate_key(
-    request: Request, actor: AdminActor = Depends(require_admin)
-) -> ORJSONResponse:
+async def rotate_key(request: Request, actor: AdminActor = AdminDep) -> ORJSONResponse:
     body = await _json_body(request)
     config = request.app.state.config
     keyset = request.app.state.keyset

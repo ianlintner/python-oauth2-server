@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse, Response
 
 
@@ -138,3 +138,18 @@ async def require_admin(request: Request) -> AdminActor:
         token_value = auth_header[7:].strip()
         return await _authenticate_bearer(request, token_value)
     return _authenticate_session(request)
+
+
+# Module-level singleton for the mutating admin handlers that need the
+# authenticated actor identity for their audit entry. FastAPI resolves a
+# `Depends(...)` default at import time, which is precisely what B008
+# (`Do not perform function call ... in argument defaults`) flags; hoisting
+# the very same `Depends(require_admin)` object to a module-level singleton
+# is the fix B008 itself prescribes. `require_admin` still runs exactly once
+# per request (router-level dependency + per-request dependency cache), so
+# handler defaults read `actor: AdminActor = AdminDep`.
+#
+# Importing `Depends` here is safe: this module already imports `fastapi` at
+# module scope, so it is never reachable under a minimum-dependency install
+# (FastAPI is a hard runtime dependency of the app itself).
+AdminDep = Depends(require_admin)

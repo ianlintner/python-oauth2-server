@@ -20,11 +20,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.models import DeviceAuthorization
-from oauth2_server.routes.admin.guard import AdminActor, require_admin
+from oauth2_server.routes.admin.guard import AdminActor, AdminDep
 from oauth2_server.services.audit import build_audit, record_audit
 from oauth2_server.storage.paging import ListQuery, page_envelope
 
@@ -66,7 +66,7 @@ async def list_devices(
 
 @router.post("/device/{device_code}/expire")
 async def expire_device(
-    device_code: str, request: Request, actor: AdminActor = Depends(require_admin)
+    device_code: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events

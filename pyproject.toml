@@ -41,6 +41,16 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py312"
 
+# Pin the lint rule set explicitly instead of relying on Ruff's default set.
+# The default set changes between minor releases: Ruff 0.16 stopped enabling
+# pycodestyle `E402`, which silently turned the `# noqa: E402` directives in
+# the testcontainers tests into RUF100 findings. Declaring `select` keeps
+# those directives meaningful and keeps the gate reproducible as the pinned
+# Ruff version moves. `E4`/`E7`/`E9` are Ruff's recommended pycodestyle
+# subset (see `ruff linter`).
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
