@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import ORJSONResponse
@@ -288,7 +288,7 @@ async def create_client(
     is_public = auth_method == "none"
     client_secret = "" if is_public else str(body.get("client_secret") or uuid.uuid4().hex)
 
-    redirect_uris = body["redirect_uris"] if "redirect_uris" in body else []
+    redirect_uris = body.get("redirect_uris", [])
     grant_types = body["grant_types"] if "grant_types" in body else list(_DEFAULT_GRANT_TYPES)
     scope = body.get("scope") or ""
 
@@ -307,7 +307,7 @@ async def create_client(
     if invalid is not None:
         return invalid
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     client = Client(
         id=uuid.uuid4().hex,
         client_id=client_id,
@@ -442,7 +442,7 @@ async def update_client(
     if invalid is not None:
         return invalid
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     updated = client.model_copy(update={**updates, "updated_at": now})
     await storage.update_client(updated)
 

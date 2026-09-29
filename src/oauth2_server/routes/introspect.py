@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hmac
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 from fastapi import APIRouter, Request, Response
@@ -49,7 +49,7 @@ def _expiry_deadline(row: Token, matched_via_refresh: bool, config: Config) -> d
 def _is_active(row: Token | None, deadline: datetime | None) -> bool:
     if row is None or row.revoked or deadline is None:
         return False
-    return deadline > datetime.now(timezone.utc)
+    return deadline > datetime.now(UTC)
 
 
 # RFC 9701 §3: the media type a caller puts in `Accept` to ask for a
@@ -83,7 +83,7 @@ def _introspection_response(request: Request, body: dict, client: Client) -> Res
         payload = {
             "iss": config.issuer,
             "aud": client.client_id,
-            "iat": int(datetime.now(timezone.utc).timestamp()),
+            "iat": int(datetime.now(UTC).timestamp()),
             "token_introspection": body,
         }
         try:

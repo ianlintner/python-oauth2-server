@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import jwt
 import pytest
@@ -51,10 +51,10 @@ def test_session_key_is_derived_not_verbatim():
 
 
 def test_id_token_rejected_as_access_token():
-    from oauth2_server.security import encode_id_token
     from oauth2_server.models import IdTokenClaims
+    from oauth2_server.security import encode_id_token
 
-    now = int(datetime.now(timezone.utc).timestamp())
+    now = int(datetime.now(UTC).timestamp())
     idt = encode_id_token(
         IdTokenClaims(iss=ISS, sub="u1", aud="c1", exp=now + 600, iat=now), SECRET
     )
@@ -80,10 +80,10 @@ async def test_verify_password_async_round_trip():
 def test_encode_id_token_rs256_missing_key_still_raises_without_keyset_rs256_key():
     from oauth2_server.config import Config
     from oauth2_server.keys import seed_keyset
-    from oauth2_server.security import encode_id_token
     from oauth2_server.models import IdTokenClaims
+    from oauth2_server.security import encode_id_token
 
-    now = int(datetime.now(timezone.utc).timestamp())
+    now = int(datetime.now(UTC).timestamp())
     claims = IdTokenClaims(iss=ISS, sub="u1", aud="c1", exp=now + 600, iat=now)
     # id_token_alg forced to RS256 with no PEM configured: seed_keyset can't
     # seed an RS256 key either, so the keyset has none — the pre-existing
@@ -100,10 +100,10 @@ def test_encode_id_token_rs256_missing_key_still_raises_without_keyset_rs256_key
 def test_encode_id_token_uses_keyset_rs256_key_even_without_pem_once_one_exists():
     from oauth2_server.config import Config
     from oauth2_server.keys import generate_signing_key, seed_keyset
-    from oauth2_server.security import encode_id_token
     from oauth2_server.models import IdTokenClaims
+    from oauth2_server.security import encode_id_token
 
-    now = int(datetime.now(timezone.utc).timestamp())
+    now = int(datetime.now(UTC).timestamp())
     claims = IdTokenClaims(iss=ISS, sub="u1", aud="c1", exp=now + 600, iat=now)
     config = Config(jwt_secret=SECRET, id_token_alg="RS256")
     keyset = seed_keyset(config)
@@ -119,10 +119,10 @@ def test_encode_id_token_uses_keyset_rs256_key_even_without_pem_once_one_exists(
 def test_encode_id_token_hs256_config_unaffected_by_stray_keyset_rs256_key():
     from oauth2_server.config import Config
     from oauth2_server.keys import generate_signing_key, seed_keyset
-    from oauth2_server.security import encode_id_token
     from oauth2_server.models import IdTokenClaims
+    from oauth2_server.security import encode_id_token
 
-    now = int(datetime.now(timezone.utc).timestamp())
+    now = int(datetime.now(UTC).timestamp())
     claims = IdTokenClaims(iss=ISS, sub="u1", aud="c1", exp=now + 600, iat=now)
     # HS256 config (no PEM, default id_token_alg): an admin RS256 rotation
     # (rotate defaults to RS256 regardless of the server's key mix) must not

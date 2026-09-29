@@ -15,14 +15,14 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 RUN_TESTCONTAINERS = os.environ.get("RUN_TESTCONTAINERS") == "1"
 
 try:
-    import motor.motor_asyncio  # noqa: F401
+    import motor.motor_asyncio  # noqa: F401 - import probe: sets _DEPS_ERROR when missing
     from testcontainers.mongodb import MongoDbContainer
 
     _DEPS_ERROR: Exception | None = None
@@ -78,7 +78,7 @@ async def storage(_mongo_container):
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _client(client_id: str, name: str, created_at: datetime) -> Client:
@@ -260,7 +260,7 @@ async def test_denylist_upsert_on_duplicate_kind_value(storage):
     )
     await storage.add_denylist_entry(second)
 
-    items, total = await storage.list_denylist(ListQuery())
+    _items, total = await storage.list_denylist(ListQuery())
     assert total == 1
 
     found = await storage.find_denylist_entry("username", "mallory")

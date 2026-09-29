@@ -9,7 +9,7 @@ Every request authenticates as an admin session (`seed_admin` +
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from oauth2_server import security
 from oauth2_server.models import Token, User
@@ -24,16 +24,16 @@ async def _login(client) -> None:
 
 
 def _future(seconds: int = 3600) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return datetime.now(UTC) + timedelta(seconds=seconds)
 
 
 async def _seed_extra_user(storage, username: str, **overrides) -> User:
-    fields = dict(
-        id=uuid.uuid4().hex,
-        username=username,
-        email=f"{username}@example.test",
-        password_hash=security.hash_password("password123"),
-    )
+    fields = {
+        "id": uuid.uuid4().hex,
+        "username": username,
+        "email": f"{username}@example.test",
+        "password_hash": security.hash_password("password123"),
+    }
     fields.update(overrides)
     user = User(**fields)
     await storage.save_user(user)

@@ -16,7 +16,7 @@ through to the session path.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import Request
 from fastapi.responses import ORJSONResponse, RedirectResponse, Response
@@ -103,7 +103,7 @@ async def _authenticate_bearer(request: Request, token_value: str) -> AdminActor
     config = request.app.state.config
 
     token = await storage.get_token_by_access_token(token_value)
-    if token is None or token.revoked or token.expires_at <= datetime.now(timezone.utc):
+    if token is None or token.revoked or token.expires_at <= datetime.now(UTC):
         raise _invalid_token_error()
 
     has_admin_scope = "admin" in token.scope.split()

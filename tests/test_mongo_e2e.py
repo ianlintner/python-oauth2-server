@@ -25,7 +25,7 @@ from __future__ import annotations
 import base64
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -33,7 +33,7 @@ import pytest
 RUN_TESTCONTAINERS = os.environ.get("RUN_TESTCONTAINERS") == "1"
 
 try:
-    import motor.motor_asyncio  # noqa: F401
+    import motor.motor_asyncio  # noqa: F401 - import probe: sets _DEPS_ERROR when missing
     from testcontainers.mongodb import MongoDbContainer
 
     _DEPS_ERROR: Exception | None = None
@@ -221,7 +221,7 @@ async def test_mongo_e2e_denylist_blocks_request(_mongo_container):
         kind="ip",
         value=blocked_ip,
         reason="e2e mongo denylist smoke",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     await storage.add_denylist_entry(entry)
 

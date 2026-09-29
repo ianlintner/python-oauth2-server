@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -64,7 +64,7 @@ async def test_authorization_code_single_use(storage):
         user_id="u1",
         redirect_uri="https://a.example/cb",
         scope="read",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     await storage.save_authorization_code(code)
     await storage.mark_authorization_code_used("c1")
@@ -83,7 +83,7 @@ async def test_claims_survives_sql_round_trip(storage):
         user_id="u1",
         redirect_uri="https://a.example/cb",
         scope="read",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
         claims_request=claims_request,
     )
     await storage.save_authorization_code(code)
@@ -101,7 +101,7 @@ async def test_mark_authorization_code_used_is_single_claim(storage):
         user_id="u1",
         redirect_uri="https://a.example/cb",
         scope="read",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     await storage.save_authorization_code(code)
     assert await storage.mark_authorization_code_used("c-race") == 1
@@ -116,7 +116,7 @@ async def test_mark_device_authorization_used_is_single_claim(storage):
         user_code="UC-RACE",
         client_id="client1",
         scope="read",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     await storage.save_device_authorization(d)
     assert await storage.mark_device_authorization_used("dc-race") == 1
@@ -131,14 +131,14 @@ async def test_expire_device_authorization_expires_row(storage):
         user_code="UC-EXPIRE",
         client_id="client1",
         scope="read",
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     await storage.save_device_authorization(d)
 
     await storage.expire_device_authorization("dc-expire")
 
     got = await storage.get_device_authorization_by_device_code("dc-expire")
-    assert got.expires_at < datetime.now(timezone.utc)
+    assert got.expires_at < datetime.now(UTC)
 
 
 async def test_seed_admin_user_creates_admin_once():
@@ -196,7 +196,7 @@ async def test_seed_admin_user_allows_password_at_floor():
 
 
 def _client() -> Client:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return Client(
         id="cid-1",
         client_id="client1",
@@ -219,7 +219,7 @@ def _token(at: str, family: str | None = None) -> Token:
         id=uuid.uuid4().hex,
         access_token=at,
         client_id="client1",
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
         token_family=family,
     )
 

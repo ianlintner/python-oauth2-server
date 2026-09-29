@@ -21,7 +21,7 @@ there — this port's `MongoStorage` actually implements them).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
@@ -43,7 +43,7 @@ _CAPABILITIES = {
 @router.get("/dashboard")
 async def dashboard(request: Request) -> ORJSONResponse:
     storage = request.app.state.storage
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     clients = await storage.list_all_clients()
     users = await storage.list_all_users()

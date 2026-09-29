@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from oauth2_server.config import Config
 from oauth2_server.models import AuthorizationCode, Client
@@ -24,7 +24,7 @@ def is_safe_redirect(url: str | None) -> bool:
         return False
     if url.startswith("//"):
         return False
-    if "\\" in url:
+    if "\\" in url:  # noqa: SIM103 - guard-clause form reads clearer for a redirect safety check
         return False
     return True
 
@@ -53,7 +53,7 @@ class AuthorizeService:
         claims_request: str | None = None,
         dpop_jkt: str | None = None,
     ) -> AuthorizationCode:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         auth_code = AuthorizationCode(
             id=uuid.uuid4().hex,
             code=secrets.token_urlsafe(32),

@@ -29,7 +29,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
@@ -45,12 +45,12 @@ TOKEN_URL = "https://auth.example.com/oauth/token"
 
 
 async def _seed_exchange_client(client_app, **overrides):
-    fields = dict(
-        client_id="tx_client",
-        client_secret="tx_secret",
-        grant_types=json.dumps([EXCHANGE_URN]),
-        scope="read profile openid",
-    )
+    fields = {
+        "client_id": "tx_client",
+        "client_secret": "tx_secret",
+        "grant_types": json.dumps([EXCHANGE_URN]),
+        "scope": "read profile openid",
+    }
     fields.update(overrides)
     return await seed_client(client_app.storage, **fields)
 
@@ -65,7 +65,7 @@ async def _seed_subject_token(
     expires_in: int = 3600,
     revoked: bool = False,
 ) -> Token:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     token = Token(
         id=uuid.uuid4().hex,
         access_token=access_token,

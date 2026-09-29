@@ -174,7 +174,7 @@ def _build_verification_key(alg: str, jwk: dict):
     """Build a PyJWT verification key from the proof's embedded JWK. Only
     called once `alg` has already been checked against `_ALLOWED_ALGS`, so
     it is always RS*/PS* (RSA) or ES* (EC)."""
-    if alg.startswith("RS") or alg.startswith("PS"):
+    if alg.startswith(("RS", "PS")):
         return RSAAlgorithm.from_jwk(jwk)
     return ECAlgorithm.from_jwk(jwk)
 

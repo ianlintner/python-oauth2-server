@@ -90,8 +90,8 @@ async def run_migrations(engine: AsyncEngine, migrations_dir: Path) -> None:
                         {"v": _version_of(f)},
                     )
                 return
-            except Exception:
-                pass  # fresh DB — run everything
+            except Exception:  # noqa: BLE001,S110 - probe failed means fresh DB
+                pass
 
         for f in files:
             v = _version_of(f)

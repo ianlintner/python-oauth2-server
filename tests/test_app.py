@@ -3,7 +3,7 @@ from httpx import ASGITransport, AsyncClient
 
 from oauth2_server.app import create_app
 from oauth2_server.config import Config
-from tests.helpers import make_storage, seed_client, seed_user, login_session
+from tests.helpers import login_session, make_storage, seed_client, seed_user
 
 
 @pytest.fixture

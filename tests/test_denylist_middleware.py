@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from httpx import ASGITransport, AsyncClient
 
@@ -33,7 +33,7 @@ from tests.helpers import (
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @asynccontextmanager
@@ -58,13 +58,13 @@ async def build_client_from_ip(client_ip: str):
 
 
 async def _add_denylisted_ip(storage, ip: str, **overrides) -> DenylistEntry:
-    fields = dict(
-        id=uuid.uuid4().hex,
-        kind="ip",
-        value=ip,
-        reason="brute force",
-        created_at=_now(),
-    )
+    fields = {
+        "id": uuid.uuid4().hex,
+        "kind": "ip",
+        "value": ip,
+        "reason": "brute force",
+        "created_at": _now(),
+    }
     fields.update(overrides)
     entry = DenylistEntry(**fields)
     await storage.add_denylist_entry(entry)
@@ -261,13 +261,13 @@ async def test_check_subject_denylisted_fails_open_on_storage_error():
 
 
 async def _add_denylist_entry(storage, kind: str, value: str, **overrides) -> DenylistEntry:
-    fields = dict(
-        id=uuid.uuid4().hex,
-        kind=kind,
-        value=value,
-        reason="abuse",
-        created_at=_now(),
-    )
+    fields = {
+        "id": uuid.uuid4().hex,
+        "kind": kind,
+        "value": value,
+        "reason": "abuse",
+        "created_at": _now(),
+    }
     fields.update(overrides)
     entry = DenylistEntry(**fields)
     await storage.add_denylist_entry(entry)

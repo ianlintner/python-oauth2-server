@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from oauth2_server.models import Claims, Client, IntrospectionResponse
 
@@ -36,17 +36,17 @@ def test_introspection_response_omits_none_fields():
 
 
 def _client(**overrides) -> Client:
-    now = datetime.now(timezone.utc)
-    base = dict(
-        id="cid-1",
-        client_id="client1",
-        client_secret="s3cret",
-        redirect_uris=json.dumps(["https://a.example/cb"]),
-        grant_types=json.dumps(["authorization_code"]),
-        scope="read",
-        name="Test",
-        created_at=now,
-        updated_at=now,
-    )
+    now = datetime.now(UTC)
+    base = {
+        "id": "cid-1",
+        "client_id": "client1",
+        "client_secret": "s3cret",
+        "redirect_uris": json.dumps(["https://a.example/cb"]),
+        "grant_types": json.dumps(["authorization_code"]),
+        "scope": "read",
+        "name": "Test",
+        "created_at": now,
+        "updated_at": now,
+    }
     base.update(overrides)
     return Client(**base)
