@@ -26,8 +26,8 @@ def _coerce_datetime(value: Any) -> Any:
       columns); a naive value is assumed UTC, an aware value passes
       through unchanged.
     - an RFC 3339 / ISO 8601 string, including one with a trailing "Z"
-      (`datetime.fromisoformat` alone doesn't accept "Z" prior to
-      Python 3.11's relaxed parser, so it's normalized to "+00:00" first).
+      (`datetime.fromisoformat` accepts the "Z" suffix directly on
+      Python 3.11+, so no normalization is required).
     - the MongoDB extended-JSON forms `{"$date": <millis>}` (v1, a bare
       int) and `{"$date": {"$numberLong": "<millis>"}}` (v2, wrapped —
       what `mongoexport`/some drivers emit for 64-bit ints), both encoding

@@ -125,11 +125,11 @@ def test_authorization_code_omits_optional_fields_when_none():
 def test_model_dump_json_mode_renders_datetime_as_iso_string():
     dumped = Token(**_token_kwargs()).model_dump(mode="json", exclude_none=True)
     # Pydantic's JSON mode renders a UTC `datetime` with a "Z" suffix rather
-    # than "+00:00" — still RFC 3339, and round-trips through
-    # `_coerce_datetime`'s "Z" -> "+00:00" normalization.
+    # than "+00:00" — still RFC 3339, and parseable directly by
+    # `datetime.fromisoformat` on Python 3.11+.
     assert dumped["created_at"] == "2024-04-27T12:00:00Z"
     assert dumped["expires_at"] == "2024-04-27T12:00:00Z"
-    assert datetime.fromisoformat(dumped["created_at"].replace("Z", "+00:00")) == FIXTURE_DT  # noqa: FURB162 - exercises the Z->+00:00 normalization under test
+    assert datetime.fromisoformat(dumped["created_at"]) == FIXTURE_DT
 
 
 # --- Tolerant datetime parsing: aware datetime + ISO string (mixed encoding) ---
