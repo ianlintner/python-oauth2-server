@@ -26,6 +26,11 @@ jobs:
   # the `>=` minimums in pyproject (e.g. fastapi>=0.115, pydantic-settings>=2.7.0)
   # rather than only the locked versions. Guards against regressions that would
   # silently declare support for a floor the source cannot import/run against.
+  # `--resolution lowest-direct` must sit on `uv sync` (NOT `uv lock` followed by
+  # a plain `uv sync`, which re-resolves back up to the latest versions). The
+  # version assertion then fails loudly if the resolved pins drift from the
+  # declared floors, proving the floors are genuinely exercised rather than only
+  # the locked versions.
   min-deps:
     runs-on: ubuntu-latest
     steps:
@@ -35,8 +40,18 @@ jobs:
           python-version: "3.12"
       - name: Sync dependencies at declared minimums
         run: uv sync --resolution lowest-direct
+      - name: Assert floors are actually resolved
+        # `--no-sync` so uv run reuses the floor env instead of re-resolving to
+        # the locked (latest) versions on account of the resolution-mode change.
+        run: |
+          uv run --no-sync python - <<'PY'
+          import fastapi, pydantic_settings
+          assert fastapi.__version__ == "0.115.0", f"fastapi resolved to {fastapi.__version__}, floor is 0.115.0"
+          assert pydantic_settings.__version__ == "2.7.0", f"pydantic-settings resolved to {pydantic_settings.__version__}, floor is 2.7.0"
+          print("floors OK: fastapi", fastapi.__version__, "pydantic-settings", pydantic_settings.__version__)
+          PY
       - name: Pytest at minimum versions
-        run: uv run pytest -q
+        run: uv run --no-sync pytest -q
 
   # MongoDB backend contract suite (Phase 3d) — deliberately NOT a `needs`:
   # of `gate` above (runs in parallel) and NOT folded into `scripts/gate.sh`,
