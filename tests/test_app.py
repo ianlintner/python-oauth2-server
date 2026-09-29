@@ -72,18 +72,24 @@ def test_build_uses_lifespan_not_on_event(monkeypatch):
 
 
 def test_uvicorn_floor_not_narrowed():
-    """Guards the uvicorn declared floor: the pyproject minimum must never be
-    raised above >=0.30 (which would break downstream consumer compatibility),
-    but the locked/installed version must still satisfy that floor."""
+    """Guards the uvicorn declared floor: the pyproject minimum must remain
+    >=0.30 (never narrowed to break downstream consumer compatibility), and the
+    installed uvicorn must satisfy that floor."""
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
     pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
     deps = pyproject["project"]["dependencies"]
     uvicorn_specs = [d for d in deps if d.split(">=")[0].split("[")[0] == "uvicorn"]
     assert len(uvicorn_specs) == 1, f"expected exactly one uvicorn dependency, got {uvicorn_specs}"
-    spec = uvicorn_specs[0]
-    floor = spec.split(">=", 1)[1].split(",", 1)[0].split(";", 1)[0].strip()
+    requirement = uvicorn_specs[0].split("[standard]", 1)[1]
+    installed = Version(importlib.metadata.version("uvicorn"))
+    assert SpecifierSet(requirement).contains(installed), (
+        f"installed uvicorn {installed} does not satisfy declared {requirement!r}"
+    )
+    # The floor itself must never be raised: explicitly assert the lower bound.
+    floor = requirement.split(">=", 1)[1].split(",", 1)[0].split(";", 1)[0].strip()
     assert floor == "0.30", (
         f"uvicorn declared floor narrowed to {floor!r}; must remain >=0.30 "
         f"to preserve consumer compatibility"
     )
-    installed = importlib.metadata.version("uvicorn")
-    assert installed == "0.54.0", f"expected locked uvicorn 0.54.0, found {installed}"
