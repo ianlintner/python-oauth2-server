@@ -1,18 +1,18 @@
 """Runtime proof that hoisting `Depends(require_admin)` into the module-level
 `AdminDep` singleton (the B008 fix) did NOT change FastAPI behavior.
 
-Non-obvious detail this test pins down: FastAPI captures the dependency
-callable when the route is registered (`add_api_route`), so monkeypatching
-`guard.require_admin` AFTER the app is built cannot observe the call. The
-countable hook is therefore `Depends.use_cache` / the router-level dependency
-list, plus a real end-to-end assertion that the actor reaches the audit row.
+FastAPI captures the dependency callable when registering a route, so
+monkeypatching `guard.require_admin` after app construction does not observe
+calls. Instead install an `app.dependency_overrides` counting replacement for
+the captured callable; assert router-level and handler-level requirements
+resolve once per request, and that the actor reaches the audit row.
 """
 
 from __future__ import annotations
 
 import inspect
 
-from fastapi import Depends
+from fastapi import Depends, Request
 
 from oauth2_server.routes.admin import clients, guard
 from oauth2_server.routes.admin.guard import AdminDep
@@ -41,6 +41,14 @@ async def test_router_dep_and_handler_default_resolve_to_one_cached_call():
     async with build_client_app() as client:
         await seed_admin(client.storage)
         await login_admin(client)
+        calls = 0
+
+        async def counted_admin(request: Request):
+            nonlocal calls
+            calls += 1
+            return await guard.require_admin(request)
+
+        client.app.dependency_overrides[guard.require_admin] = counted_admin
         resp = await client.post(
             "/admin/api/users",
             json={
@@ -50,6 +58,7 @@ async def test_router_dep_and_handler_default_resolve_to_one_cached_call():
             },
         )
         assert resp.status_code == 201, resp.text
+        assert calls == 1, "router and handler must share one admin dependency call"
 
         items, _total = await client.storage.list_audit_log(ListQuery())
         entry = next(e for e in items if e.action == "user.create")

@@ -141,13 +141,10 @@ async def require_admin(request: Request) -> AdminActor:
 
 
 # Module-level singleton for the mutating admin handlers that need the
-# authenticated actor identity for their audit entry. FastAPI resolves a
-# `Depends(...)` default at import time, which is precisely what B008
-# (`Do not perform function call ... in argument defaults`) flags; hoisting
-# the very same `Depends(require_admin)` object to a module-level singleton
-# is the fix B008 itself prescribes. `require_admin` still runs exactly once
-# per request (router-level dependency + per-request dependency cache), so
-# handler defaults read `actor: AdminActor = AdminDep`.
+# authenticated actor identity for their audit entry. Python constructs the
+# `Depends(...)` marker once at import time; FastAPI resolves `require_admin`
+# per request. Hoisting the marker avoids Ruff B008 while preserving the same
+# callable, per-request dependency cache and audit actor.
 #
 # Importing `Depends` here is safe: this module already imports `fastapi` at
 # module scope, so it is never reachable under a minimum-dependency install
