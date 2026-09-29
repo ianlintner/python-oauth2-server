@@ -1,3 +1,7 @@
+import importlib.metadata
+import tomllib
+from pathlib import Path
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -65,3 +69,27 @@ def test_build_uses_lifespan_not_on_event(monkeypatch):
     app = build()
     assert app.router.on_startup == []  # deprecated hook list must be empty
     assert app.router.lifespan_context is not None
+
+
+def test_uvicorn_floor_not_narrowed():
+    """Guards the uvicorn declared floor: the pyproject minimum must remain
+    >=0.30 (never narrowed to break downstream consumer compatibility), and the
+    installed uvicorn must satisfy that floor."""
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    deps = pyproject["project"]["dependencies"]
+    uvicorn_specs = [d for d in deps if d.split(">=")[0].split("[")[0] == "uvicorn"]
+    assert len(uvicorn_specs) == 1, f"expected exactly one uvicorn dependency, got {uvicorn_specs}"
+    requirement = uvicorn_specs[0].split("[standard]", 1)[1]
+    installed = Version(importlib.metadata.version("uvicorn"))
+    assert SpecifierSet(requirement).contains(installed), (
+        f"installed uvicorn {installed} does not satisfy declared {requirement!r}"
+    )
+    # The floor itself must never be raised: explicitly assert the lower bound.
+    floor = requirement.split(">=", 1)[1].split(",", 1)[0].split(";", 1)[0].strip()
+    assert floor == "0.30", (
+        f"uvicorn declared floor narrowed to {floor!r}; must remain >=0.30 "
+        f"to preserve consumer compatibility"
+    )
