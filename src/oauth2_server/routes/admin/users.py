@@ -3,8 +3,8 @@
 Ported from `crates/oauth2-actix/src/handlers/admin_extra.rs` user handlers.
 Routes attach to `admin_router` (see `routes/admin/__init__.py`), which
 already carries `Depends(require_admin)` as a router-level dependency; the
-`actor: AdminActor = Depends(require_admin)` parameter on mutating handlers
-below only exists to pull the (cached) actor identity for the audit trail.
+`actor: AdminActor = AdminDep` parameter on mutating handlers below only
+exists to pull the (cached) actor identity for the audit trail.
 
 Unlike clients, path `{id}` here IS the storage primary key (`User.id`) — no
 uuid -> key resolution is needed. `PUT` silently ignores an invalid `role`
@@ -22,13 +22,13 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
 from oauth2_server.models import User
 from oauth2_server.routes.admin._util import _json_body, _parse_body
-from oauth2_server.routes.admin.guard import AdminActor, require_admin
+from oauth2_server.routes.admin.guard import AdminActor, AdminDep
 from oauth2_server.security import hash_password_async
 from oauth2_server.services.audit import build_audit, record_audit
 from oauth2_server.storage.paging import ListQuery, page_envelope
@@ -99,9 +99,7 @@ async def list_users(
 
 
 @router.post("/users", status_code=201)
-async def create_user(
-    request: Request, actor: AdminActor = Depends(require_admin)
-) -> ORJSONResponse:
+async def create_user(request: Request, actor: AdminActor = AdminDep) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
     body = await _json_body(request)
@@ -161,7 +159,7 @@ async def get_user(user_id: str, request: Request) -> ORJSONResponse:
 
 @router.put("/users/{user_id}")
 async def update_user(
-    user_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    user_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
@@ -200,7 +198,7 @@ async def update_user(
 
 @router.delete("/users/{user_id}")
 async def delete_user(
-    user_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    user_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
@@ -222,7 +220,7 @@ async def delete_user(
 
 @router.post("/users/{user_id}/enabled")
 async def set_user_enabled(
-    user_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    user_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
@@ -256,7 +254,7 @@ async def set_user_enabled(
 
 @router.post("/users/{user_id}/role")
 async def set_user_role(
-    user_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    user_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
@@ -282,7 +280,7 @@ async def set_user_role(
 
 @router.post("/users/{user_id}/password")
 async def reset_user_password(
-    user_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    user_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
