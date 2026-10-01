@@ -16,12 +16,14 @@ WORKDIR /app
 
 # Install locked production dependencies before application source to retain
 # Docker's dependency-layer cache across source-only builds.
+# The `mongo` extra is required: production runs against Azure Cosmos DB for
+# MongoDB, and `MongoStorage` imports `motor` lazily at startup.
 COPY pyproject.toml uv.lock ./
 RUN pip install --no-cache-dir "uv==0.10.12" \
-    && uv sync --frozen --no-dev --no-install-project
+    && uv sync --frozen --no-dev --extra mongo --no-install-project
 
 COPY src ./src
-RUN uv sync --frozen --no-dev \
+RUN uv sync --frozen --no-dev --extra mongo \
     && chown -R oauth2:oauth2 /app
 
 USER oauth2
