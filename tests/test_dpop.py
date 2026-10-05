@@ -282,7 +282,14 @@ def test_future_iat_within_skew_window_validates():
 
 def test_future_iat_outside_skew_window_rejected():
     priv_pem, pub_jwk = _generate_ec_keypair()
-    proof = _build_proof(priv_pem, pub_jwk, iat=time.time() + 301, jti="future-iat-bad-jti")
+    # Use a wide margin (1000s) rather than just past the 300s window edge
+    # (+301): `_build_proof` truncates iat to an int, so a bare `+301` leaves
+    # only a sub-second, non-deterministic sliver (1 - frac(now)) between the
+    # proof being built and the validator's `time.time() - iat > 300` check. On
+    # a slow CI run that sliver is exceeded and the proof is (correctly)
+    # accepted, so the expected DpopError is never raised. A large offset makes
+    # the rejection unconditional. Mirrors test_stale_iat_rejected's -1000.
+    proof = _build_proof(priv_pem, pub_jwk, iat=time.time() + 1000, jti="future-iat-bad-jti")
 
     with pytest.raises(DpopError) as exc_info:
         validate_dpop_proof(proof, DEFAULT_METHOD, DEFAULT_URL, DpopReplayStore())
