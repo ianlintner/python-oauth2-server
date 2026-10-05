@@ -285,7 +285,7 @@ def test_future_iat_outside_skew_window_rejected():
     # Use a wide margin (1000s) rather than just past the 300s window edge
     # (+301): `_build_proof` truncates iat to an int, so a bare `+301` leaves
     # only a sub-second, non-deterministic sliver (1 - frac(now)) between the
-    # proof being built and the validator's `time.time() - iat > 300` check. On
+    # proof being built and the validator's `time.time() - iat < -300` check. On
     # a slow CI run that sliver is exceeded and the proof is (correctly)
     # accepted, so the expected DpopError is never raised. A large offset makes
     # the rejection unconditional. Mirrors test_stale_iat_rejected's -1000.
