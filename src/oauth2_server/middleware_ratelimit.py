@@ -75,7 +75,7 @@ def _is_oauth_or_admin_api(path: str) -> bool:
     (notably `Cache-Control: no-store`) as every other response on those
     path prefixes, rather than only the ones the app-level `security_headers`
     middleware happens to reach."""
-    return path.startswith("/oauth") or path.startswith("/admin/api")
+    return path.startswith(("/oauth", "/admin/api"))
 
 
 def _ip_prefix(key: str) -> str:

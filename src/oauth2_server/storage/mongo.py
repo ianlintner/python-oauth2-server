@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
 import motor.motor_asyncio
@@ -109,7 +109,7 @@ def _from_doc(model_cls: type, doc: dict | None):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _sort_key(col: str):
@@ -188,7 +188,7 @@ class MongoStorage:
                         value = doc[field]
                         if isinstance(value, datetime):
                             if value.tzinfo is None:
-                                value = value.replace(tzinfo=timezone.utc)
+                                value = value.replace(tzinfo=UTC)
                             iso = value.isoformat()
                         else:  # pragma: no cover - defensive, shouldn't happen
                             continue
@@ -403,12 +403,12 @@ class MongoStorage:
     async def list_tokens_page(self, q: ListQuery) -> tuple[list[Token], int]:
         items = [_from_doc(Token, doc) async for doc in self.tokens.find({})]
         if q.status == "active":
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             items = [t for t in items if not t.revoked and t.expires_at > now]
         elif q.status == "revoked":
             items = [t for t in items if t.revoked]
         elif q.status == "expired":
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             items = [t for t in items if not t.revoked and t.expires_at <= now]
         search = (q.search or "").lower()
         if search:
@@ -501,7 +501,7 @@ class MongoStorage:
         # Deliberately an RFC 3339 STRING (not a BSON date) to match the
         # encoding `insert_one` used — mixing encodings on the same field is
         # what caused the upstream mixed-encoding deserialization bug.
-        now_minus_1s = datetime.now(timezone.utc) - timedelta(seconds=1)
+        now_minus_1s = datetime.now(UTC) - timedelta(seconds=1)
         await self.device_authorizations.update_one(
             {"device_code": device_code}, {"$set": {"expires_at": now_minus_1s.isoformat()}}
         )

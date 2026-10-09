@@ -131,7 +131,7 @@ def _fold_email(email: str) -> str:
 
 
 async def _link_by_verified_email(
-    config: "Config", storage: "Storage", userinfo: SocialUserInfo
+    config: Config, storage: Storage, userinfo: SocialUserInfo
 ) -> User | None:
     """The existing local user this social login may be linked to, or
     `None` to provision a fresh `provider:id` account as before

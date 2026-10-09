@@ -13,7 +13,7 @@ extended-JSON, legacy mixed encodings) or the existing SQL path (ISO
 strings, native datetimes) can hand back.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from oauth2_server.models import (
     AuditLogEntry,
@@ -28,62 +28,62 @@ from oauth2_server.models import (
 # 2024-04-27T12:00:00Z — the fixture instant used throughout the Rust
 # chrono_serde tests (extjson_v1_millis / extjson_v2_wrapped / ...).
 FIXTURE_MS = 1_714_219_200_000
-FIXTURE_DT = datetime(2024, 4, 27, 12, 0, 0, tzinfo=timezone.utc)
+FIXTURE_DT = datetime(2024, 4, 27, 12, 0, 0, tzinfo=UTC)
 
 
 def _client_kwargs(**overrides) -> dict:
-    base = dict(
-        id="cid-1",
-        client_id="client1",
-        client_secret="s3cret",
-        redirect_uris="[]",
-        grant_types="[]",
-        scope="read",
-        name="Test",
-        created_at=FIXTURE_DT,
-        updated_at=FIXTURE_DT,
-    )
+    base = {
+        "id": "cid-1",
+        "client_id": "client1",
+        "client_secret": "s3cret",
+        "redirect_uris": "[]",
+        "grant_types": "[]",
+        "scope": "read",
+        "name": "Test",
+        "created_at": FIXTURE_DT,
+        "updated_at": FIXTURE_DT,
+    }
     base.update(overrides)
     return base
 
 
 def _token_kwargs(**overrides) -> dict:
-    base = dict(
-        id="tok-1",
-        access_token="access-1",
-        client_id="client1",
-        created_at=FIXTURE_DT,
-        expires_at=FIXTURE_DT,
-    )
+    base = {
+        "id": "tok-1",
+        "access_token": "access-1",
+        "client_id": "client1",
+        "created_at": FIXTURE_DT,
+        "expires_at": FIXTURE_DT,
+    }
     base.update(overrides)
     return base
 
 
 def _auth_code_kwargs(**overrides) -> dict:
-    base = dict(
-        id="code-1",
-        code="code-1",
-        client_id="client1",
-        user_id="user-1",
-        redirect_uri="https://a.example/cb",
-        scope="read",
-        created_at=FIXTURE_DT,
-        expires_at=FIXTURE_DT,
-    )
+    base = {
+        "id": "code-1",
+        "code": "code-1",
+        "client_id": "client1",
+        "user_id": "user-1",
+        "redirect_uri": "https://a.example/cb",
+        "scope": "read",
+        "created_at": FIXTURE_DT,
+        "expires_at": FIXTURE_DT,
+    }
     base.update(overrides)
     return base
 
 
 def _device_auth_kwargs(**overrides) -> dict:
-    base = dict(
-        id="dev-1",
-        device_code="device-1",
-        user_code="USER-1",
-        client_id="client1",
-        scope="read",
-        created_at=FIXTURE_DT,
-        expires_at=FIXTURE_DT,
-    )
+    base = {
+        "id": "dev-1",
+        "device_code": "device-1",
+        "user_code": "USER-1",
+        "client_id": "client1",
+        "scope": "read",
+        "created_at": FIXTURE_DT,
+        "expires_at": FIXTURE_DT,
+    }
     base.update(overrides)
     return base
 
@@ -125,11 +125,11 @@ def test_authorization_code_omits_optional_fields_when_none():
 def test_model_dump_json_mode_renders_datetime_as_iso_string():
     dumped = Token(**_token_kwargs()).model_dump(mode="json", exclude_none=True)
     # Pydantic's JSON mode renders a UTC `datetime` with a "Z" suffix rather
-    # than "+00:00" — still RFC 3339, and round-trips through
-    # `_coerce_datetime`'s "Z" -> "+00:00" normalization.
+    # than "+00:00" — still RFC 3339, and parseable directly by
+    # `datetime.fromisoformat` on Python 3.11+.
     assert dumped["created_at"] == "2024-04-27T12:00:00Z"
     assert dumped["expires_at"] == "2024-04-27T12:00:00Z"
-    assert datetime.fromisoformat(dumped["created_at"].replace("Z", "+00:00")) == FIXTURE_DT
+    assert datetime.fromisoformat(dumped["created_at"]) == FIXTURE_DT
 
 
 # --- Tolerant datetime parsing: aware datetime + ISO string (mixed encoding) ---
@@ -149,7 +149,7 @@ def test_user_parses_bson_datetime():
 
 
 def test_user_naive_datetime_assumed_utc():
-    naive = datetime(2024, 4, 27, 12, 0, 0)
+    naive = datetime(2024, 4, 27, 12, 0, 0)  # noqa: DTZ001 - deliberately naive to assert assumed-UTC parsing
     user = User(
         id="user-1",
         username="user1",
@@ -158,7 +158,7 @@ def test_user_naive_datetime_assumed_utc():
         created_at=naive,
         updated_at=naive,
     )
-    assert user.created_at.tzinfo == timezone.utc
+    assert user.created_at.tzinfo == UTC
     assert user.created_at.timestamp() * 1000 == FIXTURE_MS
 
 

@@ -89,8 +89,8 @@ from oauth2_server.services.authorize_response import (
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.jar import process_jar
-from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.limits import LimitError, check_json_param
+from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource
 from oauth2_server.sessions import current_acr, current_amr, current_user_id
 

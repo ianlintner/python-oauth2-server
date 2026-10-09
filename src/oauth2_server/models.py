@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, Field
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _coerce_datetime(value: Any) -> Any:
@@ -26,8 +26,8 @@ def _coerce_datetime(value: Any) -> Any:
       columns); a naive value is assumed UTC, an aware value passes
       through unchanged.
     - an RFC 3339 / ISO 8601 string, including one with a trailing "Z"
-      (`datetime.fromisoformat` alone doesn't accept "Z" prior to
-      Python 3.11's relaxed parser, so it's normalized to "+00:00" first).
+      (`datetime.fromisoformat` accepts the "Z" suffix directly on
+      Python 3.11+, so no normalization is required).
     - the MongoDB extended-JSON forms `{"$date": <millis>}` (v1, a bare
       int) and `{"$date": {"$numberLong": "<millis>"}}` (v2, wrapped —
       what `mongoexport`/some drivers emit for 64-bit ints), both encoding
@@ -38,16 +38,16 @@ def _coerce_datetime(value: Any) -> Any:
     """
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
+            return value.replace(tzinfo=UTC)
         return value
     if isinstance(value, str):
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value)
     if isinstance(value, dict) and "$date" in value:
         raw = value["$date"]
         if isinstance(raw, dict):
             raw = raw["$numberLong"]
         millis = int(raw)
-        return datetime.fromtimestamp(millis / 1000, tz=timezone.utc)
+        return datetime.fromtimestamp(millis / 1000, tz=UTC)
     return value
 
 
@@ -230,7 +230,7 @@ class Claims(BaseModel):
         act: dict | None = None,
         resource: str | None = None,
         audience: list[str] | None = None,
-    ) -> "Claims":
+    ) -> Claims:
         """Build access-token claims.
 
         `resource` is the RFC 8707 resource indicator: when present it

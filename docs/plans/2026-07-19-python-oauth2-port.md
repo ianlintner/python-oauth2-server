@@ -159,7 +159,7 @@ def test_client_redirect_uri_list_parses_json_string():
 def test_claims_aud_serializes_single_as_string():
     claims = Claims.new("user1", "client1", "read", 3600, "https://auth.example.com")
     data = claims.to_payload()
-    assert data["aud"] == "client1"          # single aud -> bare string (Rust serde parity)
+    assert data["aud"] == "client1"  # single aud -> bare string (Rust serde parity)
     assert data["iss"] == "https://auth.example.com"
     assert data["exp"] - data["iat"] == 3600
     assert len(data["jti"]) > 0
@@ -179,10 +179,15 @@ def test_introspection_response_omits_none_fields():
 def _client(**overrides) -> Client:
     now = datetime.now(timezone.utc)
     base = dict(
-        id="cid-1", client_id="client1", client_secret="s3cret",
+        id="cid-1",
+        client_id="client1",
+        client_secret="s3cret",
         redirect_uris=json.dumps(["https://a.example/cb"]),
         grant_types=json.dumps(["authorization_code"]),
-        scope="read", name="Test", created_at=now, updated_at=now,
+        scope="read",
+        name="Test",
+        created_at=now,
+        updated_at=now,
     )
     base.update(overrides)
     return Client(**base)
@@ -194,6 +199,7 @@ def _client(**overrides) -> Client:
 
 ```python
 """Domain models — field-for-field port of crates/oauth2-core/src/models/."""
+
 from __future__ import annotations
 
 import json
@@ -213,7 +219,7 @@ class Client(BaseModel):
     client_id: str
     client_secret: str
     redirect_uris: str  # JSON array stored as string (TEXT column)
-    grant_types: str    # JSON array stored as string
+    grant_types: str  # JSON array stored as string
     scope: str
     name: str
     created_at: datetime
@@ -313,6 +319,7 @@ class DeviceAuthorization(BaseModel):
 
 class Claims(BaseModel):
     """RFC 9068 access-token claims."""
+
     sub: str
     iss: str
     aud: list[str]
@@ -323,12 +330,19 @@ class Claims(BaseModel):
     client_id: str | None = None
 
     @classmethod
-    def new(cls, subject: str, client_id: str, scope: str,
-            duration_seconds: int, issuer: str) -> "Claims":
+    def new(
+        cls, subject: str, client_id: str, scope: str, duration_seconds: int, issuer: str
+    ) -> "Claims":
         iat = int(_now().timestamp())
         return cls(
-            sub=subject, iss=issuer, aud=[client_id], exp=iat + duration_seconds,
-            iat=iat, scope=scope, jti=uuid.uuid4().hex, client_id=client_id,
+            sub=subject,
+            iss=issuer,
+            aud=[client_id],
+            exp=iat + duration_seconds,
+            iat=iat,
+            scope=scope,
+            jti=uuid.uuid4().hex,
+            client_id=client_id,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -453,8 +467,16 @@ async def storage():
 
 
 async def test_migrations_create_all_tables(storage):
-    for table in ("clients", "users", "tokens", "authorization_codes",
-                  "device_authorizations", "signing_keys", "denylist", "audit_log"):
+    for table in (
+        "clients",
+        "users",
+        "tokens",
+        "authorization_codes",
+        "device_authorizations",
+        "signing_keys",
+        "denylist",
+        "audit_log",
+    ):
         assert await storage.table_exists(table), table
 
 
@@ -482,8 +504,12 @@ async def test_authorization_code_single_use(storage):
     await storage.save_client(_client())
     await storage.save_user(_user())
     code = AuthorizationCode(
-        id=uuid.uuid4().hex, code="c1", client_id="client1", user_id="u1",
-        redirect_uri="https://a.example/cb", scope="read",
+        id=uuid.uuid4().hex,
+        code="c1",
+        client_id="client1",
+        user_id="u1",
+        redirect_uri="https://a.example/cb",
+        scope="read",
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
     )
     await storage.save_authorization_code(code)
@@ -494,10 +520,17 @@ async def test_authorization_code_single_use(storage):
 
 def _client() -> Client:
     now = datetime.now(timezone.utc)
-    return Client(id="cid-1", client_id="client1", client_secret="s",
-                  redirect_uris=json.dumps(["https://a.example/cb"]),
-                  grant_types=json.dumps(["authorization_code"]),
-                  scope="read", name="t", created_at=now, updated_at=now)
+    return Client(
+        id="cid-1",
+        client_id="client1",
+        client_secret="s",
+        redirect_uris=json.dumps(["https://a.example/cb"]),
+        grant_types=json.dumps(["authorization_code"]),
+        scope="read",
+        name="t",
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def _user() -> User:
@@ -505,9 +538,13 @@ def _user() -> User:
 
 
 def _token(at: str, family: str | None = None) -> Token:
-    return Token(id=uuid.uuid4().hex, access_token=at, client_id="client1",
-                 expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
-                 token_family=family)
+    return Token(
+        id=uuid.uuid4().hex,
+        access_token=at,
+        client_id="client1",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        token_family=family,
+    )
 ```
 
 - [ ] **Step 2: Run — expect FAIL**
@@ -518,8 +555,7 @@ def _token(at: str, family: str | None = None) -> Token:
 ```python
 from typing import Protocol
 
-from oauth2_server.models import (AuthorizationCode, Client, DeviceAuthorization,
-                                  Token, User)
+from oauth2_server.models import AuthorizationCode, Client, DeviceAuthorization, Token, User
 
 
 class Storage(Protocol):
@@ -541,8 +577,12 @@ class Storage(Protocol):
     async def get_authorization_code(self, code: str) -> AuthorizationCode | None: ...
     async def mark_authorization_code_used(self, code: str) -> None: ...
     async def save_device_authorization(self, d: DeviceAuthorization) -> None: ...
-    async def get_device_authorization_by_device_code(self, device_code: str) -> DeviceAuthorization | None: ...
-    async def get_device_authorization_by_user_code(self, user_code: str) -> DeviceAuthorization | None: ...
+    async def get_device_authorization_by_device_code(
+        self, device_code: str
+    ) -> DeviceAuthorization | None: ...
+    async def get_device_authorization_by_user_code(
+        self, user_code: str
+    ) -> DeviceAuthorization | None: ...
     async def approve_device_authorization(self, user_code: str, user_id: str) -> None: ...
     async def deny_device_authorization(self, user_code: str) -> None: ...
     async def mark_device_authorization_used(self, device_code: str) -> None: ...
@@ -576,10 +616,13 @@ async def run_migrations(engine: AsyncEngine, migrations_dir: Path) -> None:
     files = sorted(migrations_dir.glob("V*.sql"), key=_version_of)
     is_sqlite = engine.dialect.name == "sqlite"
     async with engine.begin() as conn:
-        await conn.execute(text(
-            "CREATE TABLE IF NOT EXISTS py_schema_version (version INTEGER PRIMARY KEY)"))
-        applied = {row[0] for row in
-                   (await conn.execute(text("SELECT version FROM py_schema_version"))).all()}
+        await conn.execute(
+            text("CREATE TABLE IF NOT EXISTS py_schema_version (version INTEGER PRIMARY KEY)")
+        )
+        applied = {
+            row[0]
+            for row in (await conn.execute(text("SELECT version FROM py_schema_version"))).all()
+        }
         if not applied:
             # Existing DB migrated by the Rust server? Backfill instead of re-running.
             try:
@@ -587,7 +630,8 @@ async def run_migrations(engine: AsyncEngine, migrations_dir: Path) -> None:
                 for f in files:
                     await conn.execute(
                         text("INSERT INTO py_schema_version (version) VALUES (:v)"),
-                        {"v": _version_of(f)})
+                        {"v": _version_of(f)},
+                    )
                 return
             except Exception:
                 pass  # fresh DB — run everything
@@ -602,7 +646,8 @@ async def run_migrations(engine: AsyncEngine, migrations_dir: Path) -> None:
             for stmt in [s.strip() for s in sql.split(";") if s.strip()]:
                 await conn.execute(text(stmt))
             await conn.execute(
-                text("INSERT INTO py_schema_version (version) VALUES (:v)"), {"v": v})
+                text("INSERT INTO py_schema_version (version) VALUES (:v)"), {"v": v}
+            )
 ```
 
 `storage/sql.py` — pattern (write every method following it; column lists match the final schema from V1–V21):
@@ -612,8 +657,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from oauth2_server.models import (AuthorizationCode, Client, DeviceAuthorization,
-                                  Token, User)
+from oauth2_server.models import AuthorizationCode, Client, DeviceAuthorization, Token, User
 from oauth2_server.storage.migrations import run_migrations
 
 _CLIENT_COLS = (
@@ -636,9 +680,11 @@ class SqlStorage:
         await run_migrations(self._engine, self._migrations_dir)
 
     async def table_exists(self, name: str) -> bool:
-        q = ("SELECT name FROM sqlite_master WHERE type='table' AND name=:n"
-             if self._engine.dialect.name == "sqlite"
-             else "SELECT tablename FROM pg_tables WHERE tablename=:n")
+        q = (
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=:n"
+            if self._engine.dialect.name == "sqlite"
+            else "SELECT tablename FROM pg_tables WHERE tablename=:n"
+        )
         async with self._engine.connect() as conn:
             return (await conn.execute(text(q), {"n": name})).first() is not None
 
@@ -648,20 +694,29 @@ class SqlStorage:
         async with self._engine.begin() as conn:
             await conn.execute(
                 text(f"INSERT INTO clients ({cols}) VALUES ({params})"),
-                client.model_dump(mode="json"))
+                client.model_dump(mode="json"),
+            )
 
     async def get_client(self, client_id: str) -> Client | None:
         async with self._engine.connect() as conn:
-            row = (await conn.execute(
-                text(f"SELECT {_CLIENT_COLS} FROM clients WHERE client_id = :cid"),
-                {"cid": client_id})).mappings().first()
+            row = (
+                (
+                    await conn.execute(
+                        text(f"SELECT {_CLIENT_COLS} FROM clients WHERE client_id = :cid"),
+                        {"cid": client_id},
+                    )
+                )
+                .mappings()
+                .first()
+            )
         return Client(**row) if row else None
 
     async def revoke_token_family(self, family: str) -> int:
         async with self._engine.begin() as conn:
             result = await conn.execute(
                 text("UPDATE tokens SET revoked = :t WHERE token_family = :f"),
-                {"t": True, "f": family})
+                {"t": True, "f": family},
+            )
         return result.rowcount
 
     # ... every remaining Storage method follows the same SELECT/INSERT/UPDATE
@@ -697,8 +752,12 @@ import jwt
 import pytest
 
 from oauth2_server.models import Claims
-from oauth2_server.security import (decode_access_token, encode_access_token,
-                                    hash_password, verify_password)
+from oauth2_server.security import (
+    decode_access_token,
+    encode_access_token,
+    hash_password,
+    verify_password,
+)
 
 SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
 ISS = "https://auth.example.com"
@@ -746,13 +805,13 @@ _hasher = PasswordHasher()
 
 
 def encode_access_token(claims: Claims, secret: str) -> str:
-    return jwt.encode(claims.to_payload(), secret, algorithm="HS256",
-                      headers={"typ": "at+JWT"})
+    return jwt.encode(claims.to_payload(), secret, algorithm="HS256", headers={"typ": "at+JWT"})
 
 
 def decode_access_token(token: str, secret: str, issuer: str) -> Claims:
-    payload = jwt.decode(token, secret, algorithms=["HS256"], issuer=issuer,
-                         options={"verify_aud": False})
+    payload = jwt.decode(
+        token, secret, algorithms=["HS256"], issuer=issuer, options={"verify_aud": False}
+    )
     aud = payload.get("aud")
     if isinstance(aud, str):
         payload["aud"] = [aud]
@@ -804,11 +863,14 @@ from tests.helpers import make_storage  # added in this task: SqlStorage on sqli
 
 @pytest.fixture
 async def client():
-    config = Config(jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
-                    issuer="https://auth.example.com")
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+    )
     app = create_app(config, await make_storage())
-    async with AsyncClient(transport=ASGITransport(app=app),
-                           base_url="https://auth.example.com") as c:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://auth.example.com"
+    ) as c:
         yield c
 
 
@@ -864,8 +926,9 @@ async def make_storage() -> SqlStorage:
 
 ```python
 async def test_client_credentials_issues_at_jwt(client_app):
-    resp = await post_token(client_app, {"grant_type": "client_credentials"},
-                            basic_auth=("client1", "s3cret"))
+    resp = await post_token(
+        client_app, {"grant_type": "client_credentials"}, basic_auth=("client1", "s3cret")
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["token_type"] == "Bearer"
@@ -875,8 +938,9 @@ async def test_client_credentials_issues_at_jwt(client_app):
 
 
 async def test_wrong_secret_rejected_with_401(client_app):
-    resp = await post_token(client_app, {"grant_type": "client_credentials"},
-                            basic_auth=("client1", "nope"))
+    resp = await post_token(
+        client_app, {"grant_type": "client_credentials"}, basic_auth=("client1", "nope")
+    )
     assert resp.status_code == 401
     assert resp.json()["error"] == "invalid_client"
 
@@ -887,8 +951,9 @@ async def test_urlencoded_basic_secret_decoded(client_app):
 
 
 async def test_unsupported_grant_type(client_app):
-    resp = await post_token(client_app, {"grant_type": "password"},
-                            basic_auth=("client1", "s3cret"))
+    resp = await post_token(
+        client_app, {"grant_type": "password"}, basic_auth=("client1", "s3cret")
+    )
     assert resp.status_code == 400
     assert resp.json()["error"] == "unsupported_grant_type"
 ```
@@ -917,9 +982,16 @@ async def test_unsupported_grant_type(client_app):
 ```python
 async def test_rfc9207_iss_included_in_authorization_response(app_with_session):
     await login_session(app_with_session, "u1")
-    resp = await app_with_session.get("/oauth/authorize", params={
-        "response_type": "code", "client_id": "client1",
-        "redirect_uri": "https://a.example/cb", "scope": "read", "state": "xyz"})
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "read",
+            "state": "xyz",
+        },
+    )
     assert resp.status_code == 302
     q = parse_qs(urlparse(resp.headers["location"]).query)
     assert q["iss"] == ["https://auth.example.com"]
@@ -929,9 +1001,14 @@ async def test_rfc9207_iss_included_in_authorization_response(app_with_session):
 
 async def test_unregistered_redirect_uri_never_redirects(app_with_session):
     await login_session(app_with_session, "u1")
-    resp = await app_with_session.get("/oauth/authorize", params={
-        "response_type": "code", "client_id": "client1",
-        "redirect_uri": "https://evil.example/cb"})
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://evil.example/cb",
+        },
+    )
     assert resp.status_code == 400
 
 
@@ -1023,19 +1100,27 @@ Each asserts concrete status codes, `error` values, and decoded JWT claims as in
 
 ```python
 async def test_public_client_registration_with_none_auth_method_succeeds(client):
-    resp = await client.post("/connect/register", json={
-        "redirect_uris": ["https://app.example/cb"],
-        "token_endpoint_auth_method": "none",
-        "grant_types": ["authorization_code"]})
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code"],
+        },
+    )
     assert resp.status_code == 201
     assert resp.json().get("client_secret") in (None, "")
 
 
 async def test_public_client_registration_with_client_credentials_is_rejected(client):
-    resp = await client.post("/connect/register", json={
-        "redirect_uris": ["https://app.example/cb"],
-        "token_endpoint_auth_method": "none",
-        "grant_types": ["client_credentials"]})
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["client_credentials"],
+        },
+    )
     assert resp.status_code == 400
     assert resp.json()["error"] == "invalid_client_metadata"
 ```

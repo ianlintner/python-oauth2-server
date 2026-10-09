@@ -97,7 +97,7 @@ class DenylistGuard:
                 entry = None
             if entry is not None:
                 path = request.url.path
-                is_oauth_or_admin_api = path.startswith("/oauth") or path.startswith("/admin/api")
+                is_oauth_or_admin_api = path.startswith(("/oauth", "/admin/api"))
                 headers = _SECURITY_HEADERS if is_oauth_or_admin_api else None
                 response = JSONResponse(_ACCESS_DENIED_BODY, status_code=403, headers=headers)
                 await response(scope, receive, send)

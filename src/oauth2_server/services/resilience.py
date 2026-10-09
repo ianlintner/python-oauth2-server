@@ -77,11 +77,14 @@ class CircuitBreaker:
         side effect of this read — matching Rust's "checked lazily on
         state()/allow_request()" design (research doc `tests_to_port`), so
         callers never need a separate "tick" step."""
-        if self._state == CircuitState.OPEN and self._opened_at is not None:
-            if time.monotonic() - self._opened_at >= self.open_secs:
-                self._state = CircuitState.HALF_OPEN
-                self._probes_in_use = 0
-                self._consecutive_successes = 0
+        if (
+            self._state == CircuitState.OPEN
+            and self._opened_at is not None
+            and time.monotonic() - self._opened_at >= self.open_secs
+        ):
+            self._state = CircuitState.HALF_OPEN
+            self._probes_in_use = 0
+            self._consecutive_successes = 0
         return self._state
 
     async def allow_request(self) -> bool:

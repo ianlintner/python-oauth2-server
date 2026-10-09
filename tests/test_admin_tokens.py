@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from oauth2_server.models import Token
 from tests.conftest import build_client_app
@@ -23,20 +23,20 @@ async def _login(client) -> None:
 
 
 def _future(seconds: int = 3600) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return datetime.now(UTC) + timedelta(seconds=seconds)
 
 
 def _past(seconds: int = 3600) -> datetime:
-    return datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    return datetime.now(UTC) - timedelta(seconds=seconds)
 
 
 async def _seed_token(storage, **overrides) -> Token:
-    fields = dict(
-        id=uuid.uuid4().hex,
-        access_token=uuid.uuid4().hex,
-        client_id="client1",
-        expires_at=_future(),
-    )
+    fields = {
+        "id": uuid.uuid4().hex,
+        "access_token": uuid.uuid4().hex,
+        "client_id": "client1",
+        "expires_at": _future(),
+    }
     fields.update(overrides)
     token = Token(**fields)
     await storage.save_token(token)
@@ -59,7 +59,7 @@ async def test_list_tokens_returns_paged_envelope():
     async with build_client_app() as client:
         await _login(client)
         storage = client.storage
-        for i in range(5):
+        for _i in range(5):
             await _seed_token(storage)
 
         resp = await client.get("/admin/api/tokens", params={"limit": 3, "offset": 0})
@@ -148,7 +148,7 @@ async def test_token_detail_found_beyond_newest_200():
     async with build_client_app() as client:
         await _login(client)
         storage = client.storage
-        base = datetime.now(timezone.utc) - timedelta(days=1)
+        base = datetime.now(UTC) - timedelta(days=1)
         target = await _seed_token(storage, created_at=base)
         for i in range(1, 201):
             await _seed_token(storage, created_at=base + timedelta(seconds=i))
@@ -198,7 +198,7 @@ async def test_revoke_by_id_works_beyond_newest_200():
     async with build_client_app() as client:
         await _login(client)
         storage = client.storage
-        base = datetime.now(timezone.utc) - timedelta(days=1)
+        base = datetime.now(UTC) - timedelta(days=1)
         target = await _seed_token(storage, created_at=base)
         for i in range(1, 201):
             await _seed_token(storage, created_at=base + timedelta(seconds=i))

@@ -7,12 +7,12 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "pydantic>=2.8",
     "pydantic-settings>=2.7.0",
-    "sqlalchemy[asyncio]>=2.0.54",
+    "sqlalchemy[asyncio]>=2.1.1",
     "aiosqlite>=0.20",
     "asyncpg>=0.29",
-    "pyjwt>=2.14.0",
+    "pyjwt>=2.15.0",
     "argon2-cffi>=23.1",
-    "orjson>=3.10",
+    "orjson>=3.12.0",
     "python-multipart>=0.0.32",
     "itsdangerous>=2.2",
     "cryptography>=50.0.1",
@@ -28,7 +28,7 @@ mongo = ["motor>=3.5"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
-    "ruff>=0.6",
+    "ruff>=0.16.9",
     "motor>=3.5",
     "testcontainers",
 ]
@@ -40,6 +40,16 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+# Pin the lint rule set explicitly instead of relying on Ruff's default set.
+# The default set changes between minor releases: Ruff 0.16 stopped enabling
+# pycodestyle `E402`, which silently turned the `# noqa: E402` directives in
+# the testcontainers tests into RUF100 findings. Declaring `select` keeps
+# those directives meaningful and keeps the gate reproducible as the pinned
+# Ruff version moves. `E4`/`E7`/`E9` are Ruff's recommended pycodestyle
+# subset (see `ruff linter`).
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
 [build-system]
 requires = ["hatchling"]

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
@@ -159,7 +160,7 @@ def create_app(
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
         path = request.url.path
-        if path.startswith("/oauth") or path.startswith("/admin/api"):
+        if path.startswith(("/oauth", "/admin/api")):
             response.headers.update(_SECURITY_HEADERS)
         return response
 

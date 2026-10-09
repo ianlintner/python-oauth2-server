@@ -17,7 +17,7 @@ import html
 import secrets
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
@@ -77,7 +77,7 @@ async def device_authorization(request: Request) -> ORJSONResponse:
     else:
         scope = client.scope
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     device = DeviceAuthorization(
         id=uuid.uuid4().hex,
         device_code=secrets.token_urlsafe(32),
@@ -168,7 +168,7 @@ async def device_verify(request: Request) -> ORJSONResponse:
         or device.used
         or device.approved
         or device.denied
-        or device.expires_at <= datetime.now(timezone.utc)
+        or device.expires_at <= datetime.now(UTC)
     ):
         return ORJSONResponse({"error": "invalid_user_code"}, status_code=400)
 

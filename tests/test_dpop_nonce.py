@@ -299,13 +299,13 @@ NONCE_CLIENT = ("nonce-client", "nonce-secret")
 
 async def _seed_nonce_client(client_app, **overrides):
 
-    fields = dict(
-        client_id=NONCE_CLIENT[0],
-        client_secret=NONCE_CLIENT[1],
-        dpop_nonce_required=True,
-        redirect_uris='["https://a.example/cb"]',
-        scope="read openid email profile",
-    )
+    fields = {
+        "client_id": NONCE_CLIENT[0],
+        "client_secret": NONCE_CLIENT[1],
+        "dpop_nonce_required": True,
+        "redirect_uris": '["https://a.example/cb"]',
+        "scope": "read openid email profile",
+    }
     fields.update(overrides)
     return await seed_client(client_app.storage, **fields)
 

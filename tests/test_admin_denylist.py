@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from oauth2_server.models import AuditLogEntry, Token
 from oauth2_server.storage.paging import ListQuery
@@ -26,7 +26,7 @@ async def _login(client) -> None:
 
 
 def _future(seconds: int = 3600) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return datetime.now(UTC) + timedelta(seconds=seconds)
 
 
 async def _seed_bearer_admin(client) -> Token:
@@ -154,7 +154,7 @@ async def test_add_denylist_accepts_expires_at():
 async def test_add_denylist_expired_entry_is_inactive_in_list():
     async with build_client_app() as client:
         await _login(client)
-        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         resp = await client.post(
             "/admin/api/denylist",
             json={"kind": "ip", "value": "198.51.100.13", "expires_at": past},
@@ -281,7 +281,7 @@ async def test_list_audit_log_is_paginated_newest_first():
     async with build_client_app() as client:
         await _login(client)
         storage = client.storage
-        base = datetime.now(timezone.utc)
+        base = datetime.now(UTC)
         for i in range(5):
             await storage.write_audit_log(
                 AuditLogEntry(

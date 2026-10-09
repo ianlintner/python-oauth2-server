@@ -3,9 +3,8 @@
 Ported from `crates/oauth2-actix/src/handlers/admin_extra.rs` denylist
 handlers. Routes attach to `admin_router` (see `routes/admin/__init__.py`),
 which already carries `Depends(require_admin)` as a router-level dependency;
-the `actor: AdminActor = Depends(require_admin)` parameter on mutating
-handlers below only exists to pull the (cached) actor identity for the audit
-trail.
+the `actor: AdminActor = AdminDep` parameter on mutating handlers below only
+exists to pull the (cached) actor identity for the audit trail.
 
 This module only manages the denylist *table* (kind/value/reason/expiry).
 Enforcement of the `"ip"` kind lives in `middleware.py::DenylistGuard`,
@@ -16,14 +15,14 @@ listable here but not enforced anywhere (see `middleware.py` docstring).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.models import DenylistEntry
 from oauth2_server.routes.admin._util import _json_body
-from oauth2_server.routes.admin.guard import AdminActor, require_admin
+from oauth2_server.routes.admin.guard import AdminActor, AdminDep
 from oauth2_server.services.audit import build_audit, record_audit
 from oauth2_server.storage.paging import ListQuery, page_envelope
 
@@ -65,11 +64,11 @@ def _parse_expires_at(raw: object) -> tuple[datetime | None, bool]:
     if not isinstance(raw, str) or not raw.strip():
         return None, True
     try:
-        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.strip())
     except ValueError:
         return None, False
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed, True
 
 
@@ -91,9 +90,7 @@ async def list_denylist(
 
 
 @router.post("/denylist", status_code=201)
-async def add_denylist(
-    request: Request, actor: AdminActor = Depends(require_admin)
-) -> ORJSONResponse:
+async def add_denylist(request: Request, actor: AdminActor = AdminDep) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
     body = await _json_body(request)
@@ -121,7 +118,7 @@ async def add_denylist(
         value=value,
         reason=reason,
         created_by=created_by,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         expires_at=expires_at,
     )
     # Upserts on (kind, value); the DB keeps the original row id on an
@@ -147,7 +144,7 @@ async def add_denylist(
 
 @router.delete("/denylist/{entry_id}")
 async def remove_denylist(
-    entry_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    entry_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events

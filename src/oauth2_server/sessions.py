@@ -32,7 +32,7 @@ def current_amr(request: Request) -> list[str] | None:
 
 def set_login(
     request: Request,
-    user: "User",
+    user: User,
     *,
     acr: str | None = None,
     amr: list[str] | None = None,

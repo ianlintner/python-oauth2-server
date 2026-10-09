@@ -6,7 +6,7 @@ SQLAlchemy's `text()` uses named `:param` placeholders for both dialects, so
 query string works for both backends here.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import text
@@ -489,20 +489,22 @@ class SqlStorage:
             "offset": q.offset,
         }
         clauses = [
-            "(LOWER(client_id) LIKE :pattern ESCAPE '\\' "
-            "OR LOWER(COALESCE(user_id, '')) LIKE :pattern ESCAPE '\\')"
+            (
+                "(LOWER(client_id) LIKE :pattern ESCAPE '\\' "
+                "OR LOWER(COALESCE(user_id, '')) LIKE :pattern ESCAPE '\\')"
+            )
         ]
         if q.status == "active":
             clauses.append("revoked = :revoked_is AND expires_at > :now")
             params["revoked_is"] = False
-            params["now"] = self._dt(datetime.now(timezone.utc))
+            params["now"] = self._dt(datetime.now(UTC))
         elif q.status == "revoked":
             clauses.append("revoked = :revoked_is")
             params["revoked_is"] = True
         elif q.status == "expired":
             clauses.append("revoked = :revoked_is AND expires_at <= :now")
             params["revoked_is"] = False
-            params["now"] = self._dt(datetime.now(timezone.utc))
+            params["now"] = self._dt(datetime.now(UTC))
         where = "WHERE " + " AND ".join(clauses)
         async with self._engine.connect() as conn:
             total = (
@@ -650,7 +652,7 @@ class SqlStorage:
         return result.rowcount
 
     async def expire_device_authorization(self, device_code: str) -> None:
-        now_minus_1s = datetime.now(timezone.utc) - timedelta(seconds=1)
+        now_minus_1s = datetime.now(UTC) - timedelta(seconds=1)
         async with self._engine.begin() as conn:
             await conn.execute(
                 text("UPDATE device_authorizations SET expires_at = :e WHERE device_code = :dc"),

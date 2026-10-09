@@ -38,7 +38,7 @@ import hmac
 import logging
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import unquote_plus
 
 from fastapi import APIRouter, Request
@@ -49,7 +49,6 @@ from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.keys import KeySet
 from oauth2_server.models import Client, User
 from oauth2_server.security import decode_unverified_claims
-from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.auth import scope_is_subset
 from oauth2_server.services.claims_request import ClaimsSelection, select_id_token_claims
 from oauth2_server.services.client_assertion import unverified_assertion_subject
@@ -57,11 +56,14 @@ from oauth2_server.services.clients import ClientService
 from oauth2_server.services.dpop import (
     DpopError,
     DpopValidated,
-    read_dpop_header as _read_dpop_header,
     validate_dpop_proof,
+)
+from oauth2_server.services.dpop import (
+    read_dpop_header as _read_dpop_header,
 )
 from oauth2_server.services.dpop_nonce import DpopNonceIssuer, enforce_dpop_nonce
 from oauth2_server.services.events_bus import emit_event
+from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.limits import LimitError, check_depth
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.services.rar import RarError, validate_authorization_details
@@ -426,7 +428,7 @@ async def token(request: Request) -> ORJSONResponse:
         if auth_code.client_id != client.client_id:
             return oauth_error("invalid_grant", "authorization code was not issued to this client")
 
-        if auth_code.expires_at < datetime.now(timezone.utc):
+        if auth_code.expires_at < datetime.now(UTC):
             emit_event(
                 event_bus,
                 "authorization_code_expired",
@@ -605,7 +607,7 @@ async def token(request: Request) -> ORJSONResponse:
             return oauth_error("invalid_grant", "refresh token has been revoked")
 
         refresh_deadline = old_token.created_at + timedelta(seconds=config.refresh_token_ttl_secs)
-        if datetime.now(timezone.utc) >= refresh_deadline:
+        if datetime.now(UTC) >= refresh_deadline:
             return oauth_error("invalid_grant", "refresh token has expired")
 
         requested_scope = form.get("scope")
@@ -668,7 +670,7 @@ async def token(request: Request) -> ORJSONResponse:
         # the old token and its family intact, otherwise the client's retry
         # with the right proof would look like refresh-token reuse.
         bound_jkt = refresh_cnf.get("jkt") if refresh_cnf else None
-        if isinstance(bound_jkt, str) and bound_jkt and client.is_public():
+        if isinstance(bound_jkt, str) and bound_jkt and client.is_public():  # noqa: SIM102 - DPoP binding gate, keep nested for readability
             if dpop_validated is None or not hmac.compare_digest(
                 dpop_validated.jkt.encode("utf-8"), bound_jkt.encode("utf-8")
             ):
@@ -760,7 +762,7 @@ async def token(request: Request) -> ORJSONResponse:
                 headers={"Cache-Control": "no-store"},
             )
 
-        if device.expires_at <= datetime.now(timezone.utc):
+        if device.expires_at <= datetime.now(UTC):
             return oauth_error("expired_token", "device_code has expired")
 
         if device.denied:
@@ -882,7 +884,7 @@ async def token(request: Request) -> ORJSONResponse:
         if subject_row is None:
             return oauth_error("invalid_grant", "subject_token not found or expired")
 
-        if subject_row.revoked or subject_row.expires_at <= datetime.now(timezone.utc):
+        if subject_row.revoked or subject_row.expires_at <= datetime.now(UTC):
             return oauth_error("invalid_grant", "subject_token is expired or revoked")
 
         requested_scope = form.get("scope")

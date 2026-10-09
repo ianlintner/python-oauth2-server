@@ -6,7 +6,7 @@ these drive `SqlStorage` directly (no HTTP layer; that's Tasks 7-10).
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from oauth2_server.models import AuditLogEntry, DenylistEntry, Token
 from oauth2_server.storage.paging import ListQuery
@@ -14,7 +14,7 @@ from tests.helpers import make_storage, seed_client, seed_user
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _token(client_id: str, user_id: str | None = None) -> Token:
@@ -164,7 +164,7 @@ async def test_denylist_upsert_on_duplicate_kind_value():
     )
     await storage.add_denylist_entry(second)
 
-    items, total = await storage.list_denylist(ListQuery())
+    _items, total = await storage.list_denylist(ListQuery())
     assert total == 1
 
     found = await storage.find_denylist_entry("username", "mallory")

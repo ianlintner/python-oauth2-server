@@ -12,7 +12,7 @@ not confuse the two when porting routes").
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import ORJSONResponse
@@ -44,7 +44,7 @@ async def health() -> ORJSONResponse:
         {
             "status": "healthy",
             "service": "oauth2_server",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
     )
 

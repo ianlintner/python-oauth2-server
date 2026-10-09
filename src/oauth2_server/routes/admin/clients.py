@@ -4,9 +4,9 @@ Ported from `crates/oauth2-actix/src/handlers/{admin,admin_extra}.rs`. Routes
 are attached to `admin_router` (see `routes/admin/__init__.py`), which carries
 `Depends(require_admin)` as a router-level dependency, so every handler here
 is already guarded; handlers that write an audit entry additionally declare
-`actor: AdminActor = Depends(require_admin)` to pull the cached actor
-identity (FastAPI dependency caching means `require_admin` still only runs
-once per request).
+`actor: AdminActor = AdminDep` to pull the cached actor identity (see
+`guard.AdminDep`; the router-level dependency and the per-request dependency
+cache mean `require_admin` still only runs once per request).
 
 Client identity duality (see research-admin-api.md gotchas): the path `{id}`
 addresses the internal `Client.id` UUID, while the storage layer keys on the
@@ -22,15 +22,15 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
 from oauth2_server.models import Client
 from oauth2_server.routes.admin._util import _json_body, _parse_body
-from oauth2_server.routes.admin.guard import AdminActor, require_admin
+from oauth2_server.routes.admin.guard import AdminActor, AdminDep
 from oauth2_server.services.audit import build_audit, record_audit
 from oauth2_server.services.clients import (
     JWKS_URI_ERROR,
@@ -240,9 +240,7 @@ async def list_clients(
 
 
 @router.post("/clients", status_code=201)
-async def create_client(
-    request: Request, actor: AdminActor = Depends(require_admin)
-) -> ORJSONResponse:
+async def create_client(request: Request, actor: AdminActor = AdminDep) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
     body = await _json_body(request)
@@ -288,7 +286,7 @@ async def create_client(
     is_public = auth_method == "none"
     client_secret = "" if is_public else str(body.get("client_secret") or uuid.uuid4().hex)
 
-    redirect_uris = body["redirect_uris"] if "redirect_uris" in body else []
+    redirect_uris = body.get("redirect_uris", [])
     grant_types = body["grant_types"] if "grant_types" in body else list(_DEFAULT_GRANT_TYPES)
     scope = body.get("scope") or ""
 
@@ -307,7 +305,7 @@ async def create_client(
     if invalid is not None:
         return invalid
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     client = Client(
         id=uuid.uuid4().hex,
         client_id=client_id,
@@ -375,7 +373,7 @@ async def get_client(client_id: str, request: Request) -> ORJSONResponse:
 
 @router.put("/clients/{client_id}")
 async def update_client(
-    client_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    client_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
@@ -442,7 +440,7 @@ async def update_client(
     if invalid is not None:
         return invalid
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     updated = client.model_copy(update={**updates, "updated_at": now})
     await storage.update_client(updated)
 
@@ -470,7 +468,7 @@ async def update_client(
 
 @router.delete("/clients/{client_id}")
 async def delete_client(
-    client_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    client_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
@@ -495,7 +493,7 @@ async def delete_client(
 
 @router.post("/clients/{client_id}/enabled")
 async def set_client_enabled(
-    client_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    client_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
@@ -533,7 +531,7 @@ async def set_client_enabled(
 
 @router.post("/clients/{client_id}/regenerate-secret")
 async def regenerate_client_secret(
-    client_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    client_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events

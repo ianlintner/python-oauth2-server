@@ -10,7 +10,7 @@ by every test below.
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
@@ -413,7 +413,7 @@ async def test_logout_rejects_hint_signed_by_pruned_key_after_grace(rsa_pem):
         keyset = client.app.state.keyset
         for key in keyset._keys:
             if key.kid == old_kid:
-                key.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                key.expires_at = datetime.now(UTC) - timedelta(seconds=1)
 
         # Rotate again -- `prune_expired()` runs inside `rotate_key` and
         # physically removes the now-expired old key from the keyset.

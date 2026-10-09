@@ -22,14 +22,14 @@ row actually existed).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.models import Token
 from oauth2_server.routes.admin._util import _json_body
-from oauth2_server.routes.admin.guard import AdminActor, require_admin
+from oauth2_server.routes.admin.guard import AdminActor, AdminDep
 from oauth2_server.services.audit import build_audit, record_audit
 from oauth2_server.storage.paging import ListQuery, page_envelope
 
@@ -41,7 +41,7 @@ def _token_not_found() -> ORJSONResponse:
 
 
 def _token_info(token: Token) -> dict:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
         "id": token.id,
         "client_id": token.client_id,
@@ -84,7 +84,7 @@ async def get_token(token_id: str, request: Request) -> ORJSONResponse:
 
 @router.post("/tokens/{token_id}/revoke")
 async def revoke_token_by_id(
-    token_id: str, request: Request, actor: AdminActor = Depends(require_admin)
+    token_id: str, request: Request, actor: AdminActor = AdminDep
 ) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
@@ -101,9 +101,7 @@ async def revoke_token_by_id(
 
 
 @router.post("/tokens/revoke-by-user")
-async def revoke_tokens_by_user(
-    request: Request, actor: AdminActor = Depends(require_admin)
-) -> ORJSONResponse:
+async def revoke_tokens_by_user(request: Request, actor: AdminActor = AdminDep) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
     body = await _json_body(request)
@@ -123,9 +121,7 @@ async def revoke_tokens_by_user(
 
 
 @router.post("/tokens/revoke-by-client")
-async def revoke_tokens_by_client(
-    request: Request, actor: AdminActor = Depends(require_admin)
-) -> ORJSONResponse:
+async def revoke_tokens_by_client(request: Request, actor: AdminActor = AdminDep) -> ORJSONResponse:
     storage = request.app.state.storage
     events = request.app.state.events
     body = await _json_body(request)

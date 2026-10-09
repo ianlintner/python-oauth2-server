@@ -16,9 +16,9 @@ through to the session path.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from fastapi import Request
+from fastapi import Depends, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse, Response
 
 
@@ -103,7 +103,7 @@ async def _authenticate_bearer(request: Request, token_value: str) -> AdminActor
     config = request.app.state.config
 
     token = await storage.get_token_by_access_token(token_value)
-    if token is None or token.revoked or token.expires_at <= datetime.now(timezone.utc):
+    if token is None or token.revoked or token.expires_at <= datetime.now(UTC):
         raise _invalid_token_error()
 
     has_admin_scope = "admin" in token.scope.split()
@@ -138,3 +138,15 @@ async def require_admin(request: Request) -> AdminActor:
         token_value = auth_header[7:].strip()
         return await _authenticate_bearer(request, token_value)
     return _authenticate_session(request)
+
+
+# Module-level singleton for the mutating admin handlers that need the
+# authenticated actor identity for their audit entry. Python constructs the
+# `Depends(...)` marker once at import time; FastAPI resolves `require_admin`
+# per request. Hoisting the marker avoids Ruff B008 while preserving the same
+# callable, per-request dependency cache and audit actor.
+#
+# Importing `Depends` here is safe: this module already imports `fastapi` at
+# module scope, so it is never reachable under a minimum-dependency install
+# (FastAPI is a hard runtime dependency of the app itself).
+AdminDep = Depends(require_admin)

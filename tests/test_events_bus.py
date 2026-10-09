@@ -10,10 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 
-from tests.conftest import build_client_app
-from tests.helpers import post_token
-from tests.test_token_endpoint import run_code_flow
-
+from oauth2_server.services.events import RecentEventsStore
 from oauth2_server.services.events_bus import (
     AuthEvent,
     ConsoleEventLogger,
@@ -25,7 +22,9 @@ from oauth2_server.services.events_bus import (
     RecentEventsPlugin,
     build_event_bus,
 )
-from oauth2_server.services.events import RecentEventsStore
+from tests.conftest import build_client_app
+from tests.helpers import post_token
+from tests.test_token_endpoint import run_code_flow
 
 
 def _envelope_body(event_type: str = "widget.created", **overrides) -> dict:

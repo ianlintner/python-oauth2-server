@@ -42,7 +42,7 @@ REDIRECT_URI = "https://a.example/cb"
 
 
 def _hybrid_params(**overrides) -> dict:
-    verifier, challenge = _pkce_pair()
+    _verifier, challenge = _pkce_pair()
     params = {
         "response_type": "code id_token",
         "client_id": "client1",
