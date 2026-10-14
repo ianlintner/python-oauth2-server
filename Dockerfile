@@ -20,10 +20,10 @@ WORKDIR /app
 # MongoDB, and `MongoStorage` imports `motor` lazily at startup.
 COPY pyproject.toml uv.lock ./
 RUN pip install --no-cache-dir "uv==0.10.12" \
-    && uv sync --frozen --no-dev --extra mongo --no-install-project
+    && uv sync --frozen --no-dev --extra mongo --extra otel --no-install-project
 
 COPY src ./src
-RUN uv sync --frozen --no-dev --extra mongo \
+RUN uv sync --frozen --no-dev --extra mongo --extra otel \
     && chown -R oauth2:oauth2 /app
 
 USER oauth2
