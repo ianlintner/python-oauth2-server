@@ -47,6 +47,7 @@ from oauth2_server.services.resilience import CircuitBreaker, ConcurrencyLimiter
 from oauth2_server.services.social import OAUTH_PROVIDERS, SocialCircuitBreaker
 from oauth2_server.storage.base import Storage
 from oauth2_server.storage.factory import create_storage
+from oauth2_server.telemetry import instrument_app, setup_tracing
 
 
 def create_app(
@@ -245,6 +246,8 @@ def build() -> FastAPI:
     """
     config = Config()
     config.validate_for_production()
+    # Before create_app: global httpx/pymongo instrumentation must precede client creation.
+    tracing = setup_tracing()
     storage = create_storage(config)
 
     @asynccontextmanager
@@ -255,4 +258,6 @@ def build() -> FastAPI:
         await app.state.http_client.aclose()
 
     app = create_app(config, storage, lifespan=lifespan)
+    if tracing:
+        instrument_app(app)
     return app
