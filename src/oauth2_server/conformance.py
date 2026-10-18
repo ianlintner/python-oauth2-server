@@ -56,6 +56,11 @@ PROFILE_ENV_VARS = (
     "APP_ENV",
     "ENVIRONMENT",
     "RUST_ENV",
+    "NODE_ENV",
+    "FLASK_ENV",
+    "RAILS_ENV",
+    "DEPLOY_ENV",
+    "ASPNETCORE_ENVIRONMENT",
 )
 
 # Environment names under which conformance mode may run. Any other value of
@@ -408,8 +413,9 @@ def _validate_seed(seed: Seed) -> None:
 def _validate_redirect_uri(cid: str, uri: str) -> None:
     split = urlsplit(uri)
     # http(s), or an RFC 8252 private-use scheme such as `com.example.app:/cb`.
-    has_scheme = bool(split.scheme)
-    private_use = has_scheme and split.scheme not in ("http", "https") and bool(split.path)
+    # RFC 8252 §7.1: the private-use scheme is a reverse domain name, so it
+    # must contain a dot (this rejects `javascript:`, `data:`, ...).
+    private_use = "." in split.scheme and split.scheme not in ("http", "https") and bool(split.path)
     web = split.scheme in ("http", "https") and bool(split.netloc)
     if not (web or private_use):
         raise ConformanceError(f"client {cid!r}: redirect_uri {uri!r} is invalid")
@@ -479,9 +485,9 @@ def _is_in_memory_sqlite(database_url: str) -> bool:
         url = make_url(database_url)
     except Exception:
         return False
-    return url.get_backend_name() == "sqlite" and (
-        url.database in (None, "", ":memory:") or "mode=memory" in url.query
-    )
+    # Only the plain private `:memory:` database; file URIs (even `mode=memory`
+    # shared-cache ones) are refused rather than reasoned about.
+    return url.get_backend_name() == "sqlite" and url.database in (None, "", ":memory:")
 
 
 def check_not_production(env: Mapping[str, str], config: Config) -> None:

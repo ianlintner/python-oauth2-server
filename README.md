@@ -747,7 +747,7 @@ version and `core` profile.
 
 It fails closed: startup aborts (before any storage is opened) on an
 ambiguous switch value, a missing/unreadable/invalid seed, a
-production-looking environment (`OAUTH2_ENV`/`APP_ENV`/... set to anything
+production-looking environment (`OAUTH2_ENV`/`APP_ENV`/`NODE_ENV`/... set to anything
 other than a known non-production name), a non-in-memory database, or a
 configured signing key. Seeded credentials are valid only in conformance mode.
 

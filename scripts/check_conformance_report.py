@@ -83,7 +83,6 @@ def evaluate(manifest: dict, report: dict) -> list[str]:
     results = report.get("results") or []
     declared = {d["requirement"] for d in manifest.get("deviations") or []}
     failing_requirements: set[str] = set()
-    passing_requirements: set[str] = set()
 
     for result in results:
         requirements = set(result.get("requirements") or [])
@@ -94,8 +93,6 @@ def evaluate(manifest: dict, report: dict) -> list[str]:
                     f"scenario {result.get('id')} failed and its requirements "
                     f"{sorted(requirements)} are not declared as deviations"
                 )
-        elif result.get("outcome") == "pass":
-            passing_requirements |= requirements
 
     for requirement in sorted(declared):
         if requirement not in failing_requirements:

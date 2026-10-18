@@ -117,6 +117,28 @@ def test_guard_allows_process_local_in_memory_sqlite(url):
     conformance.check_not_production({}, _config(database_url=url))
 
 
+@pytest.mark.parametrize(
+    "var", ["NODE_ENV", "FLASK_ENV", "ASPNETCORE_ENVIRONMENT", "RAILS_ENV", "DEPLOY_ENV"]
+)
+def test_guard_covers_common_framework_environment_variables(var):
+    assert var in conformance.PROFILE_ENV_VARS
+    with pytest.raises(ConformanceError, match=var):
+        conformance.check_not_production({var: "production"}, _config())
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "sqlite+aiosqlite:///file:x?mode=memory&cache=shared&uri=true",
+        "sqlite+aiosqlite:///file:x?cache=shared&uri=true",
+        "sqlite+aiosqlite:///conformance.db",
+    ],
+)
+def test_guard_rejects_file_backed_and_shared_cache_sqlite(url):
+    with pytest.raises(ConformanceError, match="in-memory"):
+        conformance.check_not_production({}, _config(database_url=url))
+
+
 def test_guard_rejects_a_configured_signing_key():
     # A real RS256 key means production-grade signing material is configured;
     # conformance mode generates its own throwaway keys instead.
@@ -204,6 +226,8 @@ def test_rejects_schema_violations(text, needle):
         ),
         (VALID.replace("https://client.example/callback", "https://c/cb#frag"), "fragment"),
         (VALID.replace("https://client.example/callback", "not-a-uri"), "redirect_uri"),
+        (VALID.replace("https://client.example/callback", "javascript:alert(1)"), "redirect_uri"),
+        (VALID.replace("https://client.example/callback", "data:text/html,x"), "redirect_uri"),
         (
             VALID.replace("redirect_uris: [https://client.example/callback]", "redirect_uris: []"),
             "redirect_uris",
