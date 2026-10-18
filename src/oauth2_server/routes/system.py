@@ -67,4 +67,10 @@ async def ready(request: Request) -> Response:
         return ORJSONResponse(
             {"status": "unavailable", "checks": {"database": "error"}}, status_code=503
         )
-    return ORJSONResponse({"status": "ready", "checks": {"database": "ok"}})
+    body: dict = {"status": "ready", "checks": {"database": "ok"}}
+    # Conformance test mode only (set by `app.build` once the seed is fully
+    # applied): counts and signing key ids, never credentials or key material.
+    conformance = getattr(request.app.state, "conformance", None)
+    if conformance is not None:
+        body["conformance"] = conformance
+    return ORJSONResponse(body)

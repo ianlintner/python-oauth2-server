@@ -724,6 +724,40 @@ uv add granian  # not a default dependency
 uv run granian --interface asgi oauth2_server.app:build
 ```
 
+## Conformance test mode
+
+Test-only mode implementing the `oauth2-conformance` SUT interface
+(`contract/sut-interface.md`), driven by the black-box contract runner in CI
+alongside the pytest suite. It is **off by default** and must never be enabled
+outside an ephemeral test process.
+
+| Variable                 | Purpose |
+| ------------------------ | ------- |
+| `OAUTH2_CONFORMANCE_MODE` | `1`/`true` enables; unset/`0`/`false` disables; anything else aborts. |
+| `OAUTH2_CONFORMANCE_SEED` | Path to the seed file (YAML or JSON, `schemas/seed.schema.json`). Required when the mode is on; ignored when off. |
+
+When on, it loads the seed's `issuer`, `clients`, `users` and `signingKeys`
+into a process-local in-memory store before the server binds, drives the
+ordinary `POST /auth/login` form + `GET /oauth/authorize` non-interactively
+(no consent screen, so seeded clients are consented implicitly), provisions
+fresh key material under each seeded `kid` (never from the seed), and adds a
+`conformance` object (seed_applied, counts, signing key ids — never
+credentials) to `GET /ready`. `conformance.yaml` pins the claimed contract
+version and `core` profile.
+
+It fails closed: startup aborts (before any storage is opened) on an
+ambiguous switch value, a missing/unreadable/invalid seed, a
+production-looking environment (`OAUTH2_ENV`/`APP_ENV`/... set to anything
+other than a known non-production name), a non-in-memory database, or a
+configured signing key. Seeded credentials are valid only in conformance mode.
+
+```bash
+OAUTH2_CONFORMANCE_MODE=1 OAUTH2_CONFORMANCE_SEED=./seed.yaml \
+OAUTH2_ENV=test \
+OAUTH2_JWT_SECRET=$(openssl rand -hex 32) \
+uv run python -m oauth2_server
+```
+
 ## Cross-server parity smoke
 
 Proves the Python and Rust servers can share one Postgres database — the

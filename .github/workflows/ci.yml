@@ -77,6 +77,77 @@ jobs:
           uv run pytest tests/test_mongo_storage.py tests/test_mongo_admin.py
           tests/test_mongo_e2e.py tests/test_rfc_compliance.py -q
 
+  # Conformance contract (v0.1 core) — black-box run of the published
+  # `oauth2-conformance` runner against this server in conformance test mode.
+  # Deliberately NOT a `needs:` of `gate` above (runs in parallel) and NOT
+  # folded into `scripts/gate.sh`, so the fast unit-test gate stays
+  # independent of Node/pnpm and the contract checkout. The contract repo is
+  # pinned by SHA (not a mutable branch) so a future runner release can't
+  # silently change what "conformance" means under this PR.
+  conformance:
+    runs-on: ubuntu-latest
+    env:
+      # The contract's example seed advertises http://localhost:8080; driving
+      # the runner on the host loopback leaves 8080 free on the runner VM.
+      CONFORMANCE_REF: 62e3e9343480c990833fc4a60192f222d2251c18
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check out the pinned contract repository
+        uses: actions/checkout@v7
+        with:
+          repository: ianlintner/oauth2-conformance
+          ref: ${{ env.CONFORMANCE_REF }}
+          path: oauth2-conformance
+      - name: Install the contract runner
+        run: pnpm install --frozen-lockfile
+        working-directory: oauth2-conformance/runner
+      - name: Sync dependencies
+        run: uv sync --locked
+      - name: Start the SUT in conformance mode and run the core profile
+        run: |
+          set -euo pipefail
+          OAUTH2_CONFORMANCE_MODE=1 \
+          OAUTH2_CONFORMANCE_SEED=oauth2-conformance/examples/seed.yaml \
+          OAUTH2_ENV=test \
+          OAUTH2_JWT_SECRET=conformance-ci-secret-0123456789abcdef \
+          uv run python -m oauth2_server > sut.log 2>&1 &
+          SUT=$!
+          trap 'kill $SUT 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:8080/ready >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+          curl -fsS http://localhost:8080/ready
+          echo
+          # The runner is all-or-nothing, so its exit status is ignored here;
+          # `check_conformance_report.py` is the actual gate (see that script
+          # and `conformance.yaml` for the declared deviations).
+          pnpm -s conformance run --base-url http://localhost:8080 \
+            --scenarios ../scenarios --profile core \
+            --implementation python-oauth2-server --contract 0.1.0 \
+            --report conformance-report.json || true
+        working-directory: oauth2-conformance/runner
+      - name: Gate the report against declared deviations
+        run: >-
+          uv run python scripts/check_conformance_report.py conformance.yaml
+          oauth2-conformance/runner/conformance-report.json
+      - name: Upload conformance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-report
+          path: oauth2-conformance/runner/conformance-report.json
+          if-no-files-found: ignore
+
   publish-image:
     name: Publish GHCR image
     needs: [gate, db-tests]
