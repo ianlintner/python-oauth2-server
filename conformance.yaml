@@ -2,8 +2,4 @@ implementation: python-oauth2-server
 contract: 0.1.0
 profiles: [core]
 endpoint: http://localhost:8080
-deviations:
-  - requirement: RFC6749-5.2-error-format
-    reason: unsupported grant_type is rejected 401 instead of 400 invalid_request
-  - requirement: RFC6749-5.2-missing-grant-type
-    reason: a token request missing grant_type is rejected 401 invalid_client instead of 400 invalid_request
+deviations: []

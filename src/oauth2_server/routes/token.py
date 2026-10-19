@@ -84,6 +84,20 @@ _MAX_VERIFIER_LEN = 128
 _TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
 _ACCESS_TOKEN_TYPE_URN = "urn:ietf:params:oauth:token-type:access_token"
 
+# RFC 6749 §5.2: grant_type is REQUIRED. An absent grant_type is 400
+# invalid_request, and an unrecognized one is 400 unsupported_grant_type —
+# both BEFORE client authentication, because the error is about the request
+# shape, not about who sent it.
+_KNOWN_GRANT_TYPES = frozenset(
+    {
+        "authorization_code",
+        "client_credentials",
+        "refresh_token",
+        "urn:ietf:params:oauth:grant-type:device_code",
+        _TOKEN_EXCHANGE_GRANT,
+    }
+)
+
 
 def _extract_client_id_for_penalty(form: dict, authorization_header: str | None) -> str | None:
     """Best-effort recovery of the client_id an `invalid_client` outcome
@@ -286,6 +300,15 @@ async def token(request: Request) -> ORJSONResponse:
     keyset = request.app.state.keyset
     event_bus = request.app.state.event_bus
 
+    # RFC 6749 §5.2: validate grant_type BEFORE client authentication.
+    # An absent grant_type is 400 invalid_request (it is a REQUIRED param).
+    # An unrecognized grant_type is 400 unsupported_grant_type.
+    grant_type = form.get("grant_type")
+    if not grant_type:
+        return oauth_error("invalid_request", "grant_type is required")
+    if grant_type not in _KNOWN_GRANT_TYPES:
+        return oauth_error("unsupported_grant_type", f"grant_type '{grant_type}' is not supported")
+
     try:
         client = await ClientService.from_app(request.app.state).authenticate(
             form, request.headers.get("authorization"), mtls=mtls_headers(request, config)
@@ -349,8 +372,6 @@ async def token(request: Request) -> ORJSONResponse:
         cert_thumbprint = mtls_headers(request, config)[0]
         if cert_thumbprint is not None:
             cnf = {"x5t#S256": cert_thumbprint}
-
-    grant_type = form.get("grant_type")
 
     if grant_type == "client_credentials":
         if client.is_public():
@@ -979,4 +1000,8 @@ async def token(request: Request) -> ORJSONResponse:
             response, client, dpop_validated, request.app.state.dpop_nonce_issuer
         )
 
-    return oauth_error("unsupported_grant_type", f"grant_type '{grant_type}' is not supported")
+    # Every grant_type in _KNOWN_GRANT_TYPES is handled above, and the early-
+    # return validation at the top rejects anything outside that set, so this
+    # line is unreachable.  Pyright cannot prove exhaustiveness of string
+    # comparisons, so we give it an explicit return to satisfy the type checker.
+    return oauth_error("server_error", "unreachable")  # pragma: no cover
