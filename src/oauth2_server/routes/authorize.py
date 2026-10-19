@@ -79,6 +79,7 @@ from fastapi.responses import ORJSONResponse, RedirectResponse
 from starlette.responses import Response
 
 from oauth2_server.errors import OAuthError
+from oauth2_server.services.clients import redirect_uri_matches
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.services.auth import AuthorizeService, scope_is_subset
 from oauth2_server.services.authorize_response import (
@@ -214,20 +215,27 @@ async def authorize(request: Request):
             if key in entry.params:
                 merged[key] = entry.params[key]
 
-    # --- 2. client_id must exist and be enabled — 400, never redirect ---
+    # --- 2. client_id must exist and be enabled ---
     client = await storage.get_client(client_id) if client_id else None
     denylist_reason = (
         await check_subject_denylisted(storage, "client_id", client_id) if client_id else None
     )
+    if client_id is None:
+        # RFC 6749 §4.1.1: a MISSING client_id is a malformed request (400),
+        # informing the resource owner with no redirect.
+        return _error_page(400, "invalid_request", "client_id is required")
     if client is None or not client.enabled or denylist_reason is not None:
         # Subject-kind denylist (Phase 3a): a denylisted client_id gets the
-        # identical unknown/disabled-client 400 — no oracle distinguishing
-        # "denylisted" from "never registered".
+        # identical unknown/disabled-client error — no oracle distinguishing
+        # "denylisted" from "never registered". The request is unredirectable
+        # (no trusted redirect_uri exists for an unknown client), so this is a
+        # 401 (the Rust reference's status for invalid_client here), never a
+        # redirect to the untrusted request's redirect_uri.
         if denylist_reason is not None:
             logger.warning(
                 "authorize blocked: client_id is denylisted (reason=%s)", denylist_reason
             )
-        return _error_page(400, "invalid_client", "unknown or disabled client_id")
+        return _error_page(401, "invalid_client", "unknown or disabled client_id")
 
     # --- 2b. RFC 9700 §4.7: per-client `require_state` ---
     # Evaluated against the RAW QUERY, before the JAR overlay (Rust parity):
@@ -273,8 +281,10 @@ async def authorize(request: Request):
     redirect_uri = merged.get("redirect_uri")
     state = merged.get("state")
 
-    # --- 3. redirect_uri must exact-match the registered list — 400, never redirect ---
-    if not redirect_uri or redirect_uri not in client.redirect_uri_list():
+    # --- 3. redirect_uri must match the registered list — 400, never redirect ---
+    if not redirect_uri or not any(
+        redirect_uri_matches(registered, redirect_uri) for registered in client.redirect_uri_list()
+    ):
         return _error_page(400, "invalid_request", "redirect_uri is not registered for this client")
 
     # --- 3b. Resolve response_mode — the last error that can't be redirected ---

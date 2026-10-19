@@ -93,6 +93,40 @@ def is_valid_redirect_uri(uri: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc) and not has_fragment
 
 
+_LOOPBACK_IP_LITERALS = ("127.0.0.1", "::1")
+
+
+def redirect_uri_matches(registered: str, requested: str) -> bool:
+    """Exact-match `requested` against `registered`, admitting the RFC 8252
+    §7.3 (and RFC 6749 §3.1.2) loopback any-port exception.
+
+    The registered-URI comparison is exact except for ONE deviation: when the
+    registered URI is an `http` URI on a loopback IP *literal* (`127.0.0.1` or
+    `[::1]`) with no explicit port, it matches any port at request time on that
+    same literal with the same scheme and path. RFC 8252 §7.3 scopes the
+    any-port exception to loopback IP literals only — the `localhost` hostname
+    (§8.3, NOT RECOMMENDED) does NOT receive it, so a `localhost` registration
+    stays an exact match. Everything else — scheme, host, path, and any
+    explicitly registered port — must still match exactly, so a non-loopback
+    host, a different path, or a non-literals host is never admitted.
+    """
+    if requested == registered:
+        return True
+
+    # Only the loopback exception; a non-exact match is otherwise a miss.
+    reg = urlparse(registered)
+    req = urlparse(requested)
+    if reg.scheme != "http" or reg.scheme != req.scheme:
+        return False
+    # Registered host must be a port-less loopback IP literal; requested host
+    # must be the same literal (any port) with an identical path.
+    if reg.hostname not in _LOOPBACK_IP_LITERALS or reg.hostname != req.hostname:
+        return False
+    if reg.port is not None:
+        return False
+    return reg.path == req.path
+
+
 def is_valid_jwks_uri(uri: str) -> bool:
     """Whether `uri` is safe for this server to dereference as a client's
     JWKS endpoint.

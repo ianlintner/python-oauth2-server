@@ -341,5 +341,7 @@ async def test_denylisted_client_id_rejected_at_authorize(client_app):
             "scope": "read",
         },
     )
-    assert resp.status_code == 400
+    # A denylisted client_id is indistinguishable from an unknown client here
+    # (no oracle), and an unknown client is unredirectable -> 401.
+    assert resp.status_code == 401
     assert resp.json()["error"] == "invalid_client"

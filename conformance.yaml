@@ -3,16 +3,6 @@ contract: 0.1.0
 profiles: [core]
 endpoint: http://localhost:8080
 deviations:
-  - requirement: RFC6749-4.1.1-unknown-client
-    reason: unknown client_id at /oauth/authorize returns 400 (not the reference 401)
-  - requirement: RFC6749-3.1.2-localhost-port-wildcard
-    reason: loopback redirect URIs are matched on exact port, not any port
-  - requirement: RFC8252-7.3-loopback-ipv4-any-port
-    reason: loopback port wildcard for IPv4 redirect URIs is not implemented
-  - requirement: RFC8252-7.3-loopback-ipv6-any-port
-    reason: loopback port wildcard for IPv6 redirect URIs is not implemented
-  - requirement: RFC7636-4.3-missing-verifier
-    reason: a code exchange omitting the PKCE verifier reports invalid_request, not invalid_grant
   - requirement: RFC6749-5.2-error-format
     reason: unsupported grant_type is rejected 401 instead of 400 invalid_request
   - requirement: RFC6749-5.2-missing-grant-type

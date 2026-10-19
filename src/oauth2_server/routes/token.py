@@ -451,7 +451,13 @@ async def token(request: Request) -> ORJSONResponse:
 
         if auth_code.code_challenge:
             verifier = form.get("code_verifier")
-            if not verifier or not (_MIN_VERIFIER_LEN <= len(verifier) <= _MAX_VERIFIER_LEN):
+            if not verifier:
+                # RFC 7636 §4.3: the verifier is *absent*, so the code↔verifier
+                # pairing can never be validated — that is an invalid grant
+                # (matching the "wrong verifier" case below), not a malformed
+                # request.
+                return oauth_error("invalid_grant", "code_verifier is missing")
+            if not (_MIN_VERIFIER_LEN <= len(verifier) <= _MAX_VERIFIER_LEN):
                 return oauth_error(
                     "invalid_request", "code_verifier must be between 43 and 128 characters"
                 )
