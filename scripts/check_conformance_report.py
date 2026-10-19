@@ -47,7 +47,9 @@ def validate_manifest(manifest: object) -> None:
         if key not in manifest:
             raise GateError(f"manifest is missing required key {key!r}")
     if not isinstance(manifest["contract"], str) or not _SEMVER.match(manifest["contract"]):
-        raise GateError("manifest contract must be a MAJOR.MINOR.PATCH version or a 40-hex commit SHA")
+        raise GateError(
+            "manifest contract must be a MAJOR.MINOR.PATCH version or a 40-hex commit SHA"
+        )
     profiles = manifest["profiles"]
     if (
         not isinstance(profiles, list)
