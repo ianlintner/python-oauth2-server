@@ -52,6 +52,14 @@ Item 12 was explicitly deferred to Phase 3 from the start (see the Phase 2 plan'
 
 ## Accepted divergences (documented, keep)
 
+> **Conformance reconciliation (v0.2 token-lifecycle, contract 469bd86):** none of the
+> Rust-reference divergences below are contract-asserted token-lifecycle requirements, so none
+> belong in `conformance.yaml` `deviations`. The six token-lifecycle scenarios the contract marks
+> `reference-deviation` (RFC wins over Rust) are RFC-correct here — see the comment block in
+> `conformance.yaml` — and Python passes them (or they are deferred by the contract). The two
+> owner-gated all-port requirements (`RFC7662-4-expiry-checked`,
+> `RFC9700-2.2.2-public-refresh-rotated-or-bound`) remain contract deferrals, not deviations.
+
 From Phase 1:
 - DCR rejection error is `invalid_client_metadata` (RFC 7591 §3.2.2) where the Rust admin handler uses
   `invalid_request` — noted in tests/test_rfc_compliance.py docstring.
