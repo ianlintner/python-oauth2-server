@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
@@ -14,6 +15,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
+from oauth2_server.conformance import apply_seed, seed_from_env
 from oauth2_server.keys import seed_keyset
 from oauth2_server.middleware import _SECURITY_HEADERS, DenylistGuard, MetricsMiddleware
 from oauth2_server.middleware_ratelimit import RateLimitMiddleware, ResilienceMiddleware
@@ -243,8 +245,25 @@ def build() -> FastAPI:
     (required so each worker process — spawned independently by uvicorn's
     `workers=` option — applies migrations, though the runner is idempotent/
     backfill-only after the first).
+
+    Conformance test mode (`OAUTH2_CONFORMANCE_MODE=1` + `OAUTH2_CONFORMANCE_SEED`)
+    is resolved here too: fail closed before any storage is opened, apply the
+    seed in the lifespan before `seed_admin_user` would run (the seed replaces
+    the default admin), and report the applied seed via `/ready`.
     """
     config = Config()
+    # Conformance mode is resolved first so a production-looking environment
+    # or an invalid seed aborts startup before any storage is opened. The
+    # seeded issuer is authoritative for `iss` and discovery.
+    conformance_seed = seed_from_env(os.environ, config)
+    if conformance_seed is not None:
+        config.issuer = conformance_seed.issuer
+        # The contract's example issuer is plain http://localhost:8080, and a
+        # `Secure` session cookie is never sent back over http, so the test
+        # login could not work. This flag only drops `Secure` from the session
+        # cookie (its sole use); an https:// seeded issuer keeps it.
+        if conformance_seed.issuer.startswith("http://"):
+            config.allow_insecure_defaults = True
     config.validate_for_production()
     # Before create_app: global httpx/pymongo instrumentation must precede client creation.
     tracing = setup_tracing()
@@ -253,7 +272,14 @@ def build() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await storage.init()
-        await seed_admin_user(storage, config)
+        if conformance_seed is not None:
+            # The seed replaces the default admin: only seeded identities
+            # exist. Any failure aborts startup, so the server never serves
+            # (or reports ready) with a partially applied seed.
+            applied = await apply_seed(conformance_seed, storage, app.state.keyset)
+            app.state.conformance = applied.readiness()
+        else:
+            await seed_admin_user(storage, config)
         yield
         await app.state.http_client.aclose()
 
