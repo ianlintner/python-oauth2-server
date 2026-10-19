@@ -68,7 +68,8 @@ async def test_authorize_error_response_has_no_store_cache_control(app_with_sess
             "redirect_uri": "https://a.example/cb",
         },
     )
-    assert resp.status_code == 400
+    # An unknown client is unredirectable -> 401 invalid_client (RFC 6749 §4.1.1).
+    assert resp.status_code == 401
     assert resp.headers["cache-control"] == "no-store"
 
 
@@ -316,3 +317,169 @@ async def test_over_nested_claims_no_500(app_with_session):
     q = parse_qs(urlparse(resp.headers["location"]).query)
     assert q["error"] == ["invalid_request"]
     assert "exceeds the maximum nesting depth of 10" in q["error_description"][0]
+
+
+# --- RFC 6749 §4.1.1 / §3.1.2 + RFC 8252 §7.3 loopback redirect matching ---
+
+
+async def test_missing_client_id_rejected_400(app_with_session):
+    # RFC 6749 §4.1.1: an authorization request WITHOUT client_id is a 400
+    # (malformed request) — distinct from an *unknown* client_id, which is a
+    # 401 invalid_client below.
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "redirect_uri": "https://client.example/callback",
+            "state": "s-no-client",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+
+
+async def test_unknown_client_rejected_401_invalid_client(app_with_session):
+    # RFC 6749 §4.1.1: an authorization request with an unknown client_id is
+    # rejected with invalid_client — and, being unredirectable (no trusted
+    # redirect_uri), carries HTTP 401 (the Rust reference's status), never a
+    # redirect to the (untrusted) request's redirect_uri.
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "no-such-client",
+            "redirect_uri": "https://client.example/callback",
+            "state": "s-unknown-client",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+        },
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def _seed_loopback_client(app_with_session, client_id, redirect_uris):
+    import json
+
+    await seed_client(
+        app_with_session.storage,
+        client_id=client_id,
+        client_secret="",
+        redirect_uris=json.dumps(redirect_uris),
+        token_endpoint_auth_method="none",
+    )
+
+
+async def test_loopback_ipv4_redirect_matches_any_port(app_with_session):
+    # RFC 8252 §7.3 / RFC 6749 §3.1.2: a loopback redirect URI registered
+    # without a port (http://127.0.0.1/cb) matches any port at request time.
+    await _seed_loopback_client(app_with_session, "client-loopback-v4", ["http://127.0.0.1/cb"])
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client-loopback-v4",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+            "redirect_uri": "http://127.0.0.1:9999/cb",
+            "scope": "read",
+            "state": "s-xyz",
+        },
+    )
+    assert resp.status_code == 302, resp.text
+    location = urlparse(resp.headers["location"])
+    assert f"{location.scheme}://{location.netloc}{location.path}" == "http://127.0.0.1:9999/cb"
+    q = parse_qs(location.query)
+    assert q["state"] == ["s-xyz"]
+    assert "code" in q
+
+
+async def test_loopback_ipv6_redirect_matches_any_port(app_with_session):
+    # RFC 8252 §7.3: the same wildcard applies to the [::1] loopback literal.
+    await _seed_loopback_client(app_with_session, "client-loopback-v6", ["http://[::1]/cb"])
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client-loopback-v6",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+            "redirect_uri": "http://[::1]:9999/cb",
+            "scope": "read",
+            "state": "s-xyz",
+        },
+    )
+    assert resp.status_code == 302, resp.text
+    location = urlparse(resp.headers["location"])
+    assert f"{location.scheme}://{location.netloc}{location.path}" == "http://[::1]:9999/cb"
+    q = parse_qs(location.query)
+    assert q["state"] == ["s-xyz"]
+    assert "code" in q
+
+
+async def test_loopback_localhost_hostname_does_not_wildcard_port(app_with_session):
+    # RFC 8252 §7.3 scopes the any-port exception to loopback IP *literals*;
+    # the `localhost` hostname (§8.3) does NOT receive it, so a registered
+    # http://localhost/cb must be an exact match -> :7777 is rejected 400.
+    await _seed_loopback_client(app_with_session, "client-localhost", ["http://localhost/cb"])
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client-localhost",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+            "redirect_uri": "http://localhost:7777/cb",
+            "scope": "read",
+            "state": "s-xyz",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+
+
+async def test_loopback_port_wildcard_does_not_relax_path(app_with_session):
+    # RFC 8252 §7.3: the any-port exception is exactly a port wildcard — the
+    # request path must still be an exact match, else reject 400 and never
+    # redirect to the untrusted URI.
+    await _seed_loopback_client(app_with_session, "client-loopback-v4", ["http://127.0.0.1/cb"])
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client-loopback-v4",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+            "redirect_uri": "http://127.0.0.1:9999/other",
+            "state": "s-v4-path",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+
+
+async def test_loopback_wildcard_does_not_relax_a_registered_port_or_host(app_with_session):
+    # The wildcard never applies to a non-loopback host, nor does it relax a
+    # specific registered port. A host mismatch (127.0.0.1 vs example.com)
+    # must still reject.
+    await _seed_loopback_client(app_with_session, "client-loopback-v4", ["http://127.0.0.1/cb"])
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client-loopback-v4",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+            "redirect_uri": "http://evil.example:9999/cb",
+            "state": "s-v4-host",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"

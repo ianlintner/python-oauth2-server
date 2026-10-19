@@ -259,6 +259,16 @@ async def test_pkce_verifier_mismatch_rejected(client_app):
     assert resp.json()["error"] == "invalid_grant"
 
 
+async def test_pkce_missing_verifier_rejected_invalid_grant(client_app):
+    # RFC 7636 §4.3: omitting code_verifier entirely (while the code carried
+    # a challenge) must fail the grant exchange with invalid_grant — not
+    # invalid_request; the auth code/pkce pairing is invalid, not the request
+    # shape. `run_code_flow` sends code_verifier=None, so the field is absent.
+    resp, _code = await run_code_flow(client_app, code_verifier=None)
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_grant"
+
+
 async def test_pkce_non_ascii_code_challenge_returns_400_not_500(client_app):
     # /oauth/authorize (and PAR) only length-check `code_challenge`
     # (43-128 chars) — RFC 7636's base64url alphabet is never enforced —
