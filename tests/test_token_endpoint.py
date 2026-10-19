@@ -466,3 +466,47 @@ async def test_client_credentials_excess_scope_rejected(client_app):
         basic_auth=("client1", "s3cret"),
     )
     assert (resp.status_code, resp.json()["error"]) == (400, "invalid_scope")
+
+
+# --- RFC 6749 §5.2 error format gaps (Part 2 parity) ------------------------
+
+
+async def test_missing_grant_type_returns_400_invalid_request(client_app):
+    """RFC 6749 §5.2: grant_type is REQUIRED; a missing value is an
+    invalid_request (400), not an auth failure — identical response for
+    unauthenticated and authenticated calls."""
+    # No credentials at all: the missing grant_type must be detected
+    # before the auth layer and returned as 400 invalid_request.
+    resp_no_auth = await client_app.post("/oauth/token", data={})
+    assert resp_no_auth.status_code == 400, resp_no_auth.text
+    assert resp_no_auth.json()["error"] == "invalid_request"
+
+    # Authenticated call: same 400, never reaches auth decision.
+    resp_with_auth = await post_token(
+        client_app,
+        {"client_id": "client1"},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp_with_auth.status_code == 400, resp_with_auth.text
+    assert resp_with_auth.json()["error"] == "invalid_request"
+
+
+async def test_unsupported_grant_type_without_client_auth_returns_400(client_app):
+    """RFC 6749 §5.2: an unsupported grant_type is 400 unsupported_grant_type,
+    not an auth error — even when the caller sends no client credentials."""
+    # An unsupported grant_type without any credentials must be detected
+    # before auth and returned as 400 unsupported_grant_type, not 401.
+    resp = await client_app.post(
+        "/oauth/token",
+        data={"grant_type": "bogus_grant"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "unsupported_grant_type"
+
+    # RFC 6749 §4.1.3: the "password" grant is also unsupported by this AS.
+    resp_password = await client_app.post(
+        "/oauth/token",
+        data={"grant_type": "password"},
+    )
+    assert resp_password.status_code == 400, resp_password.text
+    assert resp_password.json()["error"] == "unsupported_grant_type"
