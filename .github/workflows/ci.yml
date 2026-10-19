@@ -77,19 +77,19 @@ jobs:
           uv run pytest tests/test_mongo_storage.py tests/test_mongo_admin.py
           tests/test_mongo_e2e.py tests/test_rfc_compliance.py -q
 
-  # Conformance contract (v0.1 core) — black-box run of the published
-  # `oauth2-conformance` runner against this server in conformance test mode.
-  # Deliberately NOT a `needs:` of `gate` above (runs in parallel) and NOT
-  # folded into `scripts/gate.sh`, so the fast unit-test gate stays
-  # independent of Node/pnpm and the contract checkout. The contract repo is
-  # pinned by SHA (not a mutable branch) so a future runner release can't
-  # silently change what "conformance" means under this PR.
+  # Conformance contract (v0.1 core + v0.2 token-lifecycle) — black-box run
+  # of the published `oauth2-conformance` runner against this server in
+  # conformance test mode. Deliberately NOT a `needs:` of `gate` above (runs
+  # in parallel) and NOT folded into `scripts/gate.sh`, so the fast unit-test
+  # gate stays independent of Node/pnpm and the contract checkout. The
+  # contract repo is pinned by SHA (not a mutable branch) so a future runner
+  # release can't silently change what "conformance" means under this PR.
   conformance:
     runs-on: ubuntu-latest
     env:
       # The contract's example seed advertises http://localhost:8080; driving
       # the runner on the host loopback leaves 8080 free on the runner VM.
-      CONFORMANCE_REF: 62e3e9343480c990833fc4a60192f222d2251c18
+      CONFORMANCE_REF: 469bd864530af550a872e1d76bbd040da3b44647
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -112,7 +112,7 @@ jobs:
         working-directory: oauth2-conformance/runner
       - name: Sync dependencies
         run: uv sync --locked
-      - name: Start the SUT in conformance mode and run the core profile
+      - name: Run the conformance runner against every claimed profile
         run: |
           set -euo pipefail
           CONTRACT="$GITHUB_WORKSPACE/oauth2-conformance"
@@ -137,21 +137,30 @@ jobs:
           echo
           # The runner is all-or-nothing, so its exit status is ignored here;
           # `check_conformance_report.py` is the actual gate (see that script
-          # and `conformance.yaml` for the declared deviations).
-          pnpm --dir "$CONTRACT/runner" -s conformance run --base-url http://localhost:8080 \
-            --scenarios "$CONTRACT/scenarios" --profile core \
-            --implementation python-oauth2-server --contract 0.1.0 \
-            --report "$GITHUB_WORKSPACE/conformance-report.json" || true
-      - name: Gate the report against declared deviations
-        run: >-
-          uv run python scripts/check_conformance_report.py conformance.yaml
-          conformance-report.json
-      - name: Upload conformance report
+          # and `conformance.yaml` for the declared deviations). Every profile
+          # claimed in conformance.yaml must pass; each is run separately and
+          # gated against its own report.
+          profiles="$(uv run python -c 'import yaml,sys; print(*yaml.safe_load(open("conformance.yaml"))["profiles"])')"
+          contract="$(uv run python -c 'import yaml; print(yaml.safe_load(open("conformance.yaml"))["contract"])')"
+          for profile in $profiles; do
+            pnpm --dir "$CONTRACT/runner" -s conformance run --base-url http://localhost:8080 \
+              --scenarios "$CONTRACT/scenarios" --profile "$profile" \
+              --implementation python-oauth2-server --contract "$contract" \
+              --report "$GITHUB_WORKSPACE/conformance-${profile}.json" || true
+          done
+      - name: Gate each report against declared deviations
+        run: |
+          set -euo pipefail
+          profiles="$(uv run python -c 'import yaml; print(*yaml.safe_load(open("conformance.yaml"))["profiles"])')"
+          for profile in $profiles; do
+            uv run python scripts/check_conformance_report.py conformance.yaml "conformance-${profile}.json"
+          done
+      - name: Upload conformance reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: conformance-report
-          path: conformance-report.json
+          path: conformance-*.json
           if-no-files-found: ignore
 
   publish-image:

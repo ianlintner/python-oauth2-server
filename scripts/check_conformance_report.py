@@ -29,7 +29,9 @@ from pathlib import Path
 
 import yaml
 
-_SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+# `contract` is a tagged MAJOR.MINOR.PATCH or, before that tag exists, the
+# full 40-hex commit SHA on the contract's `main` (ROADMAP.md flow step 2).
+_SEMVER = re.compile(r"^(?:\d+\.\d+\.\d+|[0-9a-f]{40})$")
 _REQUIREMENT_ID = re.compile(r"^[A-Z][A-Z0-9]*(?:[0-9])?-[A-Za-z0-9._-]+$")
 
 
@@ -45,7 +47,7 @@ def validate_manifest(manifest: object) -> None:
         if key not in manifest:
             raise GateError(f"manifest is missing required key {key!r}")
     if not isinstance(manifest["contract"], str) or not _SEMVER.match(manifest["contract"]):
-        raise GateError("manifest contract must be a MAJOR.MINOR.PATCH version")
+        raise GateError("manifest contract must be a MAJOR.MINOR.PATCH version or a 40-hex commit SHA")
     profiles = manifest["profiles"]
     if (
         not isinstance(profiles, list)

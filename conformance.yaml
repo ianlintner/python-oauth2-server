@@ -1,5 +1,21 @@
+# Conformance claim for this implementation, read by the language-neutral
+# `oauth2-conformance` runner contract
+# (https://github.com/ianlintner/oauth2-conformance).
+#
+# Pinned contract commit: 469bd864530af550a872e1d76bbd040da3b44647
+# (contract v0.2 token-lifecycle; also pinned as CONFORMANCE_REF in the
+# `conformance` job of .github/workflows/ci.yml; the manifest schema has no
+# field for a commit, so the two are kept in sync by hand).
+#
+# Every profile listed under `profiles` MUST pass in the `conformance` CI job.
+#
+# Deviations: none. The six token-lifecycle scenarios the contract records as
+# `reference-deviation` (RFC wins over the Rust reference) are RFC-correct in
+# this port, so there is nothing to declare. Two owner-gated requirements are
+# deferred in the contract for all ports and are known gaps, not deviations:
+# RFC7662-4-expiry-checked and RFC9700-2.2.2-public-refresh-rotated-or-bound.
 implementation: python-oauth2-server
-contract: 0.1.0
-profiles: [core]
+contract: 469bd864530af550a872e1d76bbd040da3b44647
+profiles: [core, token-lifecycle]
 endpoint: http://localhost:8080
 deviations: []
