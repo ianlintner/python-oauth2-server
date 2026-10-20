@@ -60,6 +60,12 @@ Item 12 was explicitly deferred to Phase 3 from the start (see the Phase 2 plan'
 > owner-gated all-port requirements (`RFC7662-4-expiry-checked`,
 > `RFC9700-2.2.2-public-refresh-rotated-or-bound`) remain contract deferrals, not deviations.
 
+> **Conformance reconciliation (v0.3 oidc-basic, contract 1ad9330):** the existing OIDC surface
+> (id_token issuance on the `openid` scope, `/oauth/userinfo`, discovery) already satisfies all
+> five `stable` oidc-basic scenarios, so there are no declared deviations. The five `draft`
+> oidc-basic scenarios (aud/iat/exp/nonce claims, scope claims, prompt/max_age, logout
+> `id_token_hint` aud, email/profile userinfo) are deferred by the contract and are NOT claimed.
+
 From Phase 1:
 - DCR rejection error is `invalid_client_metadata` (RFC 7591 §3.2.2) where the Rust admin handler uses
   `invalid_request` — noted in tests/test_rfc_compliance.py docstring.
