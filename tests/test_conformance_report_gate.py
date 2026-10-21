@@ -100,7 +100,7 @@ def test_a_report_without_any_stable_pass_is_not_evidence():
 
 
 def test_contract_may_be_a_full_commit_sha():
-    sha = "469bd864530af550a872e1d76bbd040da3b44647"
+    sha = "1ad9330a2954314cda9e2b462e36adaadfcd5061"
     gate.validate_manifest({**MANIFEST, "contract": sha})
     manifest = {**MANIFEST, "contract": sha}
     assert gate.evaluate(manifest, _report(PASSING, KNOWN_FAIL, contract=sha)) == []
@@ -143,5 +143,5 @@ def test_the_checked_in_manifest_is_valid():
     manifest = yaml.safe_load((ROOT / "conformance.yaml").read_text())
     gate.validate_manifest(manifest)
     assert manifest["implementation"] == "python-oauth2-server"
-    assert manifest["profiles"] == ["core", "token-lifecycle"]
-    assert manifest["contract"] == "469bd864530af550a872e1d76bbd040da3b44647"
+    assert manifest["profiles"] == ["core", "token-lifecycle", "oidc-basic"]
+    assert manifest["contract"] == "1ad9330a2954314cda9e2b462e36adaadfcd5061"
