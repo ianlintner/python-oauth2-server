@@ -2,20 +2,30 @@
 # `oauth2-conformance` runner contract
 # (https://github.com/ianlintner/oauth2-conformance).
 #
-# Pinned contract commit: 1ad9330a2954314cda9e2b462e36adaadfcd5061
-# (contract v0.3 oidc-basic, on top of v0.2 token-lifecycle; also pinned as CONFORMANCE_REF in the
-# `conformance` job of .github/workflows/ci.yml; the manifest schema has no
-# field for a commit, so the two are kept in sync by hand).
+# Pinned contract commit: 604c62d6c98d8685ef2a1296d12014615dc38390
+# (contract v0.4 extended-grants part 3/3, on top of v0.3 oidc-basic; also pinned
+# as CONFORMANCE_REF in the `conformance` job of .github/workflows/ci.yml; the
+# manifest schema has no field for a commit, so the two are kept in sync by
+# hand).
 #
 # Every profile listed under `profiles` MUST pass in the `conformance` CI job.
 #
-# Deviations: none. The six token-lifecycle scenarios the contract records as
-# `reference-deviation` (RFC wins over the Rust reference) are RFC-correct in
-# this port, so there is nothing to declare. Two owner-gated requirements are
-# deferred in the contract for all ports and are known gaps, not deviations:
-# RFC7662-4-expiry-checked and RFC9700-2.2.2-public-refresh-rotated-or-bound.
+# extended-grants: only the seven `stable` device scenarios are claimed. The 43
+# `draft` extended-grants scenarios (PAR, registration, JAR, RAR, exchange,
+# assertions) and the remaining device drafts (expired-token,
+# slow-down-on-fast-polling, repeated-param-rejected, unknown-client) are NOT
+# claimed; they are deferred in the runner and are follow-up cards. Claiming the
+# profile is required to run it; the gate below still enforces that no stable
+# scenario fails.
+#
+# Deviations: none. The six token-lifecycle scenarios and the device access-denied
+# scenario the contract records as `reference-deviation` (RFC wins over the Rust
+# reference) are RFC-correct in this port, so there is nothing to declare. Two
+# owner-gated requirements remain deferred in the contract for all ports and are
+# known gaps, not deviations: RFC7662-4-expiry-checked and
+# RFC9700-2.2.2-public-refresh-rotated-or-bound.
 implementation: python-oauth2-server
-contract: 1ad9330a2954314cda9e2b462e36adaadfcd5061
-profiles: [core, token-lifecycle, oidc-basic]
+contract: 604c62d6c98d8685ef2a1296d12014615dc38390
+profiles: [core, token-lifecycle, oidc-basic, extended-grants]
 endpoint: http://localhost:8080
 deviations: []

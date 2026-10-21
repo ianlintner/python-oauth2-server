@@ -89,7 +89,7 @@ jobs:
     env:
       # The contract's example seed advertises http://localhost:8080; driving
       # the runner on the host loopback leaves 8080 free on the runner VM.
-      CONFORMANCE_REF: 1ad9330a2954314cda9e2b462e36adaadfcd5061
+      CONFORMANCE_REF: 604c62d6c98d8685ef2a1296d12014615dc38390
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
