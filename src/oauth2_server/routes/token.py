@@ -761,12 +761,16 @@ async def token(request: Request) -> ORJSONResponse:
                 "unauthorized_client", "client is not authorized for this grant type"
             )
 
+        # RFC 8628 §3.4: device_code is REQUIRED on the device_code grant.
+        # RFC 6749 §3.1: a parameter sent without a value is treated as
+        # omitted, so an empty device_code is "missing" too. RFC 6749 §5.2:
+        # a missing required parameter is invalid_request — distinct from
+        # RFC 8628 §3.5 invalid_grant for a device_code that is present but
+        # unknown or not issued to this client.
         device_code = form.get("device_code")
-        device = (
-            await storage.get_device_authorization_by_device_code(device_code)
-            if device_code
-            else None
-        )
+        if not device_code:
+            return oauth_error("invalid_request", "device_code is required")
+        device = await storage.get_device_authorization_by_device_code(device_code)
         if device is None or device.client_id != client.client_id:
             return oauth_error("invalid_grant", "device_code not found for this client")
 

@@ -133,6 +133,35 @@ async def test_device_flow_wrong_client_cannot_redeem(client_app):
     assert poll.json()["error"] == "invalid_grant"
 
 
+async def test_missing_device_code_returns_invalid_request(client_app):
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "client_id": "client1",
+        },
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"] == "invalid_request"
+
+
+async def test_empty_device_code_returns_invalid_request(client_app):
+    # RFC 6749 §3.1: a parameter sent without a value is treated as omitted.
+    resp = await post_token(
+        client_app,
+        {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": "",
+            "client_id": "client1",
+        },
+        basic_auth=("client1", "s3cret"),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+
+
 async def test_discovery_advertises_device_authorization_endpoint(client_app):
     resp = await client_app.get("/.well-known/openid-configuration")
     assert resp.status_code == 200
