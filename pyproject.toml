@@ -35,7 +35,7 @@ otel = [
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "pytest-asyncio>=0.24",
+    "pytest-asyncio>=1.4.1",
     "ruff>=0.17.0",
     "motor>=3.5",
     "testcontainers",
