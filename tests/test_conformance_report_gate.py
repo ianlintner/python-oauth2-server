@@ -143,5 +143,12 @@ def test_the_checked_in_manifest_is_valid():
     manifest = yaml.safe_load((ROOT / "conformance.yaml").read_text())
     gate.validate_manifest(manifest)
     assert manifest["implementation"] == "python-oauth2-server"
-    assert manifest["profiles"] == ["core", "token-lifecycle", "oidc-basic", "extended-grants"]
-    assert manifest["contract"] == "604c62d6c98d8685ef2a1296d12014615dc38390"
+    assert manifest["profiles"] == [
+        "core",
+        "token-lifecycle",
+        "oidc-basic",
+        "extended-grants",
+        "sender-constrained",
+    ]
+    assert manifest["contract"] == "985fef7aca4835a7ab4fb92c94e8f979f7308189"
+    assert manifest["deviations"] == []
