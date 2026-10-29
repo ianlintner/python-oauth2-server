@@ -73,8 +73,9 @@ Item 12 was explicitly deferred to Phase 3 from the start (see the Phase 2 plan'
 > list is a contract-asserted failure and none is declared under `conformance.yaml` `deviations`
 > (divergences 14, 20 and 21 touch DPoP replay, ordering and `htu` derivation but no stable
 > scenario fails on them). The 28 `draft` sender-constrained scenarios (DPoP nonce, ath,
-> introspection, replay-store durability, mTLS, rate limiting) are deferred by the contract and NOT
-> claimed; the "Known DPoP/RAR gaps" below stay open backlog items, not deviations.
+> introspection, replay-store durability, mTLS, rate limiting) are not gating requirements;
+> four pass here and the remaining 24 are deferred by the runner. The "Known DPoP/RAR gaps"
+> below stay open backlog items, not deviations.
 
 From Phase 1:
 - DCR rejection error is `invalid_client_metadata` (RFC 7591 §3.2.2) where the Rust admin handler uses
