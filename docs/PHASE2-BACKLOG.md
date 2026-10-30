@@ -67,6 +67,16 @@ Item 12 was explicitly deferred to Phase 3 from the start (see the Phase 2 plan'
 > email/profile userinfo, reject client_credentials token) are deferred by the contract and are NOT
 > claimed.
 
+> **Conformance reconciliation (v0.5 sender-constrained, contract 985fef7):** the seven `stable`
+> sender-constrained scenarios (DPoP `typ`, `htm`, `htu`, `iat` freshness, `jti` required, `jti`
+> replay, `token_type=DPoP`) pass against the existing DPoP implementation, so no divergence in this
+> list is a contract-asserted failure and none is declared under `conformance.yaml` `deviations`
+> (divergences 14, 20 and 21 touch DPoP replay, ordering and `htu` derivation but no stable
+> scenario fails on them). The 28 `draft` sender-constrained scenarios (DPoP nonce, ath,
+> introspection, replay-store durability, mTLS, rate limiting) are not gating requirements;
+> four pass here and the remaining 24 are deferred by the runner. The "Known DPoP/RAR gaps"
+> below stay open backlog items, not deviations.
+
 From Phase 1:
 - DCR rejection error is `invalid_client_metadata` (RFC 7591 §3.2.2) where the Rust admin handler uses
   `invalid_request` — noted in tests/test_rfc_compliance.py docstring.
