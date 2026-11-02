@@ -476,3 +476,61 @@ async def test_non_signature_key_rejected_even_by_kid(client_app, extra):
     jwks["keys"][0].update(extra)
     await _setup(client_app, jwks=jwks)
     _assert_invalid_grant(await _redeem(client_app, _assertion(key)))
+
+
+async def test_explicit_jwk_alg_mismatch_rejected_by_kid(client_app):
+    key, jwks = generate_rsa_keypair()
+    jwks["keys"][0]["alg"] = "PS256"  # key restricted to PS256; assertion is RS256
+    await _setup(client_app, jwks=jwks)
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key)))
+
+
+async def test_explicit_jwk_alg_other_family_rejected(client_app):
+    key, jwks = generate_rsa_keypair()
+    jwks["keys"][0]["alg"] = "ES256"
+    await _setup(client_app, jwks=jwks)
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key)))
+
+
+async def test_kidless_selection_skips_alg_incompatible_key(client_app):
+    key, jwks = generate_rsa_keypair()
+    good = jwks["keys"][0]
+    _, other = generate_rsa_keypair(kid="other")
+    wrong = dict(other["keys"][0], alg="PS256")  # different material, PS256-only
+    await _setup(client_app, jwks={"keys": [wrong, good]})
+    now = int(time.time())
+    claims = {
+        "iss": EXT_ISS,
+        "sub": "u1",
+        "aud": AUD,
+        "jti": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + 60,
+    }
+    tok = jwt.encode(claims, key, algorithm="RS256")  # no kid
+    assert (await _redeem(client_app, tok)).status_code == 200
+
+
+async def test_kidless_all_keys_alg_incompatible_rejected(client_app):
+    key, jwks = generate_rsa_keypair()
+    jwks["keys"][0]["alg"] = "PS256"
+    await _setup(client_app, jwks=jwks)
+    now = int(time.time())
+    claims = {
+        "iss": EXT_ISS,
+        "sub": "u1",
+        "aud": AUD,
+        "jti": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + 60,
+    }
+    _assert_invalid_grant(await _redeem(client_app, jwt.encode(claims, key, algorithm="RS256")))
+
+
+@pytest.mark.parametrize("alg", ["RS256", "PS256", "ES256"])
+async def test_matching_explicit_jwk_alg_accepted(client_app, alg):
+    pem, jwks = _alt_key("ES256" if alg == "ES256" else "RS256")
+    jwks["keys"][0]["alg"] = alg
+    await _setup(client_app, jwks=jwks)
+    resp = await _redeem(client_app, _signed(pem, alg))
+    assert resp.status_code == 200, resp.text

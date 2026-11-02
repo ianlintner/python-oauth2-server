@@ -95,6 +95,13 @@ def _may_verify(jwk: dict) -> bool:
     return ops is None or (isinstance(ops, list) and "verify" in ops)
 
 
+def _alg_compatible(jwk: dict, alg: str) -> bool:
+    """RFC 7517 §4.4: an explicit JWK `alg` restricts the key to that
+    algorithm; an absent `alg` imposes no restriction."""
+    declared = jwk.get("alg")
+    return declared is None or declared == alg
+
+
 def _select_key(jwks: dict, header: dict):
     keys = jwks.get("keys") if isinstance(jwks, dict) else None
     if not isinstance(keys, list):
@@ -111,7 +118,10 @@ def _select_key(jwks: dict, header: dict):
             (
                 k
                 for k in keys
-                if isinstance(k, dict) and k.get("kty") == wanted_kty and _may_verify(k)
+                if isinstance(k, dict)
+                and k.get("kty") == wanted_kty
+                and _may_verify(k)
+                and _alg_compatible(k, alg)
             ),
             None,
         )
@@ -119,6 +129,8 @@ def _select_key(jwks: dict, header: dict):
             raise _grant_error("no usable key in the trusted issuer's JWKS")
     if not _may_verify(match):
         raise _grant_error("issuer JWKS key is not usable for signature verification")
+    if not _alg_compatible(match, alg):
+        raise _grant_error("issuer JWKS key is restricted to a different algorithm")
     if match.get("kty") != wanted_kty:
         raise _grant_error("issuer JWKS key type does not match the assertion algorithm")
     try:
