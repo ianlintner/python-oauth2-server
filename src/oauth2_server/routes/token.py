@@ -64,6 +64,7 @@ from oauth2_server.services.dpop import (
 from oauth2_server.services.dpop_nonce import DpopNonceIssuer, enforce_dpop_nonce
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.id_token import mint_id_token
+from oauth2_server.services.jwt_bearer_grant import JWT_BEARER_GRANT, redeem_jwt_bearer_assertion
 from oauth2_server.services.limits import LimitError, check_depth
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.services.rar import RarError, validate_authorization_details
@@ -95,6 +96,7 @@ _KNOWN_GRANT_TYPES = frozenset(
         "refresh_token",
         "urn:ietf:params:oauth:grant-type:device_code",
         _TOKEN_EXCHANGE_GRANT,
+        JWT_BEARER_GRANT,
     }
 )
 
@@ -999,6 +1001,75 @@ async def token(request: Request) -> ORJSONResponse:
             body["act"] = act
 
         response = ORJSONResponse(body)
+        response.headers["Cache-Control"] = "no-store"
+        return _with_dpop_nonce(
+            response, client, dpop_validated, request.app.state.dpop_nonce_issuer
+        )
+
+    if grant_type == JWT_BEARER_GRANT:
+        # RFC 7523 §2.1 jwt-bearer authorization grant. The authenticated
+        # confidential client presents `assertion`, a signed JWT whose `iss`
+        # names an enabled TrustedIssuer registry entry. EVERY validation
+        # failure (bad signature, unknown issuer, wrong aud, expired/replayed
+        # jti, missing sub, disabled/bad subject) is `invalid_grant` per
+        # RFC 7523 §3.1. See services/jwt_bearer_grant.py.
+        if grant_type not in client.grant_type_list():
+            return oauth_error(
+                "unauthorized_client", "client is not authorized for this grant type"
+            )
+
+        if client.is_public():
+            return _invalid_client_response(
+                request, client.client_id, "Public clients cannot use the jwt-bearer grant"
+            )
+
+        assertion = form.get("assertion")
+        if not isinstance(assertion, str) or not assertion:
+            return oauth_error("invalid_request", "assertion is required")
+
+        try:
+            user_id = await redeem_jwt_bearer_assertion(
+                assertion,
+                client,
+                storage=storage,
+                jwks_cache=request.app.state.jwks_cache,
+                guard=request.app.state.jti_guard,
+                our_issuer=config.issuer.rstrip("/"),
+                token_endpoint_url=config.issuer.rstrip("/") + "/oauth/token",
+            )
+        except OAuthError as exc:
+            return oauth_error(exc.error, exc.description, exc.status)
+
+        requested_scope = form.get("scope") or ""
+        if requested_scope:
+            if not scope_is_subset(requested_scope, client.scope):
+                return oauth_error("invalid_scope", "requested scope exceeds client scope")
+            scope = requested_scope
+        else:
+            scope = client.scope
+
+        try:
+            resource = validate_resource(form.get("resource"))
+        except OAuthError as exc:
+            return oauth_error(exc.error, exc.description, exc.status)
+
+        token_response = await TokenService(storage, config, keyset).issue(
+            client,
+            user_id,
+            scope,
+            with_refresh=False,
+            cnf=cnf,
+            resource=resource,
+        )
+        request.app.state.metrics.oauth_token_issued_total.inc()
+        emit_event(
+            event_bus,
+            "token_created",
+            user_id=user_id,
+            client_id=client.client_id,
+            metadata={"scope": scope, "has_refresh_token": "false"},
+        )
+        response = ORJSONResponse(token_response.model_dump(exclude_none=True))
         response.headers["Cache-Control"] = "no-store"
         return _with_dpop_nonce(
             response, client, dpop_validated, request.app.state.dpop_nonce_issuer

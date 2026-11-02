@@ -50,6 +50,7 @@ from oauth2_server.models import (
     DenylistEntry,
     DeviceAuthorization,
     Token,
+    TrustedIssuer,
     User,
 )
 from oauth2_server.storage.paging import ListQuery, whitelist_col
@@ -152,6 +153,7 @@ class MongoStorage:
         self.authorization_codes = self._db["authorization_codes"]
         self.device_authorizations = self._db["device_authorizations"]
         self.denylist = self._db["denylist"]
+        self.trusted_issuers = self._db["trusted_issuers"]
         self.audit_log = self._db["audit_log"]
 
     async def _ensure_indexes(self) -> None:
@@ -173,6 +175,7 @@ class MongoStorage:
         await self.device_authorizations.create_index("user_code", unique=True)
         await self.device_authorizations.create_index("client_id")
         await self.denylist.create_index([("kind", 1), ("value", 1)], unique=True)
+        await self.trusted_issuers.create_index("issuer", unique=True)
 
     async def _normalize_legacy_timestamps(self) -> None:
         """Idempotent: rewrites any BSON-Date-typed datetime field back to
@@ -525,6 +528,20 @@ class MongoStorage:
             _from_doc(DeviceAuthorization, doc) async for doc in self.device_authorizations.find({})
         ]
         return _sort_and_page(items, q, _DEVICE_AUTH_SORT_COLS)
+
+    # --- Trusted issuers (RFC 7523 §2.1) ---
+
+    async def save_trusted_issuer(self, issuer: TrustedIssuer) -> None:
+        # Upsert on `issuer`, keeping the original id/created_at (SqlStorage parity).
+        existing = await self.trusted_issuers.find_one({"issuer": issuer.issuer})
+        doc = _to_doc(issuer)
+        if existing is not None:
+            doc["id"] = existing["id"]
+            doc["created_at"] = existing["created_at"]
+        await self.trusted_issuers.replace_one({"issuer": issuer.issuer}, doc, upsert=True)
+
+    async def get_trusted_issuer(self, issuer: str) -> TrustedIssuer | None:
+        return _from_doc(TrustedIssuer, await self.trusted_issuers.find_one({"issuer": issuer}))
 
     # --- Denylist ---
 
