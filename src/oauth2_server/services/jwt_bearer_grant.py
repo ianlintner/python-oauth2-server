@@ -53,6 +53,17 @@ _IAT_SKEW_SECS = 60
 _REQUIRED = ["iss", "sub", "aud", "exp", "iat", "jti"]
 
 
+def _is_id_jag_typ(typ: object) -> bool:
+    """RFC 7515 §4.1.9: `typ` is a case-insensitive media type and the
+    `application/` prefix is optional."""
+    if not isinstance(typ, str):
+        return False
+    t = typ.strip().lower()
+    if t.startswith("application/"):
+        t = t[len("application/") :]
+    return t == _ID_JAG_TYP
+
+
 def _grant_error(description: str) -> OAuthError:
     return OAuthError("invalid_grant", description)
 
@@ -74,6 +85,16 @@ def _unverified_header_and_iss(assertion: str) -> tuple[dict, str]:
     return header, iss
 
 
+def _may_verify(jwk: dict) -> bool:
+    """RFC 7517 §4.2/§4.3: a key marked `use` other than `sig`, or whose
+    `key_ops` lacks `verify`, must not verify signatures."""
+    use = jwk.get("use")
+    if use is not None and use != "sig":
+        return False
+    ops = jwk.get("key_ops")
+    return ops is None or (isinstance(ops, list) and "verify" in ops)
+
+
 def _select_key(jwks: dict, header: dict):
     keys = jwks.get("keys") if isinstance(jwks, dict) else None
     if not isinstance(keys, list):
@@ -86,9 +107,18 @@ def _select_key(jwks: dict, header: dict):
         if match is None:
             raise _grant_error("no key with the assertion's kid in the issuer JWKS")
     else:
-        match = next((k for k in keys if isinstance(k, dict) and k.get("kty") == wanted_kty), None)
+        match = next(
+            (
+                k
+                for k in keys
+                if isinstance(k, dict) and k.get("kty") == wanted_kty and _may_verify(k)
+            ),
+            None,
+        )
         if match is None:
             raise _grant_error("no usable key in the trusted issuer's JWKS")
+    if not _may_verify(match):
+        raise _grant_error("issuer JWKS key is not usable for signature verification")
     if match.get("kty") != wanted_kty:
         raise _grant_error("issuer JWKS key type does not match the assertion algorithm")
     try:
@@ -268,7 +298,7 @@ async def redeem_jwt_bearer_assertion(
     if not trusted.allows_client(client.client_id):
         raise _grant_error("client is not allowed to use this trusted issuer")
 
-    if header.get("typ") == _ID_JAG_TYP:
+    if _is_id_jag_typ(header.get("typ")):
         raise _grant_error("ID-JAG assertions are not accepted by this authorization server")
 
     claims = await verify_assertion(

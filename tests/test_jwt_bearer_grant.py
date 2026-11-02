@@ -407,3 +407,72 @@ async def test_replay_guard_at_capacity_fails_closed_not_open(client_app):
     _assert_invalid_grant(await _redeem(client_app, _assertion(key)))
     # and the first remains a replay
     _assert_invalid_grant(await _redeem(client_app, first))
+
+
+@pytest.mark.parametrize(
+    "typ",
+    [
+        "oauth-id-jag+jwt",
+        "OAUTH-ID-JAG+JWT",
+        "Oauth-Id-Jag+Jwt",
+        "application/oauth-id-jag+jwt",
+        "Application/OAuth-ID-JAG+JWT",
+    ],
+)
+async def test_id_jag_typ_rejected_case_insensitively(client_app, typ):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks)
+    now = int(time.time())
+    claims = {
+        "iss": EXT_ISS,
+        "sub": "u1",
+        "aud": AUD,
+        "jti": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + 60,
+    }
+    tok = jwt.encode(claims, key, algorithm="RS256", headers={"kid": "client-key-1", "typ": typ})
+    _assert_invalid_grant(await _redeem(client_app, tok))
+
+
+async def test_plain_jwt_typ_still_accepted(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks)
+    now = int(time.time())
+    claims = {
+        "iss": EXT_ISS,
+        "sub": "u1",
+        "aud": AUD,
+        "jti": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + 60,
+    }
+    tok = jwt.encode(claims, key, algorithm="RS256", headers={"kid": "client-key-1", "typ": "JWT"})
+    assert (await _redeem(client_app, tok)).status_code == 200
+
+
+async def test_kidless_selection_skips_enc_key(client_app):
+    key, jwks = generate_rsa_keypair()
+    sig = jwks["keys"][0]
+    enc = dict(sig, kid="enc-1", use="enc")
+    await _setup(client_app, jwks={"keys": [enc, sig]})
+    now = int(time.time())
+    claims = {
+        "iss": EXT_ISS,
+        "sub": "u1",
+        "aud": AUD,
+        "jti": uuid.uuid4().hex,
+        "iat": now,
+        "exp": now + 60,
+    }
+    tok = jwt.encode(claims, key, algorithm="RS256")  # no kid
+    assert (await _redeem(client_app, tok)).status_code == 200
+
+
+@pytest.mark.parametrize("extra", [{"use": "enc"}, {"key_ops": ["encrypt"]}])
+async def test_non_signature_key_rejected_even_by_kid(client_app, extra):
+    key, jwks = generate_rsa_keypair()
+    jwks["keys"][0].pop("use")
+    jwks["keys"][0].update(extra)
+    await _setup(client_app, jwks=jwks)
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key)))
