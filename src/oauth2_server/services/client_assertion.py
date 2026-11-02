@@ -52,6 +52,10 @@ _ALG_FOR_METHOD = {"client_secret_jwt": "HS256", "private_key_jwt": "RS256"}
 _REQUIRED_CLAIMS = ["exp", "sub", "iss", "aud"]
 
 
+class JtiGuardFull(Exception):
+    """Raised by `JtiReplayGuard.observe` when every slot holds a live entry."""
+
+
 class JtiReplayGuard:
     """In-memory `(client_id, jti)` -> monotonic-expiry map guarding against
     client-assertion replay (RFC 7523 §3 / RFC 9700 §2.5).
@@ -82,10 +86,11 @@ class JtiReplayGuard:
         if key in self._entries:
             return False
 
-        # Hard cap — drop an arbitrary entry before inserting when full. The
-        # sweep above normally keeps the map well under the cap.
+        # Hard cap — fail CLOSED. Evicting a still-live entry would let its
+        # assertion be replayed within the validity window, so refuse the new
+        # assertion instead (expired entries were already reclaimed above).
         if len(self._entries) >= self._max_entries:
-            del self._entries[next(iter(self._entries))]
+            raise JtiGuardFull("jti replay guard is at capacity")
 
         self._entries[key] = now + ttl
         return True
@@ -237,7 +242,12 @@ def _enforce_jti_replay(client_id: str, claims: dict, guard: JtiReplayGuard) -> 
         raise OAuthError("invalid_client", "client_assertion missing exp claim")
 
     ttl = max(float(exp) - time.time(), 0.0)
-    if not guard.observe(client_id, jti, ttl):
+    try:
+        fresh = guard.observe(client_id, jti, ttl)
+    except JtiGuardFull as exc:
+        logger.error("RFC 7523 §3: jti replay guard at capacity; refusing client_assertion")
+        raise OAuthError("invalid_client", "client_assertion replay guard unavailable") from exc
+    if not fresh:
         logger.warning(
             "RFC 7523 §3: rejected replayed client_assertion jti (client_id=%s)", client_id
         )

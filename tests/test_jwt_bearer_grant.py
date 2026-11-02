@@ -393,3 +393,17 @@ async def test_key_type_mismatch_rejected(client_app, alg, jwks_alg):
     _, jwks = _alt_key(jwks_alg)
     await _setup(client_app, jwks=jwks)
     _assert_invalid_grant(await _redeem(client_app, _signed(pem, alg)))
+
+
+async def test_replay_guard_at_capacity_fails_closed_not_open(client_app):
+    from oauth2_server.services.client_assertion import JtiReplayGuard
+
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks)
+    client_app.app.state.jti_guard = JtiReplayGuard(max_entries=1)
+    first = _assertion(key)
+    assert (await _redeem(client_app, first)).status_code == 200
+    # a second, different assertion cannot evict the live first entry
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key)))
+    # and the first remains a replay
+    _assert_invalid_grant(await _redeem(client_app, first))

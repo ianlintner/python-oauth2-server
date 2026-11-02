@@ -34,7 +34,11 @@ from jwt.algorithms import ECAlgorithm, RSAAlgorithm, RSAPSSAlgorithm
 from oauth2_server.errors import OAuthError
 from oauth2_server.models import Client, TrustedIssuer, User
 from oauth2_server.security import hash_password_async
-from oauth2_server.services.client_assertion import MAX_JTI_TTL_SECS, JtiReplayGuard
+from oauth2_server.services.client_assertion import (
+    MAX_JTI_TTL_SECS,
+    JtiGuardFull,
+    JtiReplayGuard,
+)
 from oauth2_server.services.jwks_cache import JwksCache
 from oauth2_server.storage.base import Storage
 
@@ -159,7 +163,12 @@ def _enforce_replay(iss: str, claims: dict, guard: JtiReplayGuard) -> None:
     ttl = max(exp - time.time(), 0.0)
     if ttl > MAX_JTI_TTL_SECS:
         raise _grant_error(f"assertion lifetime exceeds the maximum of {MAX_JTI_TTL_SECS} seconds")
-    if not guard.observe(f"jwt-bearer:{iss}", jti, ttl):
+    try:
+        fresh = guard.observe(f"jwt-bearer:{iss}", jti, ttl)
+    except JtiGuardFull as exc:
+        logger.error("RFC 7523 §3: jti replay guard at capacity; refusing jwt-bearer assertion")
+        raise _grant_error("assertion replay guard unavailable") from exc
+    if not fresh:
         logger.warning("RFC 7523 §3: rejected replayed jwt-bearer jti (iss=%s)", iss)
         raise _grant_error("assertion jti has already been used")
 
