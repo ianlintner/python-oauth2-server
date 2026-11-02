@@ -534,3 +534,53 @@ async def test_matching_explicit_jwk_alg_accepted(client_app, alg):
     await _setup(client_app, jwks=jwks)
     resp = await _redeem(client_app, _signed(pem, alg))
     assert resp.status_code == 200, resp.text
+
+
+async def test_duplicate_kid_mixed_key_types_selects_compatible_key(client_app):
+    key, jwks = generate_rsa_keypair()
+    good = jwks["keys"][0]
+    ec = {"kty": "EC", "crv": "P-256", "x": "AAAA", "y": "AAAA", "kid": good["kid"]}
+    await _setup(client_app, jwks={"keys": [ec, good]})
+    assert (await _redeem(client_app, _assertion(key))).status_code == 200
+
+
+async def _denylist(client_app, kind, value):
+    from datetime import UTC, datetime
+
+    from oauth2_server.models import DenylistEntry
+
+    await client_app.storage.add_denylist_entry(
+        DenylistEntry(
+            id=uuid.uuid4().hex,
+            kind=kind,
+            value=value,
+            reason="abuse",
+            created_at=datetime.now(UTC),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "value"), [("username", "user_rfc"), ("email", "user_rfc@example.test")]
+)
+async def test_denylisted_existing_user_rejected(client_app, kind, value):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks)
+    await _denylist(client_app, kind, value)
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key)))
+
+
+async def test_denylisted_email_user_rejected_via_email_mapping(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, subject_mapping="email")
+    await _denylist(client_app, "email", "user_rfc@example.test")
+    tok = _assertion(key, sub="ext-1", email="user_rfc@example.test", email_verified=True)
+    _assert_invalid_grant(await _redeem(client_app, tok))
+
+
+async def test_denylisted_jit_subject_not_provisioned(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, jit_provision=True)
+    await _denylist(client_app, "username", "newbie")
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key, sub="newbie")))
+    assert await client_app.storage.get_user_by_id("newbie") is None

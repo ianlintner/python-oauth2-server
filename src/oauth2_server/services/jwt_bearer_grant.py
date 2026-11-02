@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm, RSAPSSAlgorithm
 
 from oauth2_server.errors import OAuthError
+from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import Client, TrustedIssuer, User
 from oauth2_server.security import hash_password_async
 from oauth2_server.services.client_assertion import (
@@ -109,30 +110,22 @@ def _select_key(jwks: dict, header: dict):
     alg = header["alg"]
     wanted_kty = "EC" if alg == "ES256" else "RSA"
     kid = header.get("kid")
-    if kid is not None:
-        match = next((k for k in keys if isinstance(k, dict) and k.get("kid") == kid), None)
-        if match is None:
-            raise _grant_error("no key with the assertion's kid in the issuer JWKS")
-    else:
-        match = next(
-            (
-                k
-                for k in keys
-                if isinstance(k, dict)
-                and k.get("kty") == wanted_kty
-                and _may_verify(k)
-                and _alg_compatible(k, alg)
-            ),
-            None,
-        )
-        if match is None:
-            raise _grant_error("no usable key in the trusted issuer's JWKS")
-    if not _may_verify(match):
-        raise _grant_error("issuer JWKS key is not usable for signature verification")
-    if not _alg_compatible(match, alg):
-        raise _grant_error("issuer JWKS key is restricted to a different algorithm")
-    if match.get("kty") != wanted_kty:
-        raise _grant_error("issuer JWKS key type does not match the assertion algorithm")
+    # `kid` need not be unique across key types (RFC 7517 §4.5), so filter by
+    # every usability constraint instead of taking the first kid hit.
+    match = next(
+        (
+            k
+            for k in keys
+            if isinstance(k, dict)
+            and (kid is None or k.get("kid") == kid)
+            and k.get("kty") == wanted_kty
+            and _may_verify(k)
+            and _alg_compatible(k, alg)
+        ),
+        None,
+    )
+    if match is None:
+        raise _grant_error("no usable key for the assertion in the trusted issuer's JWKS")
     try:
         algo = {"RS256": RSAAlgorithm, "PS256": RSAPSSAlgorithm, "ES256": ECAlgorithm}[alg]
         key = algo.from_jwk(match)
@@ -215,6 +208,15 @@ def _enforce_replay(iss: str, claims: dict, guard: JtiReplayGuard) -> None:
         raise _grant_error("assertion jti has already been used")
 
 
+async def _reject_if_denylisted(storage: Storage, username: str, email: str | None) -> None:
+    """Honor the same username/email denylist as password login."""
+    for kind, value in (("username", username), ("email", email or "")):
+        reason = await check_subject_denylisted(storage, kind, value)
+        if reason is not None:
+            logger.warning("jwt-bearer blocked: %s is denylisted (reason=%s)", kind, reason)
+            raise _grant_error("subject is blocked")
+
+
 async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dict) -> str:
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:
@@ -247,6 +249,7 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
     if existing is not None:
         if not existing.enabled:
             raise _grant_error("subject user is disabled")
+        await _reject_if_denylisted(storage, existing.username, existing.email)
         return existing.id
     if is_email_mapping:
         raise _grant_error("unknown subject")
@@ -255,6 +258,7 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
             "assertion subject has no local user and the issuer does not allow provisioning"
         )
 
+    await _reject_if_denylisted(storage, sub, email if claims.get("email_verified") is True else "")
     now = datetime.now(UTC)
     user = User(
         id=sub,
