@@ -285,6 +285,9 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
         except Exception:
             raced = None
         if raced is not None and raced.enabled:
+            # The winning row may carry a different username/email than we
+            # tried to insert; apply the same denylist guard to it.
+            await _reject_if_denylisted(storage, raced.username, raced.email)
             return raced.id
         raise _grant_error(
             "subject user is disabled"

@@ -584,3 +584,49 @@ async def test_denylisted_jit_subject_not_provisioned(client_app):
     await _denylist(client_app, "username", "newbie")
     _assert_invalid_grant(await _redeem(client_app, _assertion(key, sub="newbie")))
     assert await client_app.storage.get_user_by_id("newbie") is None
+
+
+async def _race_winner(client_app, monkeypatch, *, username, email):
+    """Make JIT save_user lose a race to a row with the given username/email."""
+    from datetime import UTC, datetime
+
+    from oauth2_server.models import User
+
+    storage = client_app.storage
+    real_save = storage.save_user
+
+    async def racing_save(user):
+        now = datetime.now(UTC)
+        await real_save(
+            User(
+                id=user.id,
+                username=username,
+                password_hash=user.password_hash,
+                email=email,
+                enabled=True,
+                role="user",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        raise RuntimeError("unique violation")
+
+    monkeypatch.setattr(storage, "save_user", racing_save)
+
+
+@pytest.mark.parametrize(
+    ("kind", "value"), [("username", "winner_name"), ("email", "winner@example.test")]
+)
+async def test_jit_race_winner_denylisted_rejected(client_app, monkeypatch, kind, value):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, jit_provision=True)
+    await _denylist(client_app, kind, value)
+    await _race_winner(client_app, monkeypatch, username="winner_name", email="winner@example.test")
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key, sub="racer")))
+
+
+async def test_jit_race_winner_allowed_succeeds(client_app, monkeypatch):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, jit_provision=True)
+    await _race_winner(client_app, monkeypatch, username="winner_name", email="winner@example.test")
+    assert (await _redeem(client_app, _assertion(key, sub="racer"))).status_code == 200
