@@ -21,6 +21,7 @@ client-assertion `jti`.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import UTC, datetime
 
@@ -123,7 +124,9 @@ async def verify_assertion(
             algorithms=[header["alg"]],
             audience=audiences,
             issuer=trusted.issuer,
-            options={"require": _REQUIRED},
+            # PyJWT's iat check has zero leeway; the manual skew check in
+            # `redeem_jwt_bearer_assertion` is the sole iat authority.
+            options={"require": _REQUIRED, "verify_iat": False},
         )
     except jwt.PyJWTError as exc:
         raise _grant_error(f"assertion validation failed: {exc}") from exc
@@ -136,7 +139,13 @@ def _enforce_replay(iss: str, claims: dict, guard: JtiReplayGuard) -> None:
     exp = claims.get("exp")
     if not isinstance(exp, (int, float)) or isinstance(exp, bool):
         raise _grant_error("assertion missing exp claim")
-    ttl = min(max(float(exp) - time.time(), 0.0), float(MAX_JTI_TTL_SECS))
+    if not math.isfinite(exp):
+        raise _grant_error("assertion exp claim is not a finite number")
+    # The replay guard retains a jti for at most MAX_JTI_TTL_SECS; a longer-lived
+    # assertion could be redeemed again while still valid, so refuse it.
+    ttl = max(float(exp) - time.time(), 0.0)
+    if ttl > MAX_JTI_TTL_SECS:
+        raise _grant_error(f"assertion lifetime exceeds the maximum of {MAX_JTI_TTL_SECS} seconds")
     if not guard.observe(f"jwt-bearer:{iss}", jti, ttl):
         logger.warning("RFC 7523 §3: rejected replayed jwt-bearer jti (iss=%s)", iss)
         raise _grant_error("assertion jti has already been used")
@@ -146,7 +155,8 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:
         raise _grant_error("assertion sub claim is not a string")
-    email = claims.get("email") if isinstance(claims.get("email"), str) else ""
+    raw_email = claims.get("email")
+    email = raw_email.strip() if isinstance(raw_email, str) else ""
 
     is_email_mapping = trusted.subject_mapping == "email"
     if is_email_mapping:
@@ -154,7 +164,14 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
             raise _grant_error(
                 "trusted issuer maps subjects by email but the assertion has no email claim"
             )
-        matches = await storage.get_users_by_email(email)
+        folded = email.casefold()
+        matches = [
+            u
+            for u in await storage.get_users_by_email(email)
+            if (u.email or "").strip().casefold() == folded
+        ]
+        if len(matches) > 1:
+            raise _grant_error("assertion email matches more than one local account")
         existing = matches[0] if matches else None
     else:
         existing = await storage.get_user_by_id(sub)
@@ -234,8 +251,8 @@ async def redeem_jwt_bearer_assertion(
     )
 
     iat = claims.get("iat")
-    if not isinstance(iat, (int, float)) or isinstance(iat, bool):
-        raise _grant_error("assertion iat claim is not a number")
+    if not isinstance(iat, (int, float)) or isinstance(iat, bool) or not math.isfinite(iat):
+        raise _grant_error("assertion iat claim is not a finite number")
     if iat > time.time() + _IAT_SKEW_SECS:
         raise _grant_error("assertion iat is in the future")
 

@@ -233,3 +233,46 @@ async def test_build_client_app_still_importable():
     # guards the shared fixture import used above
     async with build_client_app() as c:
         assert c.app is not None
+
+
+@pytest.mark.parametrize("raw", ["[123]", "not json", '{"a": 1}', '["ok", 5]'])
+async def test_malformed_client_allow_list_denies(client_app, raw):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, allowed_client_ids=raw)
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key)))
+
+
+async def test_assertion_outliving_replay_window_rejected(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks)
+    now = int(time.time())
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key, exp=now + 3600)))
+
+
+async def test_small_future_iat_within_skew_accepted(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks)
+    now = int(time.time())
+    resp = await _redeem(client_app, _assertion(key, iat=now + 5))
+    assert resp.status_code == 200, resp.text
+
+
+async def test_nonfinite_iat_rejected(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks)
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key, iat=float("nan"))))
+
+
+async def test_blank_email_claim_rejected(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, subject_mapping="email")
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key, email="   ")))
+
+
+async def test_ambiguous_email_rejected(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, subject_mapping="email")
+    first = await client_app.storage.get_user_by_id("u1")
+    dup = first.model_copy(update={"id": "u1-dup", "username": "u1-dup"})
+    await client_app.storage.save_user(dup)
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key, email="user_rfc@example.test")))
