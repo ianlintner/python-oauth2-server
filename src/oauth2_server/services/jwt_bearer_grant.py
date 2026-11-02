@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import math
+import secrets
 import time
 from datetime import UTC, datetime
 
@@ -32,6 +33,7 @@ from jwt.algorithms import ECAlgorithm, RSAAlgorithm, RSAPSSAlgorithm
 
 from oauth2_server.errors import OAuthError
 from oauth2_server.models import Client, TrustedIssuer, User
+from oauth2_server.security import hash_password_async
 from oauth2_server.services.client_assertion import MAX_JTI_TTL_SECS, JtiReplayGuard
 from oauth2_server.services.jwks_cache import JwksCache
 from oauth2_server.storage.base import Storage
@@ -164,6 +166,10 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
             raise _grant_error(
                 "trusted issuer maps subjects by email but the assertion has no email claim"
             )
+        # An unverified email is attacker-controllable at the IdP; matching it
+        # to a local account would be account takeover.
+        if claims.get("email_verified") is not True:
+            raise _grant_error("assertion email is not verified (email_verified must be true)")
         folded = email.casefold()
         matches = [
             u
@@ -191,7 +197,9 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
     user = User(
         id=sub,
         username=sub,
-        password_hash="",
+        # Valid but unguessable: the random secret is discarded, so the
+        # account cannot be used for password login.
+        password_hash=await hash_password_async(secrets.token_urlsafe(32)),
         email=email,
         enabled=True,
         role="user",

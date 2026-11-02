@@ -177,7 +177,10 @@ async def test_jit_provision_creates_user(client_app):
 async def test_email_mapping_resolves_existing_user(client_app):
     key, jwks = generate_rsa_keypair()
     await _setup(client_app, jwks=jwks, subject_mapping="email")
-    resp = await _redeem(client_app, _assertion(key, sub="ext-123", email="user_rfc@example.test"))
+    resp = await _redeem(
+        client_app,
+        _assertion(key, sub="ext-123", email="user_rfc@example.test", email_verified=True),
+    )
     assert resp.status_code == 200, resp.text
     row = await client_app.storage.get_token_by_access_token(resp.json()["access_token"])
     assert row is not None and row.user_id == "u1"
@@ -266,7 +269,9 @@ async def test_nonfinite_iat_rejected(client_app):
 async def test_blank_email_claim_rejected(client_app):
     key, jwks = generate_rsa_keypair()
     await _setup(client_app, jwks=jwks, subject_mapping="email")
-    _assert_invalid_grant(await _redeem(client_app, _assertion(key, email="   ")))
+    _assert_invalid_grant(
+        await _redeem(client_app, _assertion(key, email="   ", email_verified=True))
+    )
 
 
 async def test_ambiguous_email_rejected(client_app):
@@ -275,4 +280,48 @@ async def test_ambiguous_email_rejected(client_app):
     first = await client_app.storage.get_user_by_id("u1")
     dup = first.model_copy(update={"id": "u1-dup", "username": "u1-dup"})
     await client_app.storage.save_user(dup)
-    _assert_invalid_grant(await _redeem(client_app, _assertion(key, email="user_rfc@example.test")))
+    _assert_invalid_grant(
+        await _redeem(
+            client_app, _assertion(key, email="user_rfc@example.test", email_verified=True)
+        )
+    )
+
+
+@pytest.mark.parametrize("verified", [None, False, "true", 1])
+async def test_email_mapping_requires_email_verified_true(client_app, verified):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, subject_mapping="email")
+    claims = {"email": "user_rfc@example.test", "email_verified": verified}
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key, **claims)))
+
+
+@pytest.mark.parametrize(
+    ("claim", "value"),
+    [("exp", 10**30), ("exp", -(10**30)), ("iat", 10**30)],
+)
+async def test_extreme_timestamps_are_invalid_grant(client_app, claim, value):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks)
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key, **{claim: value})))
+
+
+async def test_email_mapping_never_provisions_unknown_user(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, subject_mapping="email", jit_provision=True)
+    resp = await _redeem(
+        client_app, _assertion(key, sub="new-sub", email="nobody@example.test", email_verified=True)
+    )
+    _assert_invalid_grant(resp)
+    assert await client_app.storage.get_user_by_id("new-sub") is None
+
+
+async def test_jit_user_gets_valid_unguessable_password_hash(client_app):
+    from oauth2_server.security import verify_password
+
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, jit_provision=True)
+    resp = await _redeem(client_app, _assertion(key, sub="jit-pw"))
+    assert resp.status_code == 200, resp.text
+    user = await client_app.storage.get_user_by_id("jit-pw")
+    assert user.password_hash.startswith("$argon2")
+    assert verify_password("", user.password_hash) is False
