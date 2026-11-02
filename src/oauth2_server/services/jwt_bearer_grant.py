@@ -134,18 +134,29 @@ async def verify_assertion(
         raise _grant_error(f"assertion validation failed: {exc}") from exc
 
 
+def _numeric_date(claims: dict, name: str) -> float:
+    """A NumericDate as a finite float; anything else (including integers too
+    large for a float) is `invalid_grant`, never an unhandled exception."""
+    value = claims.get(name)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise _grant_error(f"assertion {name} claim is not a number")
+    try:
+        out = float(value)
+    except OverflowError:
+        raise _grant_error(f"assertion {name} claim is out of range") from None
+    if not math.isfinite(out):
+        raise _grant_error(f"assertion {name} claim is not a finite number")
+    return out
+
+
 def _enforce_replay(iss: str, claims: dict, guard: JtiReplayGuard) -> None:
     jti = claims.get("jti")
     if not isinstance(jti, str) or not jti:
         raise _grant_error("assertion missing required jti claim (RFC 7523 §3)")
-    exp = claims.get("exp")
-    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
-        raise _grant_error("assertion missing exp claim")
-    if not math.isfinite(exp):
-        raise _grant_error("assertion exp claim is not a finite number")
+    exp = _numeric_date(claims, "exp")
     # The replay guard retains a jti for at most MAX_JTI_TTL_SECS; a longer-lived
     # assertion could be redeemed again while still valid, so refuse it.
-    ttl = max(float(exp) - time.time(), 0.0)
+    ttl = max(exp - time.time(), 0.0)
     if ttl > MAX_JTI_TTL_SECS:
         raise _grant_error(f"assertion lifetime exceeds the maximum of {MAX_JTI_TTL_SECS} seconds")
     if not guard.observe(f"jwt-bearer:{iss}", jti, ttl):
@@ -258,9 +269,7 @@ async def redeem_jwt_bearer_assertion(
         jwks_cache=jwks_cache,
     )
 
-    iat = claims.get("iat")
-    if not isinstance(iat, (int, float)) or isinstance(iat, bool) or not math.isfinite(iat):
-        raise _grant_error("assertion iat claim is not a finite number")
+    iat = _numeric_date(claims, "iat")
     if iat > time.time() + _IAT_SKEW_SECS:
         raise _grant_error("assertion iat is in the future")
 

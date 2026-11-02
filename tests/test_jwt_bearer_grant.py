@@ -297,7 +297,7 @@ async def test_email_mapping_requires_email_verified_true(client_app, verified):
 
 @pytest.mark.parametrize(
     ("claim", "value"),
-    [("exp", 10**30), ("exp", -(10**30)), ("iat", 10**30)],
+    [("exp", 10**30), ("exp", -(10**30)), ("iat", 10**30), ("exp", 10**400), ("iat", 10**400)],
 )
 async def test_extreme_timestamps_are_invalid_grant(client_app, claim, value):
     key, jwks = generate_rsa_keypair()
