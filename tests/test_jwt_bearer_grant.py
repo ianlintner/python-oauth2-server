@@ -325,3 +325,71 @@ async def test_jit_user_gets_valid_unguessable_password_hash(client_app):
     user = await client_app.storage.get_user_by_id("jit-pw")
     assert user.password_hash.startswith("$argon2")
     assert verify_password("", user.password_hash) is False
+
+
+@pytest.mark.parametrize("verified", [None, False, "true", 1])
+async def test_jit_does_not_persist_unverified_email(client_app, verified):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, jit_provision=True)
+    extra = {} if verified is None else {"email_verified": verified}
+    resp = await _redeem(
+        client_app, _assertion(key, sub="jit-unv", email="victim@example.test", **extra)
+    )
+    assert resp.status_code == 200, resp.text
+    user = await client_app.storage.get_user_by_id("jit-unv")
+    assert not user.email
+
+
+async def test_jit_persists_verified_email(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, jit_provision=True)
+    resp = await _redeem(
+        client_app,
+        _assertion(key, sub="jit-ver", email="ok@example.test", email_verified=True),
+    )
+    assert resp.status_code == 200, resp.text
+    assert (await client_app.storage.get_user_by_id("jit-ver")).email == "ok@example.test"
+
+
+def _alt_key(alg: str):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+    if alg == "ES256":
+        priv = ec.generate_private_key(ec.SECP256R1())
+        jwk = jwt.algorithms.ECAlgorithm.to_jwk(priv.public_key(), as_dict=True)
+    else:
+        priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        jwk = jwt.algorithms.RSAAlgorithm.to_jwk(priv.public_key(), as_dict=True)
+    jwk.update({"kid": "client-key-1", "use": "sig"})
+    pem = priv.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    return pem, {"keys": [jwk]}
+
+
+def _signed(pem, alg):
+    now = int(time.time())
+    claims = {
+        "iss": EXT_ISS, "sub": "u1", "aud": AUD, "jti": uuid.uuid4().hex,
+        "iat": now, "exp": now + 60,
+    }  # fmt: skip
+    return jwt.encode(claims, pem, algorithm=alg, headers={"kid": "client-key-1"})
+
+
+@pytest.mark.parametrize("alg", ["PS256", "ES256"])
+async def test_ps256_es256_assertions_redeem(client_app, alg):
+    pem, jwks = _alt_key(alg)
+    await _setup(client_app, jwks=jwks)
+    resp = await _redeem(client_app, _signed(pem, alg))
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.parametrize("alg,jwks_alg", [("ES256", "RS256"), ("RS256", "ES256")])
+async def test_key_type_mismatch_rejected(client_app, alg, jwks_alg):
+    pem, _ = _alt_key(alg)
+    _, jwks = _alt_key(jwks_alg)
+    await _setup(client_app, jwks=jwks)
+    _assert_invalid_grant(await _redeem(client_app, _signed(pem, alg)))

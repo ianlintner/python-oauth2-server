@@ -211,7 +211,9 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
         # Valid but unguessable: the random secret is discarded, so the
         # account cannot be used for password login.
         password_hash=await hash_password_async(secrets.token_urlsafe(32)),
-        email=email,
+        # Persist only a verified address: an unverified IdP claim stored here
+        # could later be matched by verified-email/social account linking.
+        email=email if claims.get("email_verified") is True else "",
         enabled=True,
         role="user",
         created_at=now,

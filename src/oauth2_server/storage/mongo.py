@@ -533,12 +533,15 @@ class MongoStorage:
 
     async def save_trusted_issuer(self, issuer: TrustedIssuer) -> None:
         # Upsert on `issuer`, keeping the original id/created_at (SqlStorage parity).
-        existing = await self.trusted_issuers.find_one({"issuer": issuer.issuer})
+        # Atomic: id/created_at only on insert ($setOnInsert), mutable fields via
+        # $set, so concurrent first saves cannot overwrite identity fields.
         doc = _to_doc(issuer)
-        if existing is not None:
-            doc["id"] = existing["id"]
-            doc["created_at"] = existing["created_at"]
-        await self.trusted_issuers.replace_one({"issuer": issuer.issuer}, doc, upsert=True)
+        doc.pop("_id", None)
+        insert_only = {k: doc.pop(k) for k in ("id", "created_at") if k in doc}
+        update: dict = {"$set": doc}
+        if insert_only:
+            update["$setOnInsert"] = insert_only
+        await self.trusted_issuers.update_one({"issuer": issuer.issuer}, update, upsert=True)
 
     async def get_trusted_issuer(self, issuer: str) -> TrustedIssuer | None:
         return _from_doc(TrustedIssuer, await self.trusted_issuers.find_one({"issuer": issuer}))
