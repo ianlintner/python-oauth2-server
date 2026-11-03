@@ -339,6 +339,44 @@ class ClientRegistration(BaseModel):
     post_logout_redirect_uris: list[str] = []
 
 
+class TrustedIssuer(BaseModel):
+    """External issuer whose signed JWTs may be exchanged via the RFC 7523 §2.1
+    jwt-bearer grant (port of crates/oauth2-core TrustedIssuer). The two list
+    fields are JSON arrays stored as TEXT, like `Client.grant_types`."""
+
+    id: str
+    issuer: str
+    jwks_uri: str
+    allowed_audiences: str = "[]"
+    subject_mapping: str = "sub"
+    jit_provision: bool = False
+    allowed_client_ids: str = "[]"
+    enabled: bool = True
+    created_at: MongoDateTime = Field(default_factory=_now)
+    updated_at: MongoDateTime = Field(default_factory=_now)
+
+    @staticmethod
+    def _list(raw: str) -> list[str]:
+        try:
+            v = json.loads(raw or "[]")
+        except ValueError:
+            return []
+        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+    def allowed_audiences_list(self) -> list[str]:
+        return self._list(self.allowed_audiences)
+
+    def allows_client(self, client_id: str) -> bool:
+        """Empty `allowed_client_ids` means every client may use the issuer."""
+        try:
+            allowed = json.loads(self.allowed_client_ids or "[]")
+        except ValueError:
+            return False  # malformed allow-list fails closed
+        if not isinstance(allowed, list) or not all(isinstance(x, str) for x in allowed):
+            return False
+        return not allowed or client_id in allowed
+
+
 class DenylistEntry(BaseModel):
     """Subject denylist row — keyed on (kind, value), kind is one of
     'ip' | 'user_id' | 'username' | 'email' | 'client_id'."""

@@ -485,3 +485,20 @@ async def test_init_is_idempotent(storage):
     await storage.init()
     await storage.save_client(_client())
     assert await storage.get_client("client1") is not None
+
+
+async def test_save_trusted_issuer_concurrent_first_save_keeps_identity(storage):
+    import asyncio
+
+    from oauth2_server.models import TrustedIssuer
+
+    def mk(i):
+        return TrustedIssuer(id=f"id-{i}", issuer="https://idp.example", jwks_uri=f"https://j/{i}")
+
+    await asyncio.gather(*(storage.save_trusted_issuer(mk(i)) for i in range(8)))
+    rows = [d async for d in storage.trusted_issuers.find({"issuer": "https://idp.example"})]
+    assert len(rows) == 1
+    first = (await storage.get_trusted_issuer("https://idp.example")).id
+    await storage.save_trusted_issuer(mk(99))
+    got = await storage.get_trusted_issuer("https://idp.example")
+    assert got.id == first and got.jwks_uri == "https://j/99"

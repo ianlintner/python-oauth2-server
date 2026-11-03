@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from oauth2_server.services.client_assertion import (
     JWT_BEARER_ASSERTION_TYPE,
+    JtiGuardFull,
     JtiReplayGuard,
 )
 from oauth2_server.services.jwks_cache import (
@@ -502,11 +503,25 @@ def test_jti_guard_ttl_clamped_to_five_minutes(monkeypatch):
     assert guard.observe("c1", "jti-long", 86_400) is True
 
 
-def test_jti_guard_bounded_by_max_entries():
-    guard = JtiReplayGuard(max_entries=4)
-    for i in range(8):
-        assert guard.observe("c", f"j-{i}", 60) is True
-    assert len(guard._entries) <= 4
+def test_jti_guard_fails_closed_at_capacity_without_evicting_live_entries():
+    guard = JtiReplayGuard(max_entries=2)
+    assert guard.observe("c", "j-0", 60) is True
+    assert guard.observe("c", "j-1", 60) is True
+    with pytest.raises(JtiGuardFull):
+        guard.observe("c", "j-2", 60)
+    assert len(guard._entries) == 2
+    # live entries were not evicted: both are still replays
+    assert guard.observe("c", "j-0", 60) is False
+    assert guard.observe("c", "j-1", 60) is False
+
+
+def test_jti_guard_reclaims_expired_entries_at_capacity(monkeypatch):
+    guard = JtiReplayGuard(max_entries=1)
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["now"])
+    assert guard.observe("c", "a", 10) is True
+    clock["now"] += 11
+    assert guard.observe("c", "b", 10) is True
 
 
 # --------------------------------------------------------------------------

@@ -139,6 +139,7 @@ def _discovery_body(
             "refresh_token",
             "urn:ietf:params:oauth:grant-type:device_code",
             "urn:ietf:params:oauth:grant-type:token-exchange",
+            "urn:ietf:params:oauth:grant-type:jwt-bearer",
         ],
         "response_types_supported": ["code", "code id_token"],
         "response_modes_supported": ["query", "form_post", "fragment"],

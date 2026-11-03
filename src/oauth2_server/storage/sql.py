@@ -19,6 +19,7 @@ from oauth2_server.models import (
     DenylistEntry,
     DeviceAuthorization,
     Token,
+    TrustedIssuer,
     User,
 )
 from oauth2_server.storage.migrations import run_migrations
@@ -29,6 +30,7 @@ _USER_COLS = ", ".join(User.model_fields.keys())
 _TOKEN_COLS = ", ".join(Token.model_fields.keys())
 _AUTH_CODE_COLS = ", ".join(AuthorizationCode.model_fields.keys())
 _DEVICE_AUTH_COLS = ", ".join(DeviceAuthorization.model_fields.keys())
+_TRUSTED_ISSUER_COLS = ", ".join(TrustedIssuer.model_fields.keys())
 _DENYLIST_COLS = ", ".join(DenylistEntry.model_fields.keys())
 _AUDIT_LOG_COLS = ", ".join(AuditLogEntry.model_fields.keys())
 
@@ -699,6 +701,37 @@ class SqlStorage:
                 .all()
             )
         return [DeviceAuthorization(**r) for r in rows], total
+
+    # --- Trusted issuers (RFC 7523 §2.1) ---
+
+    async def save_trusted_issuer(self, issuer: TrustedIssuer) -> None:
+        stmt = (
+            _insert_stmt("trusted_issuers", _TRUSTED_ISSUER_COLS)
+            + " ON CONFLICT(issuer) DO UPDATE SET jwks_uri = excluded.jwks_uri, "
+            "allowed_audiences = excluded.allowed_audiences, "
+            "subject_mapping = excluded.subject_mapping, "
+            "jit_provision = excluded.jit_provision, "
+            "allowed_client_ids = excluded.allowed_client_ids, "
+            "enabled = excluded.enabled, updated_at = excluded.updated_at"
+        )
+        async with self._engine.begin() as conn:
+            await conn.execute(text(stmt), self._dump(issuer))
+
+    async def get_trusted_issuer(self, issuer: str) -> TrustedIssuer | None:
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_TRUSTED_ISSUER_COLS} FROM trusted_issuers WHERE issuer = :i"
+                        ),
+                        {"i": issuer},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return TrustedIssuer(**row) if row else None
 
     # --- Denylist ---
 

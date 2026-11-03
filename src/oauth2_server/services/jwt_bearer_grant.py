@@ -1,0 +1,337 @@
+"""RFC 7523 §2.1 JWT authorization grant
+(`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`).
+
+Port of `crates/oauth2-actix/src/handlers/jwt_bearer.rs` (trusted-issuer
+registry model). An external IdP signs an assertion about a subject; the
+authenticated confidential client presents it as `assertion`. The `iss` must
+name an enabled `TrustedIssuer`, whose `jwks_uri` supplies the verification
+key. EVERY failure is `invalid_grant` (RFC 7523 §3.1) — including a JWKS fetch
+failure, which the shared `JwksCache` reports as `invalid_client` and is
+remapped here.
+
+Out of scope (separate cards): ID-JAG (`typ: oauth-id-jag+jwt` assertions are
+refused, as Rust does with `id_jag_enabled=false`), CIMD clients, trusted-
+issuer admin APIs.
+
+The assertion's `jti` replay is tracked in the shared in-memory
+`JtiReplayGuard`, namespaced `jwt-bearer:<iss>` so it cannot collide with a
+client-assertion `jti`.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import secrets
+import time
+from datetime import UTC, datetime
+
+import jwt
+from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+from jwt.algorithms import ECAlgorithm, RSAAlgorithm, RSAPSSAlgorithm
+
+from oauth2_server.errors import OAuthError
+from oauth2_server.middleware import check_subject_denylisted
+from oauth2_server.models import Client, TrustedIssuer, User
+from oauth2_server.security import hash_password_async
+from oauth2_server.services.client_assertion import (
+    MAX_JTI_TTL_SECS,
+    JtiGuardFull,
+    JtiReplayGuard,
+)
+from oauth2_server.services.jwks_cache import JwksCache
+from oauth2_server.storage.base import Storage
+
+logger = logging.getLogger(__name__)
+
+JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+
+# Asymmetric only: the verification key comes from the issuer's public JWKS.
+ALLOWED_ALGS = ("RS256", "ES256", "PS256")
+_ID_JAG_TYP = "oauth-id-jag+jwt"
+_IAT_SKEW_SECS = 60
+_REQUIRED = ["iss", "sub", "aud", "exp", "iat", "jti"]
+
+
+def _is_id_jag_typ(typ: object) -> bool:
+    """RFC 7515 §4.1.9: `typ` is a case-insensitive media type and the
+    `application/` prefix is optional."""
+    if not isinstance(typ, str):
+        return False
+    t = typ.strip().lower()
+    if t.startswith("application/"):
+        t = t[len("application/") :]
+    return t == _ID_JAG_TYP
+
+
+def _grant_error(description: str) -> OAuthError:
+    return OAuthError("invalid_grant", description)
+
+
+def _unverified_header_and_iss(assertion: str) -> tuple[dict, str]:
+    if assertion.count(".") != 2:
+        raise _grant_error("assertion is not a well-formed JWS Compact Serialization")
+    try:
+        header = jwt.get_unverified_header(assertion)
+    except jwt.PyJWTError as exc:
+        raise _grant_error("Malformed assertion JWT header") from exc
+    try:
+        claims = jwt.decode(assertion, options={"verify_signature": False})
+    except jwt.PyJWTError as exc:
+        raise _grant_error("assertion payload is not valid") from exc
+    iss = claims.get("iss")
+    if not isinstance(iss, str) or not iss:
+        raise _grant_error("assertion is missing the iss claim")
+    return header, iss
+
+
+def _may_verify(jwk: dict) -> bool:
+    """RFC 7517 §4.2/§4.3: a key marked `use` other than `sig`, or whose
+    `key_ops` lacks `verify`, must not verify signatures."""
+    use = jwk.get("use")
+    if use is not None and use != "sig":
+        return False
+    ops = jwk.get("key_ops")
+    return ops is None or (isinstance(ops, list) and "verify" in ops)
+
+
+def _alg_compatible(jwk: dict, alg: str) -> bool:
+    """RFC 7517 §4.4: an explicit JWK `alg` restricts the key to that
+    algorithm; an absent `alg` imposes no restriction."""
+    declared = jwk.get("alg")
+    return declared is None or declared == alg
+
+
+def _select_key(jwks: dict, header: dict):
+    keys = jwks.get("keys") if isinstance(jwks, dict) else None
+    if not isinstance(keys, list):
+        raise _grant_error("trusted issuer JWKS has no 'keys' array")
+    alg = header["alg"]
+    wanted_kty = "EC" if alg == "ES256" else "RSA"
+    kid = header.get("kid")
+    # `kid` need not be unique across key types (RFC 7517 §4.5), so filter by
+    # every usability constraint instead of taking the first kid hit.
+    match = next(
+        (
+            k
+            for k in keys
+            if isinstance(k, dict)
+            and (kid is None or k.get("kid") == kid)
+            and k.get("kty") == wanted_kty
+            and _may_verify(k)
+            and _alg_compatible(k, alg)
+        ),
+        None,
+    )
+    if match is None:
+        raise _grant_error("no usable key for the assertion in the trusted issuer's JWKS")
+    try:
+        algo = {"RS256": RSAAlgorithm, "PS256": RSAPSSAlgorithm, "ES256": ECAlgorithm}[alg]
+        key = algo.from_jwk(match)
+    except Exception as exc:
+        raise _grant_error("issuer JWKS key is malformed") from exc
+    # `from_jwk` returns a private key when the JWK carries `d`; a published
+    # JWKS must hold public keys only.
+    if not isinstance(key, (RSAPublicKey, EllipticCurvePublicKey)):
+        raise _grant_error("issuer JWKS key is not a public key")
+    return key
+
+
+async def verify_assertion(
+    assertion: str,
+    trusted: TrustedIssuer,
+    header: dict,
+    *,
+    our_issuer: str,
+    token_endpoint_url: str,
+    jwks_cache: JwksCache,
+) -> dict:
+    if header.get("alg") not in ALLOWED_ALGS:
+        raise _grant_error("assertion uses an unsupported signature algorithm")
+    try:
+        jwks = await jwks_cache.fetch(trusted.jwks_uri.strip())
+    except OAuthError as exc:
+        raise _grant_error(f"could not fetch the trusted issuer's JWKS: {exc.description}") from exc
+    key = _select_key(jwks, header)
+
+    # `aud` may name this AS (issuer id or token endpoint URL) or any audience
+    # the registry allows this issuer to target.
+    audiences = [our_issuer, token_endpoint_url, *trusted.allowed_audiences_list()]
+    try:
+        return jwt.decode(
+            assertion,
+            key,
+            algorithms=[header["alg"]],
+            audience=audiences,
+            issuer=trusted.issuer,
+            # PyJWT's iat check has zero leeway; the manual skew check in
+            # `redeem_jwt_bearer_assertion` is the sole iat authority.
+            options={"require": _REQUIRED, "verify_iat": False},
+        )
+    except jwt.PyJWTError as exc:
+        raise _grant_error(f"assertion validation failed: {exc}") from exc
+
+
+def _numeric_date(claims: dict, name: str) -> float:
+    """A NumericDate as a finite float; anything else (including integers too
+    large for a float) is `invalid_grant`, never an unhandled exception."""
+    value = claims.get(name)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise _grant_error(f"assertion {name} claim is not a number")
+    try:
+        out = float(value)
+    except OverflowError:
+        raise _grant_error(f"assertion {name} claim is out of range") from None
+    if not math.isfinite(out):
+        raise _grant_error(f"assertion {name} claim is not a finite number")
+    return out
+
+
+def _enforce_replay(iss: str, claims: dict, guard: JtiReplayGuard) -> None:
+    jti = claims.get("jti")
+    if not isinstance(jti, str) or not jti:
+        raise _grant_error("assertion missing required jti claim (RFC 7523 §3)")
+    exp = _numeric_date(claims, "exp")
+    # The replay guard retains a jti for at most MAX_JTI_TTL_SECS; a longer-lived
+    # assertion could be redeemed again while still valid, so refuse it.
+    ttl = max(exp - time.time(), 0.0)
+    if ttl > MAX_JTI_TTL_SECS:
+        raise _grant_error(f"assertion lifetime exceeds the maximum of {MAX_JTI_TTL_SECS} seconds")
+    try:
+        fresh = guard.observe(f"jwt-bearer:{iss}", jti, ttl)
+    except JtiGuardFull as exc:
+        logger.error("RFC 7523 §3: jti replay guard at capacity; refusing jwt-bearer assertion")
+        raise _grant_error("assertion replay guard unavailable") from exc
+    if not fresh:
+        logger.warning("RFC 7523 §3: rejected replayed jwt-bearer jti (iss=%s)", iss)
+        raise _grant_error("assertion jti has already been used")
+
+
+async def _reject_if_denylisted(storage: Storage, username: str, email: str | None) -> None:
+    """Honor the same username/email denylist as password login."""
+    for kind, value in (("username", username), ("email", email or "")):
+        reason = await check_subject_denylisted(storage, kind, value)
+        if reason is not None:
+            logger.warning("jwt-bearer blocked: %s is denylisted (reason=%s)", kind, reason)
+            raise _grant_error("subject is blocked")
+
+
+async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dict) -> str:
+    sub = claims.get("sub")
+    if not isinstance(sub, str) or not sub:
+        raise _grant_error("assertion sub claim is not a string")
+    raw_email = claims.get("email")
+    email = raw_email.strip() if isinstance(raw_email, str) else ""
+
+    is_email_mapping = trusted.subject_mapping == "email"
+    if is_email_mapping:
+        if not email:
+            raise _grant_error(
+                "trusted issuer maps subjects by email but the assertion has no email claim"
+            )
+        # An unverified email is attacker-controllable at the IdP; matching it
+        # to a local account would be account takeover.
+        if claims.get("email_verified") is not True:
+            raise _grant_error("assertion email is not verified (email_verified must be true)")
+        folded = email.casefold()
+        matches = [
+            u
+            for u in await storage.get_users_by_email(email)
+            if (u.email or "").strip().casefold() == folded
+        ]
+        if len(matches) > 1:
+            raise _grant_error("assertion email matches more than one local account")
+        existing = matches[0] if matches else None
+    else:
+        existing = await storage.get_user_by_id(sub)
+
+    if existing is not None:
+        if not existing.enabled:
+            raise _grant_error("subject user is disabled")
+        await _reject_if_denylisted(storage, existing.username, existing.email)
+        return existing.id
+    if is_email_mapping:
+        raise _grant_error("unknown subject")
+    if not trusted.jit_provision:
+        raise _grant_error(
+            "assertion subject has no local user and the issuer does not allow provisioning"
+        )
+
+    await _reject_if_denylisted(storage, sub, email if claims.get("email_verified") is True else "")
+    now = datetime.now(UTC)
+    user = User(
+        id=sub,
+        username=sub,
+        # Valid but unguessable: the random secret is discarded, so the
+        # account cannot be used for password login.
+        password_hash=await hash_password_async(secrets.token_urlsafe(32)),
+        # Persist only a verified address: an unverified IdP claim stored here
+        # could later be matched by verified-email/social account linking.
+        email=email if claims.get("email_verified") is True else "",
+        enabled=True,
+        role="user",
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        await storage.save_user(user)
+    except Exception:
+        # Racing first-use assertion (or `sub` colliding with an existing row):
+        # re-read once; still a grant failure, never a 500.
+        logger.warning("RFC 7523: JIT provisioning insert failed (iss=%s)", trusted.issuer)
+        try:
+            raced = await storage.get_user_by_id(sub)
+        except Exception:
+            raced = None
+        if raced is not None and raced.enabled:
+            # The winning row may carry a different username/email than we
+            # tried to insert; apply the same denylist guard to it.
+            await _reject_if_denylisted(storage, raced.username, raced.email)
+            return raced.id
+        raise _grant_error(
+            "subject user is disabled"
+            if raced is not None
+            else "could not provision a local user for the assertion subject"
+        ) from None
+    return user.id
+
+
+async def redeem_jwt_bearer_assertion(
+    assertion: str,
+    client: Client,
+    *,
+    storage: Storage,
+    jwks_cache: JwksCache,
+    guard: JtiReplayGuard,
+    our_issuer: str,
+    token_endpoint_url: str,
+) -> str:
+    """Validate `assertion` for the authenticated `client` and return the local
+    user id the access token is issued for. Raises `invalid_grant`."""
+    header, iss = _unverified_header_and_iss(assertion)
+
+    trusted = await storage.get_trusted_issuer(iss)
+    if trusted is None or not trusted.enabled:
+        raise _grant_error("assertion iss is not a trusted issuer")
+    if not trusted.allows_client(client.client_id):
+        raise _grant_error("client is not allowed to use this trusted issuer")
+
+    if _is_id_jag_typ(header.get("typ")):
+        raise _grant_error("ID-JAG assertions are not accepted by this authorization server")
+
+    claims = await verify_assertion(
+        assertion,
+        trusted,
+        header,
+        our_issuer=our_issuer,
+        token_endpoint_url=token_endpoint_url,
+        jwks_cache=jwks_cache,
+    )
+
+    iat = _numeric_date(claims, "iat")
+    if iat > time.time() + _IAT_SKEW_SECS:
+        raise _grant_error("assertion iat is in the future")
+
+    _enforce_replay(iss, claims, guard)
+    return await _resolve_subject(storage, trusted, claims)
