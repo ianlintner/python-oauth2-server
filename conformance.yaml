@@ -2,10 +2,12 @@
 # `oauth2-conformance` runner contract
 # (https://github.com/ianlintner/oauth2-conformance).
 #
-# Pinned contract commit: 985fef7aca4835a7ab4fb92c94e8f979f7308189
-# (contract v0.5 sender-constrained part 3/3, on top of v0.4 extended-grants and
-# v0.3 oidc-basic; also pinned as CONFORMANCE_REF in the `conformance` job of .github/workflows/ci.yml; the
-# manifest schema has no field for a commit, so the two are kept in sync by
+# Pinned contract commit: b968cb19a2194268b819effae8b060b1e62d99df
+# (contract v0.7 modern-server: +6 promoted-to-stable core scenarios (PR #21),
+# generated STATUS dashboard (PR #20), modern-server gap catalog (PR #22), runner
+# duplicate-form-key/header-matcher/step-repetition capabilities (PR #23); also
+# pinned as CONFORMANCE_REF in the `conformance` job of .github/workflows/ci.yml;
+# the manifest schema has no field for a commit, so the two are kept in sync by
 # hand).
 #
 # Every profile listed under `profiles` MUST pass in the `conformance` CI job.
@@ -29,8 +31,19 @@
 # owner-gated requirements remain deferred in the contract for all ports and are
 # known gaps, not deviations: RFC7662-4-expiry-checked and
 # RFC9700-2.2.2-public-refresh-rotated-or-bound.
+#
+# core (contract PR #21): the six scenarios promoted from reference-deviation to
+# stable — error-redirect-iss, response-type-unsupported, PKCE
+# plain-method-rejected/missing-challenge/method-without-challenge and
+# basic-auth-success — all pass against this port, so nothing to declare. The two
+# scenarios the contract still records as reference-deviation
+# (response-type-missing — this port answers unsupported_response_type instead of
+# invalid_request on the redirect — and dual-auth-rejected — this port accepts
+# credentials from both the Basic header and the body) are held back by the
+# contract itself, not by this manifest: a failing non-stable scenario is
+# reported as `deferred` by the runner and never gates here.
 implementation: python-oauth2-server
-contract: 985fef7aca4835a7ab4fb92c94e8f979f7308189
+contract: b968cb19a2194268b819effae8b060b1e62d99df
 profiles: [core, token-lifecycle, oidc-basic, extended-grants, sender-constrained]
 endpoint: http://localhost:8080
 deviations: []
