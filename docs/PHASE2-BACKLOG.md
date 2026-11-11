@@ -77,6 +77,19 @@ Item 12 was explicitly deferred to Phase 3 from the start (see the Phase 2 plan'
 > four pass here and the remaining 24 are deferred by the runner. The "Known DPoP/RAR gaps"
 > below stay open backlog items, not deviations.
 
+> **Conformance reconciliation (contract 985fef7 → b968cb19, 2026-11-08):** contract PR #21 promoted
+> six core scenarios from `reference-deviation` to `stable`; all six pass against this port
+> (`error-redirect-iss`, `response-type-unsupported`, PKCE `method-without-challenge`/
+> `missing-challenge`/`plain-method-rejected`, `basic-auth-success`). Two core scenarios remain
+> `reference-deviation` and are held back by the contract, not this manifest: `response-type-missing`
+> (this port answers `unsupported_response_type` on the redirect rather than `invalid_request`) and
+> `dual-auth-rejected` (this port accepts credentials from both the Basic header and the body and
+> returns 200) — see the staged core work in this repo. No `deviations` entries are added because a
+> failing non-stable scenario is reported `deferred` by the runner and never reaches the gate.
+> Core stable coverage rises 33 → 39 (the 6 promotions). The three new
+> `resource`/`hardening`/`fapi2` profiles are requirements-only (no stable scenarios) and stay
+> unclaimed.
+
 From Phase 1:
 - DCR rejection error is `invalid_client_metadata` (RFC 7591 §3.2.2) where the Rust admin handler uses
   `invalid_request` — noted in tests/test_rfc_compliance.py docstring.
