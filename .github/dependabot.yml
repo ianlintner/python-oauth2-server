@@ -11,7 +11,10 @@ updates:
       day: monday
     cooldown:
       default-days: 7
-    versioning-strategy: increase-if-necessary
+    # lockfile-only: Dependabot updates uv.lock but never raises pyproject floors. increase-if-necessary
+    # still raised floors to the new release (#103/#106/#108), which breaks the min-deps floor assertions.
+    # Raise a floor deliberately, in its own PR, when a real API need exists.
+    versioning-strategy: lockfile-only
     open-pull-requests-limit: 5
     commit-message:
       prefix: chore(deps)
