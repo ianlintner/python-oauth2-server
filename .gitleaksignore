@@ -1,27 +1,57 @@
 # gitleaks false positives — no real credentials in this repo.
-# Every entry is a `generic-api-key` match on an explicitly-fake test fixture,
-# a documentation example, or a code identifier. Format is
-# `file:rule-id:start-line` (global) — see gitleaks .gitleaksignore docs.
-# Added 2026-11-15 as part of Phase 1 security-tooling parity.
+#
+# Every entry below is a `generic-api-key` hit on an explicitly-fake test
+# fixture, a documentation example, or a code identifier. gitleaks docs:
+# https://github.com/gitleaks/gitleaks#gitleaksignore
+#
+# Fingerprints are scoped to the exact commit that introduced the match, so a
+# *new* secret with the same file/rule (later commit, or different line) is
+# still reported. Format is `commit:file:rule-id:start-line` with the full
+# 40-char commit SHA (abbreviated SHAs do NOT match). Regenerate with:
+#
+#   gitleaks git --redact --report-format json --report-path report.json .
+#   jq -r '.[].Fingerprint' report.json
+#
+# When adding a new fixture secret, prefer a `# gitleaks:allow` comment on the
+# line itself; only add a fingerprint here for matches buried in history.
 
-# scripts/mongo_parity_smoke.sh — `OAUTH2_JWT_SECRET=parity-smoke-secret-...` (fake).
-scripts/mongo_parity_smoke.sh:generic-api-key:65
+# tests/test_client_assertion.py — WRONG_CLIENT_SECRET (fake test key)
+ccae03bf75a88ef71c93bba90d1572212c4c037d:tests/test_client_assertion.py:generic-api-key:41
 
-# tests/test_client_assertion.py — `client1-secret-jwt-key-...` / `wrong-secret-...` (fake).
-tests/test_client_assertion.py:generic-api-key:41
+# scripts/mongo_parity_smoke.sh — OAUTH2_JWT_SECRET=parity-smoke-secret-... (fake)
+5ab057d344d33434239b29ade63356522785a0e4:scripts/mongo_parity_smoke.sh:generic-api-key:65
+66401405a3c60a7ab0ed562d78d65d0bd2267b43:scripts/mongo_parity_smoke.sh:generic-api-key:65
 
-# tests/test_rfc_compliance.py — `unit-test-secret-not-for-production-...` (fake).
-tests/test_rfc_compliance.py:generic-api-key:821
+# src/oauth2_server/routes/wellknown.py — code identifier `jwk_from_rs256_key`
+2b0475acfc89e4a9a5d0821166f187d3fbdaf996:src/oauth2_server/routes/wellknown.py:generic-api-key:20
+5ab057d344d33434239b29ade63356522785a0e4:src/oauth2_server/routes/wellknown.py:generic-api-key:20
+9850581a4ee4501c79cca0d7c53ba7159ed841b0:src/oauth2_server/routes/wellknown.py:generic-api-key:20
 
-# src/oauth2_server/routes/wellknown.py — matches the code identifier
-# `jwk_from_rs256_key` in an import line, not a secret value.
-src/oauth2_server/routes/wellknown.py:generic-api-key:20
+# README.md — parity-smoke demo secrets (fake)
+5ab057d344d33434239b29ade63356522785a0e4:README.md:generic-api-key:448
+5ab057d344d33434239b29ade63356522785a0e4:README.md:generic-api-key:457
+5ab057d344d33434239b29ade63356522785a0e4:README.md:generic-api-key:463
+5ab057d344d33434239b29ade63356522785a0e4:README.md:generic-api-key:486
+9850581a4ee4501c79cca0d7c53ba7159ed841b0:README.md:generic-api-key:130
+9850581a4ee4501c79cca0d7c53ba7159ed841b0:README.md:generic-api-key:139
+9850581a4ee4501c79cca0d7c53ba7159ed841b0:README.md:generic-api-key:145
+9850581a4ee4501c79cca0d7c53ba7159ed841b0:README.md:generic-api-key:168
+9c4b933950cbc096db0bd4fc5394ee3932638a42:README.md:generic-api-key:61
+9c4b933950cbc096db0bd4fc5394ee3932638a42:README.md:generic-api-key:70
+9c4b933950cbc096db0bd4fc5394ee3932638a42:README.md:generic-api-key:76
+9c4b933950cbc096db0bd4fc5394ee3932638a42:README.md:generic-api-key:99
+efa73d25857a75cd62c884b5a30db5db47baa791:README.md:generic-api-key:61
+efa73d25857a75cd62c884b5a30db5db47baa791:README.md:generic-api-key:70
+efa73d25857a75cd62c884b5a30db5db47baa791:README.md:generic-api-key:76
+efa73d25857a75cd62c884b5a30db5db47baa791:README.md:generic-api-key:99
 
-# tests/test_app.py — `0123456789abcdef0123456789abcdef` env test value (fake).
-tests/test_app.py:generic-api-key:34
+# tests/test_app.py — fake env/config test value
+5ab057d344d33434239b29ade63356522785a0e4:tests/test_app.py:generic-api-key:35
+9850581a4ee4501c79cca0d7c53ba7159ed841b0:tests/test_app.py:generic-api-key:34
+9c4b933950cbc096db0bd4fc5394ee3932638a42:tests/test_app.py:generic-api-key:34
+9d417dbc68bb3bfb339151e68257e8a86f34ed11:tests/test_app.py:generic-api-key:34
 
-# README.md — documentation example env values / example registration output (fake).
-README.md:generic-api-key:61
-README.md:generic-api-key:70
-README.md:generic-api-key:76
-README.md:generic-api-key:99
+# tests/test_rfc_compliance.py — test key-id config value (fake)
+5ab057d344d33434239b29ade63356522785a0e4:tests/test_rfc_compliance.py:generic-api-key:852
+9850581a4ee4501c79cca0d7c53ba7159ed841b0:tests/test_rfc_compliance.py:generic-api-key:821
+dae4290cbee2ec23940ec1820d9980e7cb6b6ebc:tests/test_rfc_compliance.py:generic-api-key:821

@@ -52,7 +52,9 @@ jobs:
           sarif_file: gitleaks.sarif
           category: gitleaks
 
-  # Advisory: known-vulnerability scan of the locked dependency set (advisories only).
+  # Advisory-only: non-blocking. Findings land in code scanning (SARIF); this job
+  # never fails the PR. Do not treat a green run as "no vulnerabilities".
+  # Known-vulnerability scan of the locked dependency set (advisories only).
   # Uses the upstream reusable workflow; reports but does not fail on findings.
   osv-scanner:
     permissions:
@@ -112,7 +114,11 @@ jobs:
           sarif_file: semgrep.sarif
           category: semgrep
 
-  # Advisory: Python dependency advisory scan (pip-audit) against the frozen lock.
+  # Advisory-only: non-blocking (see also `continue-on-error` on its steps).
+  # Python dependency advisory scan (pip-audit) against the frozen lock.
+  # A non-zero pip-audit exit is reported in the job summary but does not fail
+  # the workflow. Maintainers who want a blocking gate should drop
+  # `continue-on-error` and the trailing `exit 0` below.
   pip-audit:
     runs-on: ubuntu-latest
     permissions:
@@ -129,14 +135,41 @@ jobs:
       - name: Export locked runtime requirements
         run: uv export --frozen --no-dev --format requirements-txt -o "$RUNNER_TEMP/req.txt"
 
-      - name: Audit dependencies
+      - name: Audit dependencies (advisory-only, non-blocking)
         continue-on-error: true
-        run: >-
-          uvx pip-audit --strict --disable-pip
-          -r "$RUNNER_TEMP/req.txt" --format json
-          | tee "$GITHUB_STEP_SUMMARY"
+        run: |
+          set +e
+          uvx pip-audit --strict --disable-pip \
+            -r "$RUNNER_TEMP/req.txt" --format json \
+            --output "$RUNNER_TEMP/pip-audit.json"
+          audit_rc=$?
+          {
+            echo "### pip-audit (advisory-only, non-blocking)"
+            echo ""
+            if [ "$audit_rc" -ne 0 ]; then
+              echo "> :warning: pip-audit exited ${audit_rc} (vulnerabilities or audit error)."
+              echo "> This job is advisory and does not block the PR. Review the table below."
+              echo ""
+            fi
+            echo "| Package | Version | ID | Fix versions |"
+            echo "|---|---|---|---|"
+            if [ -s "$RUNNER_TEMP/pip-audit.json" ]; then
+              jq -r '[.dependencies[]
+                | . as $d
+                | ($d.vulns // [])
+                | .[] | {k: "\($d.name)|\($d.version)|\(.id)", name: $d.name,
+                         version: $d.version, id: .id,
+                         fixes: ((.fix_versions // []) | join(", "))}]
+                | unique_by(.k)
+                | .[] | "| \(.name) | \(.version) | \(.id) | \(.fixes) |"' \
+                "$RUNNER_TEMP/pip-audit.json" || true
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
-  # Advisory: Python AST-level security lint (bandit) over the source tree.
+  # Advisory-only: non-blocking (see also `continue-on-error` on the run step).
+  # Python AST-level security lint (bandit) over the source tree. Findings are
+  # published to code scanning via SARIF; they do NOT fail the workflow.
   bandit:
     runs-on: ubuntu-latest
     permissions:
