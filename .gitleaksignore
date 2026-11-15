@@ -50,6 +50,7 @@ efa73d25857a75cd62c884b5a30db5db47baa791:README.md:generic-api-key:99
 9850581a4ee4501c79cca0d7c53ba7159ed841b0:tests/test_app.py:generic-api-key:34
 9c4b933950cbc096db0bd4fc5394ee3932638a42:tests/test_app.py:generic-api-key:34
 9d417dbc68bb3bfb339151e68257e8a86f34ed11:tests/test_app.py:generic-api-key:34
+9390eefc11e536d1c015d165ca26fe2814704818:tests/test_app.py:generic-api-key:34
 
 # tests/test_rfc_compliance.py — test key-id config value (fake)
 5ab057d344d33434239b29ade63356522785a0e4:tests/test_rfc_compliance.py:generic-api-key:852
