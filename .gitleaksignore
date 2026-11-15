@@ -1,0 +1,27 @@
+# gitleaks false positives — no real credentials in this repo.
+# Every entry is a `generic-api-key` match on an explicitly-fake test fixture,
+# a documentation example, or a code identifier. Format is
+# `file:rule-id:start-line` (global) — see gitleaks .gitleaksignore docs.
+# Added 2026-11-15 as part of Phase 1 security-tooling parity.
+
+# scripts/mongo_parity_smoke.sh — `OAUTH2_JWT_SECRET=parity-smoke-secret-...` (fake).
+scripts/mongo_parity_smoke.sh:generic-api-key:65
+
+# tests/test_client_assertion.py — `client1-secret-jwt-key-...` / `wrong-secret-...` (fake).
+tests/test_client_assertion.py:generic-api-key:41
+
+# tests/test_rfc_compliance.py — `unit-test-secret-not-for-production-...` (fake).
+tests/test_rfc_compliance.py:generic-api-key:821
+
+# src/oauth2_server/routes/wellknown.py — matches the code identifier
+# `jwk_from_rs256_key` in an import line, not a secret value.
+src/oauth2_server/routes/wellknown.py:generic-api-key:20
+
+# tests/test_app.py — `0123456789abcdef0123456789abcdef` env test value (fake).
+tests/test_app.py:generic-api-key:34
+
+# README.md — documentation example env values / example registration output (fake).
+README.md:generic-api-key:61
+README.md:generic-api-key:70
+README.md:generic-api-key:76
+README.md:generic-api-key:99
