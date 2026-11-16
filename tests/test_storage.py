@@ -252,3 +252,38 @@ async def test_get_users_by_email_case_insensitive(storage):
         User(id="e4", username="e_four", password_hash="x", email="MIXED@example.test")
     )
     assert {u.id for u in await storage.get_users_by_email("mixed@example.test")} == {"e1", "e4"}
+
+
+async def test_device_authorization_transition_is_single_winner(storage):
+    import asyncio
+
+    await storage.save_client(_client())
+    d = DeviceAuthorization(
+        id=uuid.uuid4().hex,
+        device_code="dc-win",
+        user_code="UC-WIN",
+        client_id="client1",
+        scope="read",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    await storage.save_device_authorization(d)
+    results = await asyncio.gather(
+        storage.approve_device_authorization("UC-WIN", "u1"),
+        storage.approve_device_authorization("UC-WIN", "u2"),
+    )
+    assert sorted(results) == [0, 1]
+
+
+async def test_device_authorization_transition_refuses_expired_row(storage):
+    await storage.save_client(_client())
+    d = DeviceAuthorization(
+        id=uuid.uuid4().hex,
+        device_code="dc-old",
+        user_code="UC-OLD",
+        client_id="client1",
+        scope="read",
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    await storage.save_device_authorization(d)
+    assert await storage.approve_device_authorization("UC-OLD", "u1") == 0
+    assert await storage.deny_device_authorization("UC-OLD", "u1") == 0

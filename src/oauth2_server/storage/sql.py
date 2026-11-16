@@ -12,6 +12,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from oauth2_server import clock
 from oauth2_server.models import (
     AuditLogEntry,
     AuthorizationCode,
@@ -633,25 +634,35 @@ class SqlStorage:
             )
         return DeviceAuthorization(**row) if row else None
 
-    async def approve_device_authorization(self, user_code: str, user_id: str) -> None:
+    async def _transition_pending_device(
+        self, user_code: str, column: str, user_id: str | None
+    ) -> int:
+        # Single conditional transition out of the pending state; the affected
+        # row count tells a losing racer that it lost. `column` is one of two
+        # internal literals, never caller input.
         async with self._engine.begin() as conn:
-            await conn.execute(
+            result = await conn.execute(
                 text(
-                    "UPDATE device_authorizations SET approved = :a, denied = :d, "
-                    "user_id = :uid WHERE user_code = :uc"
+                    f"UPDATE device_authorizations SET {column} = :t, user_id = :uid "
+                    "WHERE user_code = :uc AND approved = :f AND denied = :f "
+                    "AND used = :f AND expires_at > :now"
                 ),
-                {"a": True, "d": False, "uid": user_id, "uc": user_code},
+                {
+                    "t": True,
+                    "f": False,
+                    "uid": user_id,
+                    "uc": user_code,
+                    "now": self._dt(clock.now()),
+                },
             )
+        return result.rowcount
 
-    async def deny_device_authorization(self, user_code: str) -> None:
-        async with self._engine.begin() as conn:
-            await conn.execute(
-                text(
-                    "UPDATE device_authorizations SET denied = :d, approved = :a "
-                    "WHERE user_code = :uc"
-                ),
-                {"d": True, "a": False, "uc": user_code},
-            )
+    async def approve_device_authorization(self, user_code: str, user_id: str) -> int:
+        return await self._transition_pending_device(user_code, "approved", user_id)
+
+    async def deny_device_authorization(self, user_code: str, user_id: str | None = None) -> int:
+        # `user_id` records who denied (the column is shared with approve).
+        return await self._transition_pending_device(user_code, "denied", user_id)
 
     async def mark_device_authorization_used(self, device_code: str) -> int:
         async with self._engine.begin() as conn:
