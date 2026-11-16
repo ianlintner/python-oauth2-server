@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 import jwt
 
-from tests.helpers import login_session, post_token, reseed_client, seed_client
+from tests.helpers import login_session, post_token, reseed_client, seed_client, trust_client
 
 JWT_SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
 
@@ -198,6 +198,7 @@ async def _seed_public_client(client_app, client_id: str = "pubclient"):
         redirect_uris='["https://a.example/cb"]',
         token_endpoint_auth_method="none",
     )
+    trust_client(client_app, client_id)
 
 
 async def test_public_client_exchanges_code_without_secret(client_app):

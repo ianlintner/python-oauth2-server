@@ -339,6 +339,21 @@ class ClientRegistration(BaseModel):
     post_logout_redirect_uris: list[str] = []
 
 
+class Grant(BaseModel):
+    """A user's recorded approval of a client for a set of scopes.
+
+    One row per `(user_id, client_id)`; `scope` is the space-delimited union of
+    everything the user has approved for that client so far.
+    """
+
+    id: str
+    user_id: str
+    client_id: str
+    scope: str
+    created_at: MongoDateTime = Field(default_factory=_now)
+    updated_at: MongoDateTime = Field(default_factory=_now)
+
+
 class TrustedIssuer(BaseModel):
     """External issuer whose signed JWTs may be exchanged via the RFC 7523 §2.1
     jwt-bearer grant (port of crates/oauth2-core TrustedIssuer). The two list

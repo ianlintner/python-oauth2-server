@@ -49,6 +49,7 @@ from tests.helpers import (
     seed_admin,
     seed_client,
     seed_user,
+    trust_client,
 )
 from tests.test_metrics import _metric_value
 from tests.test_social_login import _mock_transport, _state_from_location
@@ -232,6 +233,7 @@ async def test_rfc7662_introspection_nbf_le_iat(client_app):
 
 
 async def test_public_client_exchanges_code_without_secret(client_app):
+    trust_client(client_app, "client_public")
     await seed_client(
         client_app.storage,
         client_id="client_public",
@@ -262,6 +264,7 @@ async def test_public_client_exchanges_code_without_secret(client_app):
 
 
 async def test_public_client_must_not_present_secret(client_app):
+    trust_client(client_app, "client_pub_secret")
     await seed_client(
         client_app.storage,
         client_id="client_pub_secret",

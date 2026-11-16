@@ -746,6 +746,18 @@ admin-session server-side revocation.
     (vendored here; authored in the Rust repo, the schema owner). `app.state.dpop_code_bindings` and
     `services/dpop_bindings.py` are gone.
 
+65. User consent is implemented (the Rust server has no consent step). `GET /oauth/authorize` issues a
+    code only for scopes covered by a stored grant (`grants` table / collection, migration
+    `V24__create_grants_table.sql`, one row per user + client holding the union of approved scopes).
+    Otherwise it renders a consent page naming the client and the scopes still needing approval, and
+    parks the validated request server-side (`services/consent.py`, in-memory like the PAR store, so
+    single-process); `POST /oauth/consent` carries only an opaque handle, a CSRF token and
+    `action=approve|deny`, re-validates client/redirect/scope/user state, and then issues the code
+    (or `access_denied`). `prompt=consent` always asks; `prompt=none` without a covering grant
+    returns `consent_required` through the redirect channel. Clients listed in
+    `OAUTH2_CONSENT_TRUSTED_CLIENT_IDS` (default empty) skip the step; in conformance mode a seeded
+    user's `auto_approve_clients` do too. Existing users have no grants and are asked once.
+
 Still out of scope: `request_uri`-as-JAR-URL, and the parity-only items listed above.
 
 ### Remaining Phase 4b gaps (carried to 4c or later)
