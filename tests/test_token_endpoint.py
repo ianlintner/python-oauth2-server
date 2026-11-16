@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import secrets
@@ -6,8 +7,19 @@ from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 import jwt
+from httpx import ASGITransport, AsyncClient
 
-from tests.helpers import login_session, post_token, reseed_client, seed_client
+from oauth2_server.app import create_app
+from oauth2_server.config import Config
+from oauth2_server.storage.sql import SqlStorage
+from tests.helpers import (
+    MIGRATIONS,
+    login_session,
+    post_token,
+    reseed_client,
+    seed_client,
+    seed_user,
+)
 
 JWT_SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
 
@@ -339,6 +351,60 @@ async def test_refresh_rotation_and_reuse_revokes_family(client_app):
     )
     assert resp4.status_code == 400
     assert resp4.json()["error"] == "invalid_grant"
+
+
+async def test_concurrent_refresh_only_one_wins(tmp_path):
+    # File-backed SQLite: the in-memory test backend shares ONE connection
+    # across tasks, so concurrent transactions there can roll each other
+    # back and say nothing about real (per-connection) isolation.
+    storage = SqlStorage(f"sqlite+aiosqlite:///{tmp_path / 'race.db'}", MIGRATIONS)
+    await storage.init()
+    await seed_client(storage)
+    await seed_user(storage)
+    config = Config(
+        jwt_secret=JWT_SECRET,
+        issuer="https://auth.example.com",
+        dynamic_registration_enabled=True,
+    )
+    app = create_app(config, storage)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://auth.example.com"
+    ) as client_app:
+        client_app.storage = storage
+        client_app.app = app
+        await _concurrent_refresh_only_one_wins(client_app)
+
+
+async def _concurrent_refresh_only_one_wins(client_app):
+    resp1, _code = await run_code_flow(client_app)
+    assert resp1.status_code == 200, resp1.text
+    refresh_token = resp1.json()["refresh_token"]
+
+    results = await asyncio.gather(
+        *(
+            post_token(
+                client_app,
+                {"grant_type": "refresh_token", "refresh_token": refresh_token},
+                basic_auth=("client1", "s3cret"),
+            )
+            for _ in range(5)
+        )
+    )
+    winners = [r for r in results if r.status_code == 200]
+    losers = [r for r in results if r.status_code != 200]
+    assert len(winners) == 1, [r.status_code for r in results]
+    for r in losers:
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_grant"
+
+    # Losers revoke the family, so the winner's successor is no longer usable.
+    follow = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": winners[0].json()["refresh_token"]},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert follow.status_code == 400
+    assert follow.json()["error"] == "invalid_grant"
 
 
 async def test_id_token_includes_email_and_preferred_username(client_app):

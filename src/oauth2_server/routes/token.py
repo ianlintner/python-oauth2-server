@@ -709,7 +709,13 @@ async def token(request: Request) -> ORJSONResponse:
                 )
 
         family = old_token.token_family or uuid.uuid4().hex
-        await storage.revoke_token(old_token.access_token)
+        # Atomic claim: exactly one concurrent request can transition the
+        # row to revoked (this also revokes the paired access token). A
+        # loser presented an already-consumed token: revoke the family.
+        if await storage.claim_refresh_token(refresh_token_value) == 0:
+            if old_token.token_family:
+                await storage.revoke_token_family(old_token.token_family)
+            return oauth_error("invalid_grant", "refresh token has been revoked")
 
         # RFC 9396 details are DROPPED on refresh (Rust parity,
         # research-rar-token-exchange.md `endpoints`: "authorization_details:
