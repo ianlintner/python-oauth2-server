@@ -96,6 +96,32 @@ def _bad_request(description: str) -> ORJSONResponse:
     )
 
 
+_MIN_CLIENT_SECRET_LENGTH = 16
+
+
+def _validate_client_secret(secret: str) -> ORJSONResponse | None:
+    """Reject a caller-supplied client secret that is too short or too simple.
+
+    Requires at least `_MIN_CLIENT_SECRET_LENGTH` characters drawn from at
+    least two character classes (lower, upper, digit, other). Generated
+    secrets (32 hex characters) always satisfy this. Returns the 400 to
+    return verbatim, or `None` when the secret is acceptable.
+    """
+    if len(secret) < _MIN_CLIENT_SECRET_LENGTH:
+        return _bad_request(
+            f"client_secret must be at least {_MIN_CLIENT_SECRET_LENGTH} characters"
+        )
+    classes = (
+        any(c.islower() for c in secret),
+        any(c.isupper() for c in secret),
+        any(c.isdigit() for c in secret),
+        any(not c.isalnum() for c in secret),
+    )
+    if sum(classes) < 2:
+        return _bad_request("client_secret must mix at least two character types")
+    return None
+
+
 def _validate_redirect_uris(
     redirect_uris: object,
     *,
@@ -285,6 +311,10 @@ async def create_client(request: Request, actor: AdminActor = AdminDep) -> ORJSO
 
     is_public = auth_method == "none"
     client_secret = "" if is_public else str(body.get("client_secret") or uuid.uuid4().hex)
+    if not is_public and body.get("client_secret"):
+        weak_secret = _validate_client_secret(client_secret)
+        if weak_secret is not None:
+            return weak_secret
 
     redirect_uris = body.get("redirect_uris", [])
     grant_types = body["grant_types"] if "grant_types" in body else list(_DEFAULT_GRANT_TYPES)

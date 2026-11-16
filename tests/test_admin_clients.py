@@ -208,6 +208,26 @@ async def test_create_client_confidential_returns_secret_once():
         assert stored.client_secret == body["client_secret"]
 
 
+async def test_create_client_rejects_short_secret():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post("/admin/api/clients", json={"name": "c", "client_secret": "abc"})
+        assert resp.status_code == 400
+        assert not [c for c in await client.storage.list_all_clients() if c.name == "c"]
+
+        # Long but single-class is rejected too.
+        resp = await client.post(
+            "/admin/api/clients", json={"name": "c", "client_secret": "a" * 32}
+        )
+        assert resp.status_code == 400
+
+        ok = await client.post(
+            "/admin/api/clients",
+            json={"name": "c", "client_secret": "Kx9fQ2mZ7vLp4TnR8sWd1Bc6YhJ3aUe5"},
+        )
+        assert ok.status_code == 201
+
+
 async def test_create_public_client_has_no_secret():
     async with build_client_app() as client:
         await _login(client)
