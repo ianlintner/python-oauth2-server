@@ -605,8 +605,11 @@ input-validation gaps the Phase 3b/4a/4b backlogs recorded:
   once. TLS terminates at the proxy: the certificate reaches the app as
   `X-Client-Cert-Thumbprint` (base64url SHA-256 of the DER certificate) and `X-SSL-Client-S-DN`.
   `tls_client_auth` compares the presented Subject DN byte-exactly against the client's registered
-  `tls_client_certificate_subject_dn` (an empty registered DN accepts any certificate the proxy
-  vouched for); `self_signed_tls_client_auth` requires the thumbprint to match a key in the
+  `tls_client_certificate_subject_dn`. A client with no registered DN does NOT authenticate
+  (divergence 65 — Rust accepts any certificate in that case; **breaking change** for existing
+  `tls_client_auth` rows with an empty DN: set one via `PUT /admin/api/clients/{id}`; affected
+  clients are logged at startup). `tls_client_auth_san_dns`, `_san_uri` and multiple DNs are not
+  supported; `self_signed_tls_client_auth` requires the thumbprint to match a key in the
   client's registered JWKS — a JWK whose `x5t#S256` member equals the header value (divergence 48;
   Rust accepts any thumbprint, which makes that method authenticate nothing). Both methods are
   settable through dynamic registration and the admin API, and discovery advertises
@@ -672,6 +675,11 @@ and `X-SSL-Client-S-DN` are honored ONLY when that flag is set, and are treated 
 otherwise (divergence 47 — Rust reads them unconditionally, so anyone who can reach the app
 directly could forge client authentication and a `cnf` binding). Set it only when a
 terminating proxy strips both headers from inbound requests and re-adds them itself.
+
+`OAUTH2_TRUSTED_PROXY_CIDRS` (comma-separated CIDRs, default empty) additionally restricts which
+TCP peers those headers are believed from: when set, a request from any other address has both
+headers ignored (divergence 66). Empty keeps the previous behavior, so set it to the proxy's
+address range whenever the app is reachable by anything other than the proxy.
 
 ### Phase 4d additions
 
