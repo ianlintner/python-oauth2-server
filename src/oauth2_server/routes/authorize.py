@@ -80,6 +80,7 @@ from starlette.responses import Response
 
 from oauth2_server.errors import OAuthError
 from oauth2_server.services.clients import redirect_uri_matches
+from oauth2_server.routes.admin.guard import user_is_admin
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.services.auth import AuthorizeService, scope_is_subset
 from oauth2_server.services.authorize_response import (
@@ -527,6 +528,19 @@ async def authorize(request: Request):
         # authorization request instead of silently replaying it.
         request.session["return_to_ts"] = int(time.time())
         return RedirectResponse("/auth/login", status_code=302)
+
+    # --- 5a. `admin` scope requires the user to currently be an admin ---
+    if "admin" in scope.split():
+        authed_user = await storage.get_user_by_id(user_id)
+        if not user_is_admin(authed_user, config):
+            return _deliver_error(
+                response_mode,
+                redirect_uri,
+                "invalid_scope",
+                "requested scope exceeds the user's entitlement",
+                state,
+                config.issuer,
+            )
 
     # --- 5b. RFC 9470 step-up: `acr_values` must be satisfied by the session ---
     # Deliberately after the login gate above: an unauthenticated caller is

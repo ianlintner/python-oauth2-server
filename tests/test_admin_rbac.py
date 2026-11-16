@@ -27,6 +27,7 @@ async def _seed_token(
     *,
     expires_at: datetime | None = None,
     revoked: bool = False,
+    user_id: str | None = None,
 ) -> Token:
     token = Token(
         id=uuid.uuid4().hex,
@@ -35,6 +36,7 @@ async def _seed_token(
         scope=scope,
         expires_at=expires_at or _future(),
         revoked=revoked,
+        user_id=user_id,
     )
     await storage.save_token(token)
     return token
@@ -108,6 +110,37 @@ async def test_bearer_with_admin_scope_and_allowlist_passes():
         assert resp.status_code == 200
         # migration-seeded "testuser" + default seeded user_rfc.
         assert resp.json()["total"] == 2
+
+
+async def test_bearer_user_token_from_allowlisted_client_is_not_admin():
+    async with build_client_app({"admin_client_ids": ["client1"]}) as client:
+        token = await _seed_token(client.storage, "client1", "admin", user_id="u1")
+        resp = await client.get(
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "insufficient_permissions"
+
+
+async def test_bearer_admin_user_token_from_allowlisted_client_passes():
+    async with build_client_app({"admin_client_ids": ["client1"]}) as client:
+        await seed_admin(client.storage)
+        token = await _seed_token(client.storage, "client1", "admin", user_id="admin1")
+        resp = await client.get(
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
+        )
+        assert resp.status_code == 200
+
+
+async def test_bearer_disabled_admin_user_token_403():
+    async with build_client_app({"admin_client_ids": ["client1"]}) as client:
+        admin = await seed_admin(client.storage)
+        await client.storage.update_user(admin.model_copy(update={"enabled": False}))
+        token = await _seed_token(client.storage, "client1", "admin", user_id="admin1")
+        resp = await client.get(
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
+        )
+        assert resp.status_code == 403
 
 
 async def test_bearer_admin_scope_non_allowlisted_client_403():
