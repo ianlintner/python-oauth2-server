@@ -34,6 +34,9 @@ class Config(BaseSettings):
     seed_email: str = "admin@example.com"
     admin_client_ids: Annotated[list[str], NoDecode] = Field(default_factory=list)
     admin_emails: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Token-exchange entitlements: entries of `caller_client_id->subject_client_id`.
+    # Empty (default): a client may only exchange tokens issued to itself.
+    token_exchange_allowed_pairs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     id_token_private_key_pem: str | None = None
     id_token_kid: str | None = None
     # Resolved by `_default_id_token_alg` below when left unset: "RS256"
@@ -210,6 +213,13 @@ class Config(BaseSettings):
     def _split_admin_client_ids(cls, v: object) -> object:
         if isinstance(v, str):
             return [client_id.strip() for client_id in v.split(",") if client_id.strip()]
+        return v
+
+    @field_validator("token_exchange_allowed_pairs", mode="before")
+    @classmethod
+    def _split_token_exchange_allowed_pairs(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [pair.strip() for pair in v.split(",") if pair.strip()]
         return v
 
     @field_validator("admin_emails", mode="before")

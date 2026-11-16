@@ -137,8 +137,14 @@ several documented Rust spec violations along the way:
   `urn:ietf:params:oauth:grant-type:token-exchange`, lets a confidential client exchange a
   `subject_token` it holds for a new access token scoped to itself; `subject_token_type` and
   `requested_token_type` are validated against the single supported access-token URN (Rust parses
-  and ignores both — divergence 18); the delegation claim `act={"sub": <exchanging client_id>}` is
-  embedded in every exchanged JWT, not just the HTTP response body (divergence 19).
+  and ignores both — divergence 18). The caller must be entitled to the subject token: by default
+  a client may only exchange tokens issued to itself; other `caller->subject` client pairs are
+  allowed only via `OAUTH2_TOKEN_EXCHANGE_ALLOWED_PAIRS` (comma-separated
+  `caller_client_id->subject_client_id`). Issued scope is bounded by both the subject token and the
+  caller's registered scope; a `resource` must be among the subject token's audiences (opaque
+  subject tokens accept none); a sender-constrained subject token requires proof of the same key
+  and the issued token keeps that binding; `actor_token` is rejected (`invalid_request`) and no
+  `act` claim is issued, since no actor is validated.
 
 ### New environment variables (Phase 3b)
 
