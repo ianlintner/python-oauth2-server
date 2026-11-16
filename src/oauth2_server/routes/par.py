@@ -20,7 +20,8 @@ from urllib.parse import parse_qsl
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 
-from oauth2_server.errors import OAuthError, oauth_error
+from oauth2_server.errors import OAuthError
+from oauth2_server.routes.token import client_auth_failure_response
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.mtls import mtls_headers
 
@@ -72,7 +73,7 @@ async def par(request: Request) -> ORJSONResponse:
             mtls=mtls_headers(request, request.app.state.config),
         )
     except OAuthError as exc:
-        return oauth_error(exc.error, exc.description, exc.status)
+        return client_auth_failure_response(request, params, exc)
 
     stored_params = {k: v for k, v in params.items() if k not in _STRIPPED_KEYS}
     request_uri = request.app.state.par_store.store(client_id, stored_params)

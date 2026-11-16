@@ -21,6 +21,7 @@ from oauth2_server.security import (
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.dpop import DpopError, read_dpop_header, validate_dpop_proof
 from oauth2_server.services.events_bus import emit_event
+from oauth2_server.routes.token import client_auth_failure_response
 from oauth2_server.services.mtls import mtls_headers
 
 router = APIRouter()
@@ -120,7 +121,7 @@ async def introspect(request: Request) -> Response:
             form, request.headers.get("authorization"), mtls=mtls_headers(request, config)
         )
     except OAuthError as exc:
-        return oauth_error(exc.error, exc.description, exc.status)
+        return client_auth_failure_response(request, form, exc)
 
     token_value = form.get("token")
     row, matched_via_refresh = (
@@ -285,7 +286,7 @@ async def revoke(request: Request) -> ORJSONResponse:
             form, request.headers.get("authorization"), mtls=mtls_headers(request, config)
         )
     except OAuthError as exc:
-        return oauth_error(exc.error, exc.description, exc.status)
+        return client_auth_failure_response(request, form, exc)
 
     token_value = form.get("token")
     row, _ = await _lookup_token(storage, token_value) if token_value else (None, False)

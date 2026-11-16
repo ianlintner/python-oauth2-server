@@ -828,3 +828,46 @@ async def test_linked_login_amr_is_fed():
         session = (await client.get("/__test_session")).json()
         assert session["user_id"] == local.id
         assert session["amr"] == ["fed"]
+
+
+async def test_denylisted_username_blocks_social_login():
+    from datetime import UTC, datetime
+
+    from oauth2_server.models import DenylistEntry
+
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as client:
+        await client.storage.add_denylist_entry(
+            DenylistEntry(
+                id=uuid.uuid4().hex,
+                kind="username",
+                value="google:1",
+                reason="abuse",
+                created_at=datetime.now(UTC),
+            )
+        )
+        resp = await _run_callback(client, "google", _google_handler("1", "alice@example.com"))
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "access_denied"
+        assert await client.storage.get_user_by_username("google:1") is None
+
+
+async def test_denylisted_email_blocks_linked_social_login():
+    from datetime import UTC, datetime
+
+    from oauth2_server.models import DenylistEntry
+
+    async with build_client_app(LINK_ON) as client:
+        await _seed_local_user(client, email="alice@example.com")
+        await client.storage.add_denylist_entry(
+            DenylistEntry(
+                id=uuid.uuid4().hex,
+                kind="email",
+                value="alice@example.com",
+                reason="abuse",
+                created_at=datetime.now(UTC),
+            )
+        )
+        resp = await _run_callback(client, "google", _google_handler("1", "alice@example.com"))
+        assert resp.status_code == 403
