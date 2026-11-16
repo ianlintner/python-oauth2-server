@@ -286,6 +286,16 @@ does not expose a verification flag for it). Operators who list any address in
 confirm that provider actually verifies email ownership before granting the OAuth app access to
 production.
 
+The allowlist is only applied to an email the server recorded as verified (`users.email_verified`).
+Google and GitHub accounts are verified; Microsoft/Azure accounts are not (their
+`userPrincipalName` is stored but marked unverified), so those accounts never gain admin through
+`OAUTH2_ADMIN_EMAILS` — the request is refused with 403 and a warning naming the user id is logged.
+Password users and emails set through the admin API count as verified. Migration V25 backfills
+`microsoft:`/`azure:` accounts to unverified; sessions issued before upgrading carry no flag and
+must log in again to use the allowlist. Note also that `OAUTH2_MICROSOFT_TENANT_ID` /
+`OAUTH2_AZURE_TENANT_ID` default to `common` (any Azure AD tenant can sign in); set a single tenant
+id for production.
+
 **Account linking by verified email** (`OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL`, default `false` —
 divergence 56) is the opt-in counterpart. With it off (the default), every social login provisions
 its own `provider:id` user row, so a social identity can never reach an existing password account.

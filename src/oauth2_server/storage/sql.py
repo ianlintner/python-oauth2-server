@@ -44,7 +44,15 @@ _DENYLIST_SORT_COLS = ["kind", "value", "created_at"]
 _AUDIT_LOG_SORT_COLS = ["actor_id", "action", "target_kind", "created_at"]
 
 # Columns update_user is allowed to change.
-_USER_UPDATE_COLS = ["username", "email", "enabled", "role", "password_hash", "updated_at"]
+_USER_UPDATE_COLS = [
+    "username",
+    "email",
+    "email_verified",
+    "enabled",
+    "role",
+    "password_hash",
+    "updated_at",
+]
 
 # Columns update_client is allowed to change — mirrors the Rust UPDATE query,
 # which deliberately excludes id/client_id/created_at/require_state.
