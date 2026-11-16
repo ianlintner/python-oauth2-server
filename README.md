@@ -31,6 +31,10 @@ remaining Rust feature set:
 - **Full OIDC RP-initiated logout** — `GET /oauth/logout` supports `id_token_hint`,
   `post_logout_redirect_uri` validation, front-channel iframe logout, and back-channel
   `logout+JWT` delivery via `httpx`; `GET /oauth/check_session` for session-status iframes.
+  Logout acts on the caller's own login session: token revocation and back-channel delivery
+  require an active session (an `id_token_hint` for a different user revokes nothing), and
+  `post_logout_redirect_uri` must be one of the `post_logout_redirect_uris` registered by the
+  client named in the `id_token_hint`.
   `dynamic_registration_enabled` gates `/connect/register` (default off).
 - **PAR (RFC 9126)** — `POST /oauth/par` pushes authorization parameters and returns a
   short-lived, single-use `request_uri` that `GET /oauth/authorize` can consume.
