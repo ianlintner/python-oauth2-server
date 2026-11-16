@@ -12,6 +12,8 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from oauth2_server.models import Token
 from oauth2_server.services.client_assertion import JWT_BEARER_ASSERTION_TYPE
 from tests.conftest import build_client_app
@@ -338,6 +340,41 @@ async def test_delete_client_removes_row():
         assert resp.status_code == 200
         assert resp.json() == {"message": "Client deleted"}
         assert await client.storage.get_client("client1") is None
+
+
+async def test_delete_client_revokes_tokens():
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        seeded = await storage.get_client("client1")
+        token = Token(
+            id=uuid.uuid4().hex,
+            access_token=uuid.uuid4().hex,
+            client_id="client1",
+            expires_at=_future(),
+        )
+        await storage.save_token(token)
+
+        resp = await client.delete(f"/admin/api/clients/{seeded.id}")
+        assert resp.status_code == 200
+        assert await storage.get_client("client1") is None
+        reloaded = await storage.get_token_by_access_token(token.access_token)
+        assert reloaded.revoked is True
+
+
+async def test_delete_client_keeps_row_when_revocation_fails(monkeypatch):
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        seeded = await storage.get_client("client1")
+
+        async def boom(client_id):
+            raise RuntimeError("storage down")
+
+        monkeypatch.setattr(storage, "revoke_tokens_by_client_id", boom)
+        with pytest.raises(RuntimeError):
+            await client.delete(f"/admin/api/clients/{seeded.id}")
+        assert await storage.get_client("client1") is not None
 
 
 async def test_delete_client_404_for_missing():

@@ -647,6 +647,14 @@ input-validation gaps the Phase 3b/4a/4b backlogs recorded:
   `post_logout_redirect_uris`, with the same rule RFC 7591 registration uses: absolute `http(s)`,
   a real authority, no fragment (divergence 58). An empty admin `redirect_uris` list stays allowed
   (that is how client_credentials/device clients are created).
+- **Client deletion revokes tokens** — `DELETE /admin/api/clients/{id}` revokes every token
+  issued to the client before removing it (the same revocation disable uses), and records the
+  count in the `client.delete` audit entry.
+- **jwt-bearer subject namespacing** — with `subject_mapping="sub"`, the local user id for an
+  assertion is `jwtbearer:<trusted issuer id>:<sub>` (JIT users get the same value as username),
+  so the same `sub` from different issuers maps to different users. Existing users must be
+  provisioned under that id. A trusted issuer's empty `allowed_client_ids` now allows no client;
+  list the permitted client ids explicitly. Email mapping is unchanged.
 - **`claims` honored in the id_token** — the `claims` request stored on the authorization code is
   read back when the id_token is minted (`services/claims_request.py`, divergence 59). The
   semantics are deliberately narrow: a requested claim is delivered only when the granted SCOPE
