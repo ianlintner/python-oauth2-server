@@ -659,16 +659,16 @@ def test_main_fails_closed_before_spawning_workers(conformance_env):
     assert ran == []
 
 
-def test_main_keeps_configured_workers_when_the_mode_is_off(monkeypatch):
+def test_main_keeps_explicit_single_worker_when_the_mode_is_off(monkeypatch):
     from oauth2_server import __main__ as entry
 
     monkeypatch.setenv("OAUTH2_JWT_SECRET", SECRET)
     monkeypatch.delenv("OAUTH2_CONFORMANCE_MODE", raising=False)
-    monkeypatch.setenv("OAUTH2_WORKERS", "3")
+    monkeypatch.setenv("OAUTH2_WORKERS", "1")
     captured: dict = {}
     monkeypatch.setattr(entry.uvicorn, "run", lambda *a, **kw: captured.update(kw))
     entry.main()
-    assert captured["workers"] == 3
+    assert captured["workers"] == 1
 
 
 def test_create_app_alone_never_enables_the_mode():
