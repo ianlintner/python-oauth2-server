@@ -192,7 +192,8 @@ async def test_dashboard_returns_expected_counts():
         await _login(client)
         storage = client.storage
         await _clear_default_clients(storage)
-        await _clear_default_users(storage)
+        await storage.delete_user("u1")
+        await storage.delete_user("test-user-id")
 
         await seed_client(storage, id=uuid.uuid4().hex, client_id="dash-c1")
         await seed_client(storage, id=uuid.uuid4().hex, client_id="dash-c2")
@@ -210,7 +211,7 @@ async def test_dashboard_returns_expected_counts():
         assert resp.status_code == 200
         body = resp.json()
         assert body["total_clients"] == 2
-        assert body["total_users"] == 1
+        assert body["total_users"] == 2  # dash-user + the logged-in admin
         assert "active_tokens" in body
         assert "pending_device_codes" in body
 

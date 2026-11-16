@@ -182,6 +182,7 @@ def create_app(
         session_cookie="oauth2_session",
         same_site="lax",
         https_only=not config.allow_insecure_defaults,
+        max_age=config.session_max_age_secs,
     )
 
     # Registered after Session (so it wraps it), and BEFORE DenylistGuard

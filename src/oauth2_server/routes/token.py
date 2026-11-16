@@ -50,6 +50,7 @@ from oauth2_server.keys import KeySet
 from oauth2_server.models import Client, User
 from oauth2_server.security import decode_unverified_claims
 from oauth2_server.services.auth import scope_is_subset
+from oauth2_server.services.users import load_active_user
 from oauth2_server.services.claims_request import ClaimsSelection, select_id_token_claims
 from oauth2_server.services.client_assertion import unverified_assertion_subject
 from oauth2_server.services.clients import ClientService
@@ -561,6 +562,9 @@ async def token(request: Request) -> ORJSONResponse:
         # validated at /oauth/authorize) — a `resource` form value on this
         # request is deliberately ignored rather than allowed to narrow it
         # (Rust parity; RFC 8707 §2.2 would permit narrowing).
+        if await load_active_user(storage, auth_code.user_id) is None:
+            return oauth_error("invalid_grant", "authorization code is no longer valid")
+
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             auth_code.user_id,
@@ -708,6 +712,12 @@ async def token(request: Request) -> ORJSONResponse:
                     "refresh token is bound to a DPoP key; present a proof with the same key",
                 )
 
+        if (
+            old_token.user_id is not None
+            and await load_active_user(storage, old_token.user_id) is None
+        ):
+            return oauth_error("invalid_grant", "refresh token is no longer valid")
+
         family = old_token.token_family or uuid.uuid4().hex
         await storage.revoke_token(old_token.access_token)
 
@@ -829,6 +839,9 @@ async def token(request: Request) -> ORJSONResponse:
         # research-rar-token-exchange.md `endpoints`: "Same for
         # device_code grant") — DeviceAuthorization has no
         # authorization_details field at all, so there's nothing to embed.
+        if await load_active_user(storage, device.user_id) is None:
+            return oauth_error("invalid_grant", "device authorization is no longer valid")
+
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             device.user_id,

@@ -44,7 +44,15 @@ _DENYLIST_SORT_COLS = ["kind", "value", "created_at"]
 _AUDIT_LOG_SORT_COLS = ["actor_id", "action", "target_kind", "created_at"]
 
 # Columns update_user is allowed to change.
-_USER_UPDATE_COLS = ["username", "email", "enabled", "role", "password_hash", "updated_at"]
+_USER_UPDATE_COLS = [
+    "username",
+    "email",
+    "enabled",
+    "role",
+    "password_hash",
+    "session_epoch",
+    "updated_at",
+]
 
 # Columns update_client is allowed to change — mirrors the Rust UPDATE query,
 # which deliberately excludes id/client_id/created_at/require_state.
@@ -326,21 +334,29 @@ class SqlStorage:
     async def set_user_enabled(self, user_id: str, enabled: bool) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(
-                text("UPDATE users SET enabled = :e WHERE id = :uid"),
+                text(
+                    "UPDATE users SET enabled = :e, session_epoch = session_epoch + 1 "
+                    "WHERE id = :uid"
+                ),
                 {"e": enabled, "uid": user_id},
             )
 
     async def set_user_role(self, user_id: str, role: str) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(
-                text("UPDATE users SET role = :r WHERE id = :uid"),
+                text(
+                    "UPDATE users SET role = :r, session_epoch = session_epoch + 1 WHERE id = :uid"
+                ),
                 {"r": role, "uid": user_id},
             )
 
     async def set_user_password_hash(self, user_id: str, password_hash: str) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(
-                text("UPDATE users SET password_hash = :p WHERE id = :uid"),
+                text(
+                    "UPDATE users SET password_hash = :p, session_epoch = session_epoch + 1 "
+                    "WHERE id = :uid"
+                ),
                 {"p": password_hash, "uid": user_id},
             )
 

@@ -53,6 +53,7 @@ from oauth2_server.services.social import (
     generate_pkce_pair,
     resolve_provider_config,
 )
+from oauth2_server.services.users import ensure_user_active
 from oauth2_server.sessions import set_login
 
 if TYPE_CHECKING:
@@ -265,6 +266,10 @@ async def social_callback(provider: str, request: Request):
     user = await storage.get_user_by_username(username)
     if user is None:
         user = await _link_by_verified_email(config, storage, userinfo)
+    if user is not None and await ensure_user_active(storage, user) is None:
+        # Same standing rules as password login: disabled or denylisted
+        # accounts do not get a session.
+        return _error("access_denied", "account is not permitted to sign in", 403)
     if user is None:
         # Placeholder password: an Argon2id hash of a random UUIDv4, never
         # logged or returned — social users authenticate solely via the

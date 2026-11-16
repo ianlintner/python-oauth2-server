@@ -79,7 +79,7 @@ async def _best_effort_revoke_by_user(storage, user_id: str) -> None:
     try:
         await storage.revoke_tokens_by_user_id(user_id)
     except Exception:
-        logger.warning("failed to revoke tokens for user_id=%s", user_id, exc_info=True)
+        logger.error("failed to revoke tokens for user_id=%s", user_id, exc_info=True)
 
 
 @router.get("/users")
@@ -181,6 +181,8 @@ async def update_user(
         updates["enabled"] = body_model.enabled
 
     now = datetime.now(UTC)
+    if any(getattr(user, k) != v for k, v in updates.items()):
+        updates["session_epoch"] = user.session_epoch + 1
     updated = user.model_copy(update={**updates, "updated_at": now})
     await storage.update_user(updated)
 
@@ -190,7 +192,14 @@ async def update_user(
     await record_audit(
         storage,
         events,
-        build_audit(request, actor, "user.update", "user", user.id, {"fields": sorted(updates)}),
+        build_audit(
+            request,
+            actor,
+            "user.update",
+            "user",
+            user.id,
+            {"fields": sorted(k for k in updates if k != "session_epoch")},
+        ),
     )
 
     return ORJSONResponse(_user_response(updated))

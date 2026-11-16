@@ -44,11 +44,10 @@ async def _clear_default_users(storage) -> None:
     # build_client_app seeds "user_rfc" (id="u1"); _login's seed_admin adds
     # "admin_rfc" (id="admin1"); migrations/sql/V5__insert_default_data.sql
     # additionally seeds a dev "testuser" (id="test-user-id") on every fresh
-    # storage. Tests asserting exact counts start from a clean users table —
-    # safe post-login because the session guard trusts the signed session
-    # cookie, not a DB re-lookup.
+    # storage. Tests asserting exact counts start from a clean users table,
+    # except the logged-in admin ("admin1"): the session guard re-reads that
+    # row on every request, so deleting it would end the session.
     await storage.delete_user("u1")
-    await storage.delete_user("admin1")
     await storage.delete_user("test-user-id")
 
 
@@ -60,7 +59,7 @@ async def test_list_users_paged():
         await _login(client)
         storage = client.storage
         await _clear_default_users(storage)
-        for i in range(8):
+        for i in range(7):  # plus the logged-in admin = 8 rows
             await _seed_extra_user(storage, f"user-{i:02d}")
 
         resp = await client.get("/admin/api/users", params={"limit": 3, "offset": 6})
