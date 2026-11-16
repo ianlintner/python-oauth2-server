@@ -296,7 +296,19 @@ def _mint_id_token(
 
 @router.post("/token")
 async def token(request: Request) -> ORJSONResponse:
-    form = dict(await request.form())
+    form_data = await request.form()
+
+    # RFC 6749 §3.2: request parameters MUST NOT be included more than once.
+    # Reject a repeated name (body, query string, or across both) before any
+    # client authentication or grant dispatch, rather than letting `dict()`
+    # silently keep one of the values.
+    seen_keys: set[str] = set()
+    for key, _ in (*request.query_params.multi_items(), *form_data.multi_items()):
+        if key in seen_keys:
+            return oauth_error("invalid_request", "duplicate parameter")
+        seen_keys.add(key)
+
+    form = dict(form_data)
     storage = request.app.state.storage
     config = request.app.state.config
     keyset = request.app.state.keyset
