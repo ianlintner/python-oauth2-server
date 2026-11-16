@@ -833,3 +833,38 @@ async def test_admin_update_accepts_valid_logout_uris():
         assert reloaded.backchannel_logout_uri == "https://a.example/bc"
         assert reloaded.frontchannel_logout_uri == "https://a.example/fc"
         assert reloaded.get_post_logout_redirect_uris() == ["https://a.example/out"]
+
+
+# --- Per-client resource allow-list ---
+
+
+async def test_create_and_update_client_resources():
+    async with build_client_app() as client:
+        await _login(client)
+        created = await client.post(
+            "/admin/api/clients",
+            json={"name": "R", "resources": ["https://api.example"]},
+        )
+        assert created.status_code == 201, created.text
+        stored = await client.storage.get_client(created.json()["client_id"])
+        assert stored.resource_list() == ["https://api.example"]
+
+        updated = await client.put(
+            f"/admin/api/clients/{stored.id}", json={"resources": ["https://b.example"]}
+        )
+        assert updated.status_code == 200, updated.text
+        reloaded = await client.storage.get_client(stored.client_id)
+        assert reloaded.resource_list() == ["https://b.example"]
+
+        cleared = await client.put(f"/admin/api/clients/{stored.id}", json={"resources": []})
+        assert cleared.status_code == 200, cleared.text
+        assert (await client.storage.get_client(stored.client_id)).resource_list() == []
+
+
+async def test_client_resources_rejects_invalid_values():
+    async with build_client_app() as client:
+        await _login(client)
+        for bad in (["/relative"], ["https://a.example/#frag"], "https://a.example", [1]):
+            resp = await client.post("/admin/api/clients", json={"name": "R", "resources": bad})
+            assert resp.status_code == 400, (bad, resp.text)
+            assert resp.json()["error"] == "invalid_request"

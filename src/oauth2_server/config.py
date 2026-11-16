@@ -59,6 +59,9 @@ class Config(BaseSettings):
     # actually enforces it (research-rar-token-exchange.md gotchas, backlog
     # gap #20) — the Python port makes this config-driven and enforced.
     rar_types_supported: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["openid"])
+    # RFC 8707: server-wide allow-list of resource indicators, applied to every
+    # client without its own `resources` list. Empty (default) = unrestricted.
+    resource_allow_list: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # RFC 9470 step-up: the Authentication Context Class References this
     # server can attest to. `[0]` is what a successful login stamps on the
     # session (`sessions.set_login`), and `GET /oauth/authorize` satisfies an
@@ -181,6 +184,13 @@ class Config(BaseSettings):
     def _split_origins(cls, v: object) -> object:
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
+
+    @field_validator("resource_allow_list", mode="before")
+    @classmethod
+    def _split_resource_allow_list(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [r.strip() for r in v.split(",") if r.strip()]
         return v
 
     @field_validator("rar_types_supported", mode="before")

@@ -462,6 +462,12 @@ earlier phases deliberately left open:
   claim on every grant (authorization_code redemption uses the `resource` stored on the
   authorization code at issuance, not a value re-supplied at the token request); introspection
   echoes the token's own `aud`. Discovery advertises `resource_indicators_supported: true`.
+  Resource indicators may be restricted to an allow-list: a client's own `resources` list
+  (admin API `POST`/`PUT /admin/api/clients`) when non-empty, otherwise the server-wide
+  `OAUTH2_RESOURCE_ALLOW_LIST` (comma-separated). A value not on the applicable list is
+  rejected with `invalid_target`; matching is exact string equality. With neither set
+  (the default) any valid absolute URI is accepted. On refresh the allow-list is applied in
+  addition to the existing audience-subset rule.
 - **RFC 9728 / metadata parity** — `GET /.well-known/oauth-protected-resource` and
   `GET /.well-known/oauth-authorization-server/status` (a static, all-valid
   `draft-ietf-oauth-status-list` stub — unrelated to RFC 9701 below) are new endpoints;

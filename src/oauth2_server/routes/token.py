@@ -68,7 +68,7 @@ from oauth2_server.services.jwt_bearer_grant import JWT_BEARER_GRANT, redeem_jwt
 from oauth2_server.services.limits import LimitError, check_depth
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.services.rar import RarError, validate_authorization_details
-from oauth2_server.services.resource import validate_resource
+from oauth2_server.services.resource import validate_resource_for_client
 from oauth2_server.services.tokens import TokenService
 
 logger = logging.getLogger(__name__)
@@ -411,7 +411,7 @@ async def token(request: Request) -> ORJSONResponse:
                 return oauth_error(exc.error, exc.description)
 
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
@@ -655,7 +655,7 @@ async def token(request: Request) -> ORJSONResponse:
         # corrected retry would look like refresh-token reuse and revoke the
         # entire token family.
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
@@ -808,7 +808,7 @@ async def token(request: Request) -> ORJSONResponse:
             return oauth_error("authorization_pending", "authorization request is still pending")
 
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
@@ -968,7 +968,7 @@ async def token(request: Request) -> ORJSONResponse:
         # `cnf` binds THIS request's own DPoP proof (the shared pre-grant
         # block above), not the subject token's binding.
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
@@ -1049,7 +1049,7 @@ async def token(request: Request) -> ORJSONResponse:
             scope = client.scope
 
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
