@@ -469,9 +469,11 @@ earlier phases deliberately left open:
   presenting Basic auth still fails). `validate_client_assertion` enforces `alg` pinned to the
   registered method, required claims `exp`/`sub`/`iss`/`aud`, `aud` equal to the token endpoint
   URL for every endpoint that authenticates a client this way (token, introspect, revoke, PAR,
-  device authorization), `iss`/`sub` equal to `client_id`, and jti replay protection via
-  `JtiReplayGuard`. A JWT assertion may omit form `client_id`, resolving the client from the
-  assertion's `sub` instead (divergence 36). `services/jwks_cache.py::JwksCache` fetches and
+  device authorization), `iss`/`sub` equal to `client_id`, a maximum assertion lifetime of 300
+  seconds (`exp` at most 300 s ahead of the server clock, `exp - iat` at most 300 s when `iat` is
+  present, and `iat` at most 60 s in the future; longer-lived assertions are rejected with
+  `invalid_client`), and jti replay protection via `JtiReplayGuard`. A JWT assertion may omit form `client_id`,
+  resolving the client from the assertion's `sub` instead (divergence 36). `services/jwks_cache.py::JwksCache` fetches and
   caches a `private_key_jwt` client's `jwks_uri` document, TTL clamped to `[30, 86400]` seconds
   (default 300, from `Cache-Control: max-age`), with a 10 s fetch timeout; an inline registered
   `jwks` column is preferred over `jwks_uri` when both would apply. `ClientService.from_app`
