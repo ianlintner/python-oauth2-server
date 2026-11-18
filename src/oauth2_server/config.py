@@ -34,6 +34,11 @@ class Config(BaseSettings):
     seed_email: str = "admin@example.com"
     admin_client_ids: Annotated[list[str], NoDecode] = Field(default_factory=list)
     admin_emails: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Client IDs that skip the user-consent step (first-party clients). Empty
+    # by default: every client needs a recorded user approval. Each entry
+    # lets that client obtain codes for any user without a consent prompt, so
+    # list only clients the operator fully controls.
+    consent_trusted_client_ids: Annotated[list[str], NoDecode] = Field(default_factory=list)
     id_token_private_key_pem: str | None = None
     id_token_kid: str | None = None
     # Resolved by `_default_id_token_alg` below when left unset: "RS256"
@@ -203,6 +208,13 @@ class Config(BaseSettings):
     def _split_acr_values(cls, v: object) -> object:
         if isinstance(v, str):
             return [a.strip() for a in v.split(",") if a.strip()]
+        return v
+
+    @field_validator("consent_trusted_client_ids", mode="before")
+    @classmethod
+    def _split_consent_trusted_client_ids(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [client_id.strip() for client_id in v.split(",") if client_id.strip()]
         return v
 
     @field_validator("admin_client_ids", mode="before")

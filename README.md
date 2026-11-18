@@ -54,6 +54,7 @@ All are `OAUTH2_`-prefixed (see `src/oauth2_server/config.py` for the full `Conf
 | Variable | Default | Purpose |
 |---|---|---|
 | `OAUTH2_ADMIN_CLIENT_IDS` | unset (empty) | Comma-separated `client_id` allowlist for the bearer-token admin-API path. Fails closed — an empty/unset list denies every bearer token, even one with `admin` scope. |
+| `OAUTH2_CONSENT_TRUSTED_CLIENT_IDS` | unset (empty) | Comma-separated `client_id`s that skip the user-consent step. Empty by default (every client needs a recorded approval). Each listed client can obtain codes for any signed-in user without a prompt, so list only first-party clients you fully control. |
 | `OAUTH2_ADMIN_EMAILS` | unset (empty) | Comma-separated, case-insensitive email allowlist that grants admin-API access to a session even when the user's `role` isn't `admin`. |
 | `OAUTH2_SEED_USERNAME` | `admin` | Username for the optional startup-seeded admin user. |
 | `OAUTH2_SEED_PASSWORD` | unset | **Admin seeding only runs when this is explicitly set** — a deliberate divergence from Rust, which ships an insecure default password rejected only in production mode. |
@@ -63,6 +64,17 @@ All are `OAUTH2_`-prefixed (see `src/oauth2_server/config.py` for the full `Conf
 | `OAUTH2_ID_TOKEN_ALG` | `RS256` if a PEM is set, else `HS256` | Explicit override for the signing algorithm; normalized to upper-case. |
 | `OAUTH2_KEY_ROTATION_GRACE_HOURS` | `24` | How long a rotated-out RS256 key stays published in JWKS after `POST /admin/api/keys/rotate`, so tokens signed just before rotation still verify. |
 | `OAUTH2_DYNAMIC_REGISTRATION_ENABLED` | `false` | Gates `POST /connect/register`. Off by default, unlike Rust. |
+
+### User consent
+
+`GET /oauth/authorize` records and checks the user's approval of each client's scopes: the first
+request for a client (or for scopes beyond those already approved) shows a consent page, and
+`POST /oauth/consent` completes or denies it. `prompt=consent` always shows the page; `prompt=none`
+returns `consent_required` when no stored approval covers the request, so relying parties that
+used `prompt=none` for users who never approved the client now receive that error. Existing users
+have no recorded approvals and are asked once. Consent is a divergence from the Rust server (see
+"Accepted divergences" 65 in `docs/PHASE2-BACKLOG.md`). The pending request is held in process
+memory, like PAR entries.
 
 ### Single-process state caveats
 
@@ -739,7 +751,8 @@ outside an ephemeral test process.
 When on, it loads the seed's `issuer`, `clients`, `users` and `signingKeys`
 into a process-local in-memory store before the server binds, drives the
 ordinary `POST /auth/login` form + `GET /oauth/authorize` non-interactively
-(no consent screen, so seeded clients are consented implicitly), provisions
+(the seeded user's `auto_approve_clients` skip the consent step; any other client
+gets the normal consent page), provisions
 fresh key material under each seeded `kid` (never from the seed), and adds a
 `conformance` object (seed_applied, counts, signing key ids — never
 credentials) to `GET /ready`. `conformance.yaml` pins the claimed contract
