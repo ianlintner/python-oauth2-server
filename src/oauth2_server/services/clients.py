@@ -90,7 +90,18 @@ def is_valid_redirect_uri(uri: str) -> bool:
     parsed = urlparse(uri)
     # RFC 6749 §3.1.2 forbids fragments in redirect URIs
     has_fragment = bool(parsed.fragment) or uri.endswith("#")
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc) and not has_fragment
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or has_fragment:
+        return False
+    if parsed.scheme == "http":
+        # Plain http is only accepted for loopback hosts (RFC 8252 §7.3);
+        # every other host must use https. This governs intake only —
+        # `redirect_uri_matches` is unchanged and stored rows are not migrated.
+        try:
+            host = parsed.hostname
+        except ValueError:
+            return False
+        return host == "localhost" or host in _LOOPBACK_IP_LITERALS
+    return True
 
 
 _LOOPBACK_IP_LITERALS = ("127.0.0.1", "::1")

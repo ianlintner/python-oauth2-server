@@ -98,6 +98,28 @@ async def test_client_credentials_issues_at_jwt(client_app):
     assert resp.headers["cache-control"] == "no-store"
 
 
+async def test_token_endpoint_rejects_duplicate_parameter(client_app):
+    auth = {"Authorization": "Basic " + base64.b64encode(b"client1:s3cret").decode()}
+    form_header = {"Content-Type": "application/x-www-form-urlencoded", **auth}
+
+    for body, url in (
+        ("grant_type=client_credentials&grant_type=client_credentials", "/oauth/token"),
+        ("grant_type=client_credentials&scope=a&scope=b", "/oauth/token"),
+        ("grant_type=client_credentials&resource=x:a&resource=x:b", "/oauth/token"),
+        ("grant_type=client_credentials", "/oauth/token?scope=a&scope=b"),
+        ("grant_type=client_credentials&scope=a", "/oauth/token?scope=a"),
+    ):
+        resp = await client_app.post(url, content=body, headers=form_header)
+        assert resp.status_code == 400, (url, body)
+        assert resp.json()["error"] == "invalid_request"
+        assert "duplicate" in resp.json()["error_description"]
+
+    ok = await client_app.post(
+        "/oauth/token", content="grant_type=client_credentials", headers=form_header
+    )
+    assert ok.status_code == 200
+
+
 async def test_wrong_secret_rejected_with_401(client_app):
     resp = await post_token(
         client_app, {"grant_type": "client_credentials"}, basic_auth=("client1", "nope")

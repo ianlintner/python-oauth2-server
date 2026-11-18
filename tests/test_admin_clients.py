@@ -208,6 +208,26 @@ async def test_create_client_confidential_returns_secret_once():
         assert stored.client_secret == body["client_secret"]
 
 
+async def test_create_client_rejects_short_secret():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post("/admin/api/clients", json={"name": "c", "client_secret": "abc"})
+        assert resp.status_code == 400
+        assert not [c for c in await client.storage.list_all_clients() if c.name == "c"]
+
+        # Long but single-class is rejected too.
+        resp = await client.post(
+            "/admin/api/clients", json={"name": "c", "client_secret": "a" * 32}
+        )
+        assert resp.status_code == 400
+
+        ok = await client.post(
+            "/admin/api/clients",
+            json={"name": "c", "client_secret": "Kx9fQ2mZ7vLp4TnR8sWd1Bc6YhJ3aUe5"},
+        )
+        assert ok.status_code == 201
+
+
 async def test_create_public_client_has_no_secret():
     async with build_client_app() as client:
         await _login(client)
@@ -762,6 +782,47 @@ async def test_admin_create_rejects_fragment_redirect_uri():
         body = resp.json()
         assert body["error"] == "invalid_request"
         assert "redirect_uris" in body["error_description"]
+
+
+async def test_is_valid_redirect_uri_rejects_plain_http_non_loopback():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={"name": "Http Redirect", "redirect_uris": ["http://billing.example.com/cb"]},
+        )
+        assert resp.status_code == 400
+        assert "redirect_uris" in resp.json()["error_description"]
+
+        for field in ("backchannel_logout_uri", "frontchannel_logout_uri"):
+            resp = await client.post(
+                "/admin/api/clients",
+                json={"name": "Http Logout", field: "http://billing.example.com/logout"},
+            )
+            assert resp.status_code == 400
+
+        for uri in (
+            "http://127.0.0.1:3000/cb",
+            "http://localhost:3000/cb",
+            "https://billing.example.com/cb",
+        ):
+            ok = await client.post(
+                "/admin/api/clients", json={"name": "Ok Redirect", "redirect_uris": [uri]}
+            )
+            assert ok.status_code == 201, uri
+
+
+def test_is_valid_redirect_uri_allows_http_loopback_only():
+    from oauth2_server.services.clients import is_valid_redirect_uri
+
+    assert is_valid_redirect_uri("http://127.0.0.1:3000/cb")
+    assert is_valid_redirect_uri("http://[::1]:3000/cb")
+    assert is_valid_redirect_uri("http://localhost/cb")
+    assert is_valid_redirect_uri("https://app.example.com/cb")
+    assert not is_valid_redirect_uri("http://app.example.com/cb")
+    assert not is_valid_redirect_uri("http://10.0.0.5/cb")
+    assert not is_valid_redirect_uri("http://localhost.evil.example/cb")
+    assert not is_valid_redirect_uri("https://app.example.com/cb#frag")
 
 
 async def test_admin_create_rejects_non_http_redirect_uri():
