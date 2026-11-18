@@ -382,14 +382,15 @@ class TrustedIssuer(BaseModel):
         return self._list(self.allowed_audiences)
 
     def allows_client(self, client_id: str) -> bool:
-        """Empty `allowed_client_ids` means every client may use the issuer."""
+        """Only clients listed in `allowed_client_ids` may use the issuer; an
+        empty list allows none."""
         try:
             allowed = json.loads(self.allowed_client_ids or "[]")
         except ValueError:
             return False  # malformed allow-list fails closed
         if not isinstance(allowed, list) or not all(isinstance(x, str) for x in allowed):
             return False
-        return not allowed or client_id in allowed
+        return client_id in allowed
 
 
 class DenylistEntry(BaseModel):

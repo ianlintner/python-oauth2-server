@@ -506,6 +506,9 @@ async def delete_client(
     if client is None:
         return _client_not_found()
 
+    # Revoke first: if revocation raises, the request fails (5xx) and the
+    # client row is kept, so live tokens are never left behind a vanished client.
+    revoked_tokens = await storage.revoke_tokens_by_client_id(client.client_id)
     await storage.delete_client(client.client_id)
 
     # Deliberate divergence from Rust (which forgot to audit this handler):
@@ -514,7 +517,12 @@ async def delete_client(
         storage,
         events,
         build_audit(
-            request, actor, "client.delete", "client", client.id, {"client_id": client.client_id}
+            request,
+            actor,
+            "client.delete",
+            "client",
+            client.id,
+            {"client_id": client.client_id, "tokens_revoked": revoked_tokens},
         ),
     )
 
