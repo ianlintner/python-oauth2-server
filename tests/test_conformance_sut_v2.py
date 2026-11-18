@@ -179,6 +179,22 @@ async def test_clock_rejects_anything_but_a_bounded_integer(conformance_env, bod
         assert clock.offset() == 0
 
 
+async def test_clock_error_description_is_fixed_not_a_reflected_exception(conformance_env):
+    """The range-overflow rejection must return a fixed, safe message, not
+    the text of whatever exception ``clock.advance`` happens to raise."""
+    app = build()
+    async with app.router.lifespan_context(app), _http(app) as client:
+        resp = await client.post("/conformance/clock", json={"advance_seconds": 31_536_001})
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["error"] == "invalid_request"
+        assert body["error_description"] == "advance_seconds must be between 0 and 31536000"
+        # No exception/stack-trace material must leak into the response.
+        for value in body.values():
+            assert "Traceback" not in str(value)
+            assert "ValueError" not in str(value)
+
+
 async def test_clock_rejects_non_json_body(conformance_env):
     app = build()
     async with app.router.lifespan_context(app), _http(app) as client:
