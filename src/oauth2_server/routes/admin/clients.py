@@ -28,6 +28,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
+from oauth2_server.errors import OAuthError
 from oauth2_server.models import Client
 from oauth2_server.routes.admin._util import _json_body, _parse_body
 from oauth2_server.routes.admin.guard import AdminActor, AdminDep
@@ -39,6 +40,7 @@ from oauth2_server.services.clients import (
     is_valid_jwks_uri,
     is_valid_redirect_uri,
 )
+from oauth2_server.services.resource import validate_resource
 from oauth2_server.storage.paging import ListQuery, page_envelope
 
 router = APIRouter()
@@ -81,6 +83,8 @@ class ClientUpdateBody(BaseModel):
     backchannel_logout_uri: StrictStr | None = None
     frontchannel_logout_uri: StrictStr | None = None
     post_logout_redirect_uris: list[StrictStr] | None = None
+    # RFC 8707 per-client resource allow-list; [] clears it.
+    resources: list[StrictStr] | None = None
 
 
 def _client_not_found() -> ORJSONResponse:
@@ -128,6 +132,7 @@ def _validate_redirect_uris(
     backchannel_logout_uri: str | None = None,
     frontchannel_logout_uri: str | None = None,
     post_logout_redirect_uris: object = None,
+    resources: object = None,
 ) -> ORJSONResponse | None:
     """Divergence 58: the admin API validates client URIs the way RFC 7591
     dynamic registration does.
@@ -168,6 +173,15 @@ def _validate_redirect_uris(
             return _bad_request(
                 "post_logout_redirect_uris must be absolute http(s) URLs without fragments"
             )
+
+    if resources is not None:
+        if not isinstance(resources, list) or not all(isinstance(r, str) for r in resources):
+            return _bad_request("resources must be a list of strings")
+        for resource in resources:
+            try:
+                validate_resource(resource)
+            except OAuthError:
+                return _bad_request("resources must be absolute URIs without fragments")
     return None
 
 
@@ -235,6 +249,7 @@ def _client_detail(client: Client) -> dict:
         "jwks": client.jwks,
         "jwks_uri": client.jwks_uri,
         "tls_client_certificate_subject_dn": client.tls_client_certificate_subject_dn,
+        "resources": client.resources,
         "created_at": client.created_at.isoformat(),
         "updated_at": client.updated_at.isoformat(),
     }
@@ -323,6 +338,7 @@ async def create_client(request: Request, actor: AdminActor = AdminDep) -> ORJSO
     backchannel_logout_uri = body.get("backchannel_logout_uri") or ""
     frontchannel_logout_uri = body.get("frontchannel_logout_uri") or ""
     post_logout_redirect_uris = body.get("post_logout_redirect_uris")
+    resources = body.get("resources")
     if not isinstance(backchannel_logout_uri, str) or not isinstance(frontchannel_logout_uri, str):
         return _bad_request("logout URIs must be strings")
 
@@ -331,12 +347,14 @@ async def create_client(request: Request, actor: AdminActor = AdminDep) -> ORJSO
         backchannel_logout_uri=backchannel_logout_uri,
         frontchannel_logout_uri=frontchannel_logout_uri,
         post_logout_redirect_uris=post_logout_redirect_uris,
+        resources=resources,
     )
     if invalid is not None:
         return invalid
 
     now = datetime.now(UTC)
     client = Client(
+        resources=json.dumps(resources or []),
         id=uuid.uuid4().hex,
         client_id=client_id,
         client_secret=client_secret,
@@ -449,6 +467,9 @@ async def update_client(
             else ""
         )
 
+    if "resources" in fields_set:
+        updates["resources"] = json.dumps(body_model.resources or [])
+
     # Divergence 58: only the SUBMITTED URIs are validated — a stored row that
     # predates this rule keeps working until someone edits it.
     invalid = _validate_redirect_uris(
@@ -456,6 +477,7 @@ async def update_client(
         backchannel_logout_uri=body_model.backchannel_logout_uri,
         frontchannel_logout_uri=body_model.frontchannel_logout_uri,
         post_logout_redirect_uris=body_model.post_logout_redirect_uris,
+        resources=body_model.resources,
     )
     if invalid is not None:
         return invalid
