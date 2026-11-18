@@ -32,6 +32,7 @@ from oauth2_server.models import Client
 from oauth2_server.routes.admin._util import _json_body, _parse_body
 from oauth2_server.routes.admin.guard import AdminActor, AdminDep
 from oauth2_server.services.audit import build_audit, record_audit
+from oauth2_server.services.client_secrets import protect_client_secret
 from oauth2_server.services.clients import (
     JWKS_URI_ERROR,
     SELF_SIGNED_REQUIRES_JWKS_ERROR,
@@ -306,10 +307,14 @@ async def create_client(request: Request, actor: AdminActor = AdminDep) -> ORJSO
         return invalid
 
     now = datetime.now(UTC)
+    secret_verifier_value, sealed_secret_key = await protect_client_secret(
+        client_secret, client_id, request.app.state.config.jwt_secret
+    )
     client = Client(
         id=uuid.uuid4().hex,
         client_id=client_id,
-        client_secret=client_secret,
+        client_secret=secret_verifier_value,
+        client_secret_key=sealed_secret_key,
         redirect_uris=json.dumps(redirect_uris),
         grant_types=json.dumps(grant_types),
         scope=scope,
@@ -546,7 +551,10 @@ async def regenerate_client_secret(
         )
 
     new_secret = uuid.uuid4().hex
-    await storage.set_client_secret(client.client_id, new_secret)
+    verifier_value, sealed_key = await protect_client_secret(
+        new_secret, client.client_id, request.app.state.config.jwt_secret
+    )
+    await storage.set_client_secret(client.client_id, verifier_value, sealed_key)
 
     await record_audit(
         storage,

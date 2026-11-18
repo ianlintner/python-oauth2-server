@@ -42,6 +42,7 @@ from sqlalchemy.engine import make_url
 from oauth2_server.config import Config
 from oauth2_server.keys import KeySet, SigningKey, generate_signing_key
 from oauth2_server.models import Client, User
+from oauth2_server.services.credential_storage import derive_seal_key, seal, secret_verifier
 from oauth2_server.security import hash_password_async
 from oauth2_server.storage.base import Storage
 
@@ -551,7 +552,9 @@ class Applied:
         }
 
 
-async def apply_seed(seed: Seed, storage: Storage, keyset: KeySet) -> Applied:
+async def apply_seed(
+    seed: Seed, storage: Storage, keyset: KeySet, *, seal_master: str | None = None
+) -> Applied:
     """Apply `seed` to `storage` and provision its signing keys into `keyset`.
 
     The first failure raises `ConformanceError` (the caller must not start
@@ -565,10 +568,21 @@ async def apply_seed(seed: Seed, storage: Storage, keyset: KeySet) -> Applied:
         public = seeded.is_public()
         if await storage.get_client(seeded.client_id) is not None:
             raise ConformanceError(f"seeding client {seeded.client_id!r} failed: already exists")
+        # Seeded secrets are stored like any other: a verifier, plus sealed
+        # HMAC key material when the caller supplies the server key.
+        secret_verifier_value = (
+            secret_verifier(seeded.client_secret) if seeded.client_secret else ""
+        )
+        sealed_secret_key = (
+            seal(seeded.client_secret, derive_seal_key(seal_master), seeded.client_id)
+            if seeded.client_secret and seal_master
+            else ""
+        )
         client = Client(
             id=uuid.uuid4().hex,
             client_id=seeded.client_id,
-            client_secret=seeded.client_secret or "",
+            client_secret=secret_verifier_value,
+            client_secret_key=sealed_secret_key,
             redirect_uris=json.dumps(seeded.redirect_uris),
             grant_types=json.dumps(seeded.grant_types or list(DEFAULT_GRANT_TYPES)),
             scope=" ".join(seeded.scopes) if seeded.scopes else DEFAULT_CLIENT_SCOPE,

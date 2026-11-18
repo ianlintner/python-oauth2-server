@@ -18,6 +18,7 @@ from oauth2_server.app import build, create_app
 from oauth2_server.config import Config
 from oauth2_server.conformance import ConformanceError, Seed
 from oauth2_server.keys import KeySet
+from oauth2_server.services.credential_storage import verify_client_secret
 from tests.helpers import PKCE_CHALLENGE, make_storage
 
 VALID = """
@@ -289,7 +290,7 @@ async def test_apply_seeds_clients_users_and_keys():
     assert (applied.clients, applied.users) == (2, 1)
 
     confidential = await storage.get_client("client-a")
-    assert confidential.client_secret == "test-only-secret"
+    assert verify_client_secret(confidential.client_secret, "test-only-secret")
     assert confidential.token_endpoint_auth_method == "client_secret_basic"
     assert confidential.scope == "openid read"
     assert confidential.grant_type_list() == ["authorization_code", "refresh_token"]

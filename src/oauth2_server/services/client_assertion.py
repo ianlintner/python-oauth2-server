@@ -150,7 +150,12 @@ def validate_client_assertion(
         raise OAuthError("invalid_client", f"{method} requires {expected_alg} algorithm")
 
     if method == "client_secret_jwt":
-        key: object = client.client_secret
+        # The unsealed HMAC key (see credential_storage); empty means it is
+        # unavailable (pre-cutover row, wrong server key) — never verify
+        # under an empty key, which would accept a forgeable signature.
+        key: object = client.hmac_secret()
+        if not key:
+            raise OAuthError("invalid_client", "Client is not configured for JWT authentication")
     else:
         key = rsa_key_from_jwks(jwks, header.get("kid"))
 

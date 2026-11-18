@@ -61,6 +61,11 @@ def create_app(
     app = FastAPI(default_response_class=ORJSONResponse, lifespan=lifespan)
     app.state.config = config
     app.state.storage = storage
+    # Server key for unsealing HMAC client-secret key material (clients.
+    # client_secret_key); derived from `jwt_secret`, so rotating it requires
+    # re-issuing HMAC clients' secrets — see docs/credential-cutover.md.
+    if storage is not None:  # some tests build the app shell without storage
+        storage.configure_secret_key(config.jwt_secret)
     app.state.events = RecentEventsStore()
     # Dedicated CollectorRegistry per app instance (services/metrics.py) —
     # never the prometheus_client global default — so tests building
@@ -276,7 +281,9 @@ def build() -> FastAPI:
             # The seed replaces the default admin: only seeded identities
             # exist. Any failure aborts startup, so the server never serves
             # (or reports ready) with a partially applied seed.
-            applied = await apply_seed(conformance_seed, storage, app.state.keyset)
+            applied = await apply_seed(
+                conformance_seed, storage, app.state.keyset, seal_master=config.jwt_secret
+            )
             app.state.conformance = applied.readiness()
         else:
             await seed_admin_user(storage, config)

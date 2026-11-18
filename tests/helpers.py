@@ -12,7 +12,12 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
 from oauth2_server import security
 from oauth2_server.models import Client, User
+from oauth2_server.services.client_secrets import protect_client_secret
 from oauth2_server.storage.sql import SqlStorage
+
+# The `jwt_secret` every test app is built with (`tests.conftest`); it is also
+# the master the storage derives its client-secret sealing key from.
+TEST_JWT_SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
 
 MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations" / "sql"
 
@@ -145,6 +150,14 @@ async def seed_client(storage, **overrides) -> Client:
         "token_endpoint_auth_method": "client_secret_basic",
     }
     fields.update(overrides)
+    # `client_secret` is the PLAINTEXT the test will present; store it the way
+    # production does (Argon2id verifier + sealed HMAC key) so every
+    # secret-authenticated test exercises the real at-rest format.
+    if fields.get("client_secret") and "client_secret_key" not in fields:
+        verifier, sealed = await protect_client_secret(
+            fields["client_secret"], fields["client_id"], TEST_JWT_SECRET
+        )
+        fields["client_secret"], fields["client_secret_key"] = verifier, sealed
     client = Client(**fields)
     await storage.save_client(client)
     return client

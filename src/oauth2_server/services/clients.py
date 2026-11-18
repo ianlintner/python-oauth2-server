@@ -10,6 +10,8 @@ import secrets
 import socket
 from urllib.parse import unquote_plus, urlparse
 
+import anyio.to_thread
+
 from oauth2_server.errors import OAuthError
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import Client
@@ -19,6 +21,7 @@ from oauth2_server.services.client_assertion import (
     unverified_assertion_subject,
     validate_client_assertion,
 )
+from oauth2_server.services.credential_storage import verify_client_secret
 from oauth2_server.services.events_bus import EventBus, emit_event
 from oauth2_server.services.jwks_cache import JwksCache, resolve_client_jwks
 from oauth2_server.storage.base import Storage
@@ -368,7 +371,12 @@ class ClientService:
             await self._authenticate_self_signed_tls(client, thumbprint)
             return client
 
-        if not client_secret or not _secrets_equal(client_secret, client.client_secret):
+        # The stored value is a nonrecoverable Argon2id verifier; a legacy
+        # plaintext row never verifies (no silent legacy acceptance after the
+        # cutover). Off-thread: Argon2 is CPU-bound.
+        if not client_secret or not await anyio.to_thread.run_sync(
+            verify_client_secret, client.client_secret, client_secret
+        ):
             self._emit_client_validated(client.client_id, success=False)
             raise OAuthError("invalid_client", "invalid client secret")
         self._emit_client_validated(client.client_id, success=True)
