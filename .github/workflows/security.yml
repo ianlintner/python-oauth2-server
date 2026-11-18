@@ -42,7 +42,9 @@ jobs:
       - name: Scan git history for secrets
         run: |
           set -euo pipefail
-          ./gitleaks git --redact --exit-code 1 \
+          # Scan the history reachable from the checked-out ref only. The default (`--all`) also walks every remote
+          # branch, so an unrelated stray work branch carrying a test fixture fails this gate for every PR.
+          ./gitleaks git --redact --exit-code 1 --log-opts="HEAD" \
             --report-format sarif --report-path gitleaks.sarif .
 
       - name: Upload SARIF
