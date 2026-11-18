@@ -315,6 +315,7 @@ class MongoStorage:
                 "$set": {
                     "username": user.username,
                     "email": user.email,
+                    "email_verified": user.email_verified,
                     "enabled": user.enabled,
                     "role": user.role,
                     "password_hash": user.password_hash,

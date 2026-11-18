@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 
 def _now() -> datetime:
@@ -113,10 +113,28 @@ class User(BaseModel):
     username: str
     password_hash: str
     email: str
+    # True only when the server established that `email` is trustworthy:
+    # set by a provider that verified it (Google/GitHub), or written by an
+    # admin / password-login flow. Only a verified email may match
+    # `admin_emails`.
+    email_verified: bool = True
     enabled: bool = True
     role: str = "user"
     created_at: MongoDateTime = Field(default_factory=_now)
     updated_at: MongoDateTime = Field(default_factory=_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_email_verified(cls, data):
+        # Rows written before the field existed (e.g. Mongo documents) carry
+        # no value. Mirror the SQL migration's backfill: Microsoft/Azure
+        # social accounts hold an unverified address, everything else is
+        # treated as verified.
+        if isinstance(data, dict) and "email_verified" not in data:
+            username = str(data.get("username", ""))
+            if username.startswith(("microsoft:", "azure:")):
+                data = {**data, "email_verified": False}
+        return data
 
     def is_admin(self) -> bool:
         return self.role == "admin"

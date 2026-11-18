@@ -199,6 +199,8 @@ async def update_user(
     updates: dict = {}
     if "email" in fields_set:
         updates["email"] = body_model.email
+        # An address set through the admin API is admin-established.
+        updates["email_verified"] = True
     if "role" in fields_set and body_model.role in _VALID_ROLES:
         updates["role"] = body_model.role
     if "enabled" in fields_set:
