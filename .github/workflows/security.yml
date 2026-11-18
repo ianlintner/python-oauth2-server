@@ -132,8 +132,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      # `uv export` emits `-e .` for the local project. pip-audit with
+      # `--strict --disable-pip` cannot hash an editable local path and aborts
+      # ("requirement --editable . does not contain a hash"), so the export is
+      # filtered to PyPI requirements only and the audit runs on that file.
       - name: Export locked runtime requirements
-        run: uv export --frozen --no-dev --format requirements-txt -o "$RUNNER_TEMP/req.txt"
+        run: |
+          set -euo pipefail
+          uv export --frozen --no-dev --format requirements-txt \
+            | grep -v '^-e ' > "$RUNNER_TEMP/req.txt"
+          if ! grep -q '^[A-Za-z0-9]' "$RUNNER_TEMP/req.txt"; then
+            echo "::error::filtered requirements file is empty; refusing a no-op audit"
+            exit 1
+          fi
+          echo "Auditing $(grep -c '^[A-Za-z0-9]' "$RUNNER_TEMP/req.txt") pinned requirements"
 
       - name: Audit dependencies (advisory-only, non-blocking)
         continue-on-error: true
@@ -153,6 +165,9 @@ jobs:
             fi
             echo "| Package | Version | ID | Fix versions |"
             echo "|---|---|---|---|"
+            if [ ! -s "$RUNNER_TEMP/pip-audit.json" ]; then
+              echo "> :warning: pip-audit produced no JSON report (audit error, see log)."
+            fi
             if [ -s "$RUNNER_TEMP/pip-audit.json" ]; then
               jq -r '[.dependencies[]
                 | . as $d

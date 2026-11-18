@@ -1,3 +1,7 @@
+# NOTE: `gitleaks --redact` masks secret *values*, but it also prints `***` in
+# place of the line-number field in JSON/SARIF output — the integers below are
+# the real start lines; copy fingerprints from an UNredacted run only.
+#
 # gitleaks false positives — no real credentials in this repo.
 #
 # Every entry below is a `generic-api-key` hit on an explicitly-fake test
