@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import base64
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import BaseModel
+from oauth2_server import clock
 
 if TYPE_CHECKING:
     from oauth2_server.config import Config
@@ -33,7 +34,7 @@ class SigningKey(BaseModel):
     expires_at: datetime | None = None
 
     def is_active(self) -> bool:
-        return self.expires_at is None or datetime.now(UTC) < self.expires_at
+        return self.expires_at is None or clock.now() < self.expires_at
 
 
 class KeySet:
@@ -78,7 +79,7 @@ class KeySet:
         """Mark every current key sharing `new_key`'s algorithm as
         non-current with `expires_at = now + grace_secs`, then add
         `new_key` (expected `is_current=True`)."""
-        expires_at = datetime.now(UTC) + timedelta(seconds=grace_secs)
+        expires_at = clock.now() + timedelta(seconds=grace_secs)
         for key in self._keys:
             if key.algorithm == new_key.algorithm and key.is_current:
                 key.is_current = False
@@ -114,7 +115,7 @@ def generate_signing_key(algorithm: str, kid: str) -> SigningKey:
         algorithm=algorithm,
         key_material=material,
         is_current=True,
-        created_at=datetime.now(UTC),
+        created_at=clock.now(),
     )
 
 
@@ -155,7 +156,7 @@ def seed_keyset(config: Config) -> KeySet:
     `config.id_token_private_key_pem` (kid `config.id_token_kid` or
     `"rs256-initial"`) when that PEM is configured."""
     keyset = KeySet()
-    now = datetime.now(UTC)
+    now = clock.now()
     keyset.add(
         SigningKey(
             kid="hs256-initial",

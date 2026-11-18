@@ -6,6 +6,7 @@ Covers the mode switch, the fail-closed production guard, seed validation
 non-interactive login -> authorize flow through the real `build()` factory.
 """
 
+import json
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -217,7 +218,7 @@ def test_rejects_schema_violations(text, needle):
             ),
             "method none",
         ),
-        (VALID.replace("client_secret_basic", "private_key_jwt"), "token_endpoint_auth_method"),
+        (VALID.replace("client_secret_basic", "tls_client_auth"), "token_endpoint_auth_method"),
         (
             VALID.replace(
                 "grant_types: [authorization_code, refresh_token]", "grant_types: [implicit]"
@@ -727,3 +728,78 @@ def test_seed_text_never_logs_credentials():
     # `Seed.__repr__` is what lands in tracebacks: secrets must be masked.
     seed = Seed.parse(VALID)
     assert not re.search(r"test-only", repr(seed))
+
+
+# -- seeded client JWKs (contract section 2a) ---------------------------------
+
+_JWK = '{"kty": "RSA", "kid": "ck1", "alg": "RS256", "n": "AQAB", "e": "AQAB"}'
+_PKJ_CLIENT = f"""
+  - client_id: client-pkj
+    token_endpoint_auth_method: private_key_jwt
+    redirect_uris: [https://client.example/callback]
+    jwks: {{"keys": [{_JWK}]}}
+"""
+
+
+def test_private_key_jwt_client_with_public_jwks_parses():
+    seed = Seed.parse(VALID.replace("users:", _PKJ_CLIENT.lstrip("\n") + "users:", 1))
+    pkj = next(c for c in seed.clients if c.client_id == "client-pkj")
+    assert pkj.jwks == {"keys": [json.loads(_JWK)]}
+    assert not pkj.is_public()
+
+
+def _pkj_seed(client_extra: str = "", method: str = "private_key_jwt", jwks: str | None = None):
+    jwks_line = f"    jwks: {jwks if jwks is not None else '{"keys": [' + _JWK + ']}'}\n"
+    return VALID.replace(
+        "users:",
+        f"  - client_id: client-pkj\n    token_endpoint_auth_method: {method}\n"
+        f"    redirect_uris: [https://client.example/callback]\n{client_extra}"
+        f"{jwks_line}users:",
+        1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "needle"),
+    [
+        # private key material must never be accepted from a seed
+        (
+            _pkj_seed(jwks='{"keys": [{"kty": "RSA", "d": "AQ", "n": "AQAB", "e": "AQAB"}]}'),
+            "private",
+        ),
+        (_pkj_seed(jwks='{"keys": []}'), "keys"),
+        (_pkj_seed(jwks='{"keys": [{"kid": "x"}]}'), "kty"),
+        (_pkj_seed(jwks='{"keys": [{"kty": "RSA"}], "extra": 1}'), "unknown"),
+        (_pkj_seed(jwks='"nope"'), "jwks"),
+        # a confidential client must not carry both a secret and private_key_jwt
+        (_pkj_seed(client_extra="    client_secret: s\n"), "secret"),
+        # jwks is meaningless on a secret client
+        (_pkj_seed(method="client_secret_basic", client_extra="    client_secret: s\n"), "jwks"),
+    ],
+)
+def test_rejects_bad_client_jwks(text, needle):
+    with pytest.raises(ConformanceError, match=needle):
+        Seed.parse(text)
+
+
+def test_private_key_jwt_without_jwks_is_rejected():
+    text = VALID.replace(
+        "users:",
+        "  - client_id: client-pkj\n    token_endpoint_auth_method: private_key_jwt\n"
+        "    redirect_uris: [https://client.example/callback]\nusers:",
+        1,
+    )
+    with pytest.raises(ConformanceError, match="jwks"):
+        Seed.parse(text)
+
+
+async def test_apply_stores_inline_jwks_for_private_key_jwt():
+    storage = await make_storage()
+    seed = Seed.parse(_pkj_seed())
+    await conformance.apply_seed(seed, storage, KeySet())
+    client = await storage.get_client("client-pkj")
+    assert client.token_endpoint_auth_method == "private_key_jwt"
+    assert client.client_secret == ""
+    assert json.loads(client.jwks) == {"keys": [json.loads(_JWK)]}
+    # a client without jwks keeps the empty default
+    assert (await storage.get_client("client-a")).jwks == ""

@@ -165,15 +165,12 @@ def test_replay_store_accepts_different_jti():
 
 
 def test_expired_replay_entries_swept(monkeypatch):
-    import oauth2_server.services.dpop as dpop_module
 
-    real_monotonic = dpop_module.time.monotonic
+    real_monotonic = time.monotonic
     store = DpopReplayStore()
     store.check_and_insert("old-jti")
 
-    monkeypatch.setattr(
-        dpop_module.time, "monotonic", lambda: real_monotonic() + REPLAY_TTL_SECS + 1
-    )
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + REPLAY_TTL_SECS + 1)
 
     # A later insert sweeps every expired entry dict-wide (ParStore /
     # FixedWindowLimiter precedent) — re-inserting the swept jti must

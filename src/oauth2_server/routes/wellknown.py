@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import hmac
-from datetime import UTC, datetime
 
 import jwt
 from fastapi import APIRouter, Request
@@ -32,6 +31,7 @@ from oauth2_server.services.dpop import (
 )
 from oauth2_server.services.dpop_nonce import enforce_dpop_nonce
 from oauth2_server.services.mtls import mtls_headers
+from oauth2_server import clock
 
 router = APIRouter()
 
@@ -246,7 +246,7 @@ async def jwks(request: Request) -> ORJSONResponse:
             algorithm="RS256",
             key_material=config.id_token_private_key_pem.encode(),
             is_current=True,
-            created_at=datetime.now(UTC),
+            created_at=clock.now(),
         )
         jwk = jwk_from_rs256_key(fallback)
         if not config.id_token_kid:
@@ -475,7 +475,7 @@ async def userinfo(request: Request) -> ORJSONResponse:
         pass
 
     row = await storage.get_token_by_access_token(token_str)
-    if row is None or row.revoked or row.expires_at <= datetime.now(UTC):
+    if row is None or row.revoked or row.expires_at <= clock.now():
         return _invalid_token_response("Invalid or expired access token")
 
     binding_failure, dpop_validated = _enforce_token_binding(request, config, token_str)
@@ -495,7 +495,7 @@ async def userinfo(request: Request) -> ORJSONResponse:
         # up only on the proof path (at most once per request). A deleted
         # client simply yields no nonce handling.
         token_client = await storage.get_client(row.client_id)
-        if token_client is not None and token_client.dpop_nonce_required:
+        if request.app.state.dpop_nonce_issuer.required_for(token_client):
             # RFC 9449 §9: a resource server that requires nonces answers a
             # missing/stale one with 401 `use_dpop_nonce` + a fresh
             # `DPoP-Nonce` (the token endpoint's 400 is the AS-side shape).
@@ -522,6 +522,6 @@ async def userinfo(request: Request) -> ORJSONResponse:
             response["preferred_username"] = user.username
 
     result = ORJSONResponse(response)
-    if token_client is not None and token_client.dpop_nonce_required:
+    if token_client is not None and request.app.state.dpop_nonce_issuer.required_for(token_client):
         result.headers["DPoP-Nonce"] = request.app.state.dpop_nonce_issuer.issue()
     return result

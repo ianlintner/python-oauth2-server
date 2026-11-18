@@ -1,8 +1,8 @@
+import time
 import re
 
 import jwt
 
-import oauth2_server.services.device_poll as device_poll_module
 from oauth2_server.services.device_poll import ENTRY_TTL_SECS, DevicePollTracker
 from tests.helpers import login_session, post_token, reseed_client, seed_client
 
@@ -67,8 +67,8 @@ async def test_device_flow_pending_then_approved_returns_token(client_app, monke
     # (well under a second apart in a fast test run) and get "slow_down"
     # instead of a token. Advance the tracker's clock past the device's
     # 5s interval so this poll is treated as respecting it.
-    real_monotonic = device_poll_module.time.monotonic
-    monkeypatch.setattr(device_poll_module.time, "monotonic", lambda: real_monotonic() + 5)
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + 5)
 
     success = await poll_device_token(client_app, device_code)
     assert success.status_code == 200, success.text
@@ -270,8 +270,8 @@ async def test_device_poll_respecting_interval_returns_authorization_pending(
     assert first.status_code == 400
     assert first.json()["error"] == "authorization_pending"
 
-    real_monotonic = device_poll_module.time.monotonic
-    monkeypatch.setattr(device_poll_module.time, "monotonic", lambda: real_monotonic() + 5)
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + 5)
 
     second = await poll_device_token(client_app, device_code)
     assert second.status_code == 400
@@ -311,8 +311,8 @@ async def test_slow_down_does_not_block_approved_redemption_after_wait(client_ap
     )
     assert verify_resp.status_code == 200, verify_resp.text
 
-    real_monotonic = device_poll_module.time.monotonic
-    monkeypatch.setattr(device_poll_module.time, "monotonic", lambda: real_monotonic() + 5)
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + 5)
 
     success = await poll_device_token(client_app, device_code)
     assert success.status_code == 200, success.text
@@ -333,11 +333,11 @@ def test_device_poll_tracker_forget_is_safe_on_unknown_code():
 
 
 def test_device_poll_tracker_forget_clears_violation_history(monkeypatch):
-    real_monotonic = device_poll_module.time.monotonic
+    real_monotonic = time.monotonic
     tracker = DevicePollTracker()
     tracker.observe("dev1", 5)
 
-    monkeypatch.setattr(device_poll_module.time, "monotonic", lambda: real_monotonic())
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic())
     assert tracker.observe("dev1", 5) == 10  # immediate re-poll: violation
 
     tracker.forget("dev1")
@@ -347,13 +347,11 @@ def test_device_poll_tracker_forget_clears_violation_history(monkeypatch):
 
 
 def test_device_poll_tracker_sweeps_expired_entries(monkeypatch):
-    real_monotonic = device_poll_module.time.monotonic
+    real_monotonic = time.monotonic
     tracker = DevicePollTracker()
     tracker.observe("dev1", 5)
 
-    monkeypatch.setattr(
-        device_poll_module.time, "monotonic", lambda: real_monotonic() + ENTRY_TTL_SECS + 1
-    )
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + ENTRY_TTL_SECS + 1)
 
     # Entry swept: after 24h+1s of inactivity, a poll is treated as brand
     # new (allowed), not as a violation of stale state.

@@ -782,6 +782,18 @@ production-looking environment (`OAUTH2_ENV`/`APP_ENV`/`NODE_ENV`/... set to any
 other than a known non-production name), a non-in-memory database, or a
 configured signing key. Seeded credentials are valid only in conformance mode.
 
+**SUT interface v2** (contract section 7), also conformance-mode only and not
+registered at all otherwise (they answer `404`): `GET /conformance/capabilities`
+advertises exactly `test-clock` and `dpop-nonce-mode`;
+`POST /conformance/clock {"advance_seconds": N}` moves every protocol time
+decision forward (cumulative, monotonic, reset on restart);
+`POST /conformance/dpop-nonce {"required": bool}` toggles server-provided DPoP
+nonces for the token and userinfo endpoints. A seeded client with
+`token_endpoint_auth_method: private_key_jwt` carries a public-only `jwks`
+(private members such as `d` are rejected). `restart`, `multi-instance` and
+`mtls` are not implemented and not advertised (this mode requires an
+in-memory store, so there is no durable state to restart against).
+
 ```bash
 OAUTH2_CONFORMANCE_MODE=1 OAUTH2_CONFORMANCE_SEED=./seed.yaml \
 OAUTH2_ENV=test \
