@@ -2,7 +2,13 @@ import json
 import secrets
 from urllib.parse import parse_qs, urlparse
 
-from tests.helpers import PKCE_CHALLENGE, login_session, reseed_client, seed_client
+from tests.helpers import (
+    PKCE_CHALLENGE,
+    login_session,
+    reseed_client,
+    seed_client,
+    trust_client,
+)
 
 
 async def test_rfc9207_iss_included_in_authorization_response(app_with_session):
@@ -370,6 +376,7 @@ async def _seed_loopback_client(app_with_session, client_id, redirect_uris):
         redirect_uris=json.dumps(redirect_uris),
         token_endpoint_auth_method="none",
     )
+    trust_client(app_with_session, client_id)
 
 
 async def test_loopback_ipv4_redirect_matches_any_port(app_with_session):

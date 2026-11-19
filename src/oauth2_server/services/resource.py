@@ -10,10 +10,15 @@ request than to debug at the resource server.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from oauth2_server.errors import OAuthError
 from oauth2_server.services.limits import LimitError, check_len
+
+if TYPE_CHECKING:
+    from oauth2_server.config import Config
+    from oauth2_server.models import Client
 
 _INVALID_TARGET_DESCRIPTION = "resource must be an absolute URI without a fragment"
 _MAX_RESOURCE_LEN = 2048
@@ -51,3 +56,21 @@ def validate_resource(value: str | None) -> str | None:
     if not split.scheme or not names_something or split.fragment:
         raise OAuthError("invalid_target", _INVALID_TARGET_DESCRIPTION, 400)
     return value
+
+
+def validate_resource_for_client(client: Client, config: Config, value: str | None) -> str | None:
+    """`validate_resource`, then restrict to the resources the client may request.
+
+    The permitted set is the client's own `resources` list when it is
+    non-empty, otherwise the server-wide `resource_allow_list`. When neither
+    is configured every syntactically valid resource is accepted (the
+    default). Membership is exact string equality — no prefix, host or
+    trailing-slash normalisation. An absent `resource` always passes.
+    """
+    resource = validate_resource(value)
+    if resource is None:
+        return None
+    allowed = client.resource_list() or config.resource_allow_list
+    if allowed and resource not in allowed:
+        raise OAuthError("invalid_target", "resource is not permitted for this client", 400)
+    return resource

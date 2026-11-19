@@ -15,6 +15,7 @@ through to the session path.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -22,6 +23,8 @@ from fastapi import Depends, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse, Response
 
 from oauth2_server.sessions import load_session_user
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -127,9 +130,17 @@ async def _authenticate_session(request: Request) -> AdminActor:
     if user is None:
         raise _insufficient_permissions_error()
 
-    is_admin = user.role == "admin" or user.email.lower() in config.admin_emails
-    if not is_admin:
-        raise _insufficient_permissions_error()
+    if user.role != "admin":
+        if user.email.lower() not in config.admin_emails:
+            raise _insufficient_permissions_error()
+        # The allow-list only applies to an email the server established as
+        # verified (the stored flag, not the cookie copy).
+        if not user.email_verified:
+            logger.warning(
+                "admin email allow-list match refused for user %s: email is not verified",
+                user.id,
+            )
+            raise _insufficient_permissions_error()
 
     return AdminActor(actor_id=user.id, actor_email=user.email)
 

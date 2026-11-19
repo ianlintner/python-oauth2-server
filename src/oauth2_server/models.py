@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 
 def _now() -> datetime:
@@ -83,6 +83,9 @@ class Client(BaseModel):
     require_state: bool = False
     tls_client_certificate_subject_dn: str = ""
     dpop_nonce_required: bool = False
+    # RFC 8707: JSON array of resource indicators this client may request.
+    # Empty means "not configured" (fall back to the server-wide list).
+    resources: str = "[]"
 
     def is_public(self) -> bool:
         return self.token_endpoint_auth_method == "none"
@@ -92,6 +95,14 @@ class Client(BaseModel):
 
     def grant_type_list(self) -> list[str]:
         return json.loads(self.grant_types) if self.grant_types else []
+
+    def resource_list(self) -> list[str]:
+        """Parse the `resources` JSON-array TEXT column; malformed -> `[]`."""
+        try:
+            v = json.loads(self.resources or "[]")
+        except ValueError:
+            return []
+        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
 
     def get_post_logout_redirect_uris(self) -> list[str]:
         """Parse the `post_logout_redirect_uris` JSON-array TEXT column.
@@ -113,6 +124,11 @@ class User(BaseModel):
     username: str
     password_hash: str
     email: str
+    # True only when the server established that `email` is trustworthy:
+    # set by a provider that verified it (Google/GitHub), or written by an
+    # admin / password-login flow. Only a verified email may match
+    # `admin_emails`.
+    email_verified: bool = True
     enabled: bool = True
     role: str = "user"
     # Bumped by storage whenever the account's standing changes (disable, role
@@ -120,6 +136,19 @@ class User(BaseModel):
     session_epoch: int = 0
     created_at: MongoDateTime = Field(default_factory=_now)
     updated_at: MongoDateTime = Field(default_factory=_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_email_verified(cls, data):
+        # Rows written before the field existed (e.g. Mongo documents) carry
+        # no value. Mirror the SQL migration's backfill: Microsoft/Azure
+        # social accounts hold an unverified address, everything else is
+        # treated as verified.
+        if isinstance(data, dict) and "email_verified" not in data:
+            username = str(data.get("username", ""))
+            if username.startswith(("microsoft:", "azure:")):
+                data = {**data, "email_verified": False}
+        return data
 
     def is_admin(self) -> bool:
         return self.role == "admin"
@@ -342,6 +371,21 @@ class ClientRegistration(BaseModel):
     post_logout_redirect_uris: list[str] = []
 
 
+class Grant(BaseModel):
+    """A user's recorded approval of a client for a set of scopes.
+
+    One row per `(user_id, client_id)`; `scope` is the space-delimited union of
+    everything the user has approved for that client so far.
+    """
+
+    id: str
+    user_id: str
+    client_id: str
+    scope: str
+    created_at: MongoDateTime = Field(default_factory=_now)
+    updated_at: MongoDateTime = Field(default_factory=_now)
+
+
 class TrustedIssuer(BaseModel):
     """External issuer whose signed JWTs may be exchanged via the RFC 7523 §2.1
     jwt-bearer grant (port of crates/oauth2-core TrustedIssuer). The two list
@@ -370,14 +414,15 @@ class TrustedIssuer(BaseModel):
         return self._list(self.allowed_audiences)
 
     def allows_client(self, client_id: str) -> bool:
-        """Empty `allowed_client_ids` means every client may use the issuer."""
+        """Only clients listed in `allowed_client_ids` may use the issuer; an
+        empty list allows none."""
         try:
             allowed = json.loads(self.allowed_client_ids or "[]")
         except ValueError:
             return False  # malformed allow-list fails closed
         if not isinstance(allowed, list) or not all(isinstance(x, str) for x in allowed):
             return False
-        return not allowed or client_id in allowed
+        return client_id in allowed
 
 
 class DenylistEntry(BaseModel):

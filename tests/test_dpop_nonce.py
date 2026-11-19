@@ -38,6 +38,7 @@ from tests.helpers import (
     make_dpop_proof,
     post_token,
     seed_client,
+    trust_client,
 )
 from tests.test_token_endpoint import _pkce_pair, run_code_flow
 from tests.test_userinfo_dpop import ath_for
@@ -307,6 +308,7 @@ async def _seed_nonce_client(client_app, **overrides):
         "scope": "read openid email profile",
     }
     fields.update(overrides)
+    trust_client(client_app, fields["client_id"])
     return await seed_client(client_app.storage, **fields)
 
 

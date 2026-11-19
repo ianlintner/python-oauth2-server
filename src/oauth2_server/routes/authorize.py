@@ -68,17 +68,23 @@ Validation order matters (RFC 9207 §2 / OAuth 2.0 Security BCP):
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
+import secrets
 import time
+import uuid
+from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode
 
 from fastapi import APIRouter, Request
-from fastapi.responses import ORJSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
 from starlette.responses import Response
 
 from oauth2_server.errors import OAuthError
+from oauth2_server.models import Grant
+from oauth2_server.services.consent import PendingConsent, scope_label
 from oauth2_server.services.clients import redirect_uri_matches
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.services.auth import AuthorizeService, scope_is_subset
@@ -92,7 +98,7 @@ from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.jar import process_jar
 from oauth2_server.services.limits import LimitError, check_json_param
 from oauth2_server.services.rar import RarError, validate_authorization_details
-from oauth2_server.services.resource import validate_resource
+from oauth2_server.services.resource import validate_resource_for_client
 from oauth2_server.sessions import current_acr, current_amr, load_session_user
 
 logger = logging.getLogger(__name__)
@@ -410,7 +416,7 @@ async def authorize(request: Request):
     # never a raw 400. The validated value is stored on the authorization
     # code below and becomes the access token's `aud` at redemption.
     try:
-        resource = validate_resource(merged.get("resource"))
+        resource = validate_resource_for_client(client, config, merged.get("resource"))
     except OAuthError as exc:
         return _deliver_error(
             response_mode, redirect_uri, exc.error, exc.description, state, config.issuer
@@ -552,7 +558,262 @@ async def authorize(request: Request):
             config.issuer,
         )
 
+    # --- 5c. User consent (RFC 6749 §3.1, OIDC Core §3.1.2.4) ---
+    # A code is only issued for scopes the user has approved for this client:
+    # a stored grant covering the request, or an operator/seed policy that
+    # makes consent implicit for the client. `prompt=consent` re-asks even when
+    # a grant exists; `prompt=none` may never show UI, so it fails instead.
+    requested_scopes = set(scope.split())
+    grant = await storage.get_grant(user_id, client.client_id)
+    granted_scopes = set(grant.scope.split()) if grant is not None else set()
+    if not await _consent_is_implicit(request, client.client_id, user_id) and (
+        "consent" in prompt_values or not requested_scopes <= granted_scopes
+    ):
+        if "none" in prompt_values:
+            return _deliver_error(
+                response_mode,
+                redirect_uri,
+                "consent_required",
+                "User consent is required and prompt=none was requested",
+                state,
+                config.issuer,
+            )
+        pending = PendingConsent(
+            user_id=user_id,
+            client_id=client.client_id,
+            redirect_uri=redirect_uri,
+            scope=scope,
+            state=state,
+            response_mode=response_mode,
+            hybrid=hybrid,
+            nonce=nonce,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+            authorization_details=authorization_details,
+            resource=resource,
+            claims_request=claims_request,
+            dpop_jkt=dpop_jkt,
+            acr_values=acr_values,
+        )
+        handle = request.app.state.consent_store.put(pending)
+        # Only scopes not already approved need a decision; with a covering
+        # grant (prompt=consent) the whole request is shown again.
+        shown = requested_scopes - granted_scopes or requested_scopes
+        return _consent_page(client.name, sorted(shown), handle, pending.csrf_token)
+
     # --- 6. Success: mint the authorization code and redirect back to the client ---
+    return await _issue_authorization_response(
+        request,
+        client=client,
+        user_id=user_id,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        state=state,
+        response_mode=response_mode,
+        hybrid=hybrid,
+        nonce=nonce,
+        code_challenge=code_challenge,
+        code_challenge_method=code_challenge_method,
+        authorization_details=authorization_details,
+        resource=resource,
+        claims_request=claims_request,
+        dpop_jkt=dpop_jkt,
+    )
+
+
+async def _consent_is_implicit(request: Request, client_id: str, user_id: str) -> bool:
+    """Consent is implied for operator-trusted clients, and — in conformance
+    mode only — for the seeded user's `auto_approve_clients`. Neither skips any
+    other check: this runs after redirect/PKCE/scope validation."""
+    if client_id in request.app.state.config.consent_trusted_client_ids:
+        return True
+    auto_approve = request.app.state.consent_auto_approve
+    if not auto_approve:
+        return False
+    user = await request.app.state.storage.get_user_by_id(user_id)
+    return user is not None and client_id in auto_approve.get(user.username, ())
+
+
+def _consent_page(client_name: str, scopes: list[str], handle: str, csrf_token: str) -> Response:
+    items = "\n".join(
+        f"    <li><strong>{html.escape(scope_label(s))}</strong> (<code>{html.escape(s)}</code>)</li>"
+        for s in scopes
+    )
+    body = f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Authorize application</title></head>
+<body>
+<h1>Authorize application</h1>
+<p><strong>{html.escape(client_name)}</strong> is requesting access to your account with these permissions:</p>
+<ul>
+{items}
+</ul>
+<form method="post" action="/oauth/consent">
+  <input type="hidden" name="handle" value="{html.escape(handle, quote=True)}">
+  <input type="hidden" name="csrf_token" value="{html.escape(csrf_token, quote=True)}">
+  <button type="submit" name="action" value="approve">Allow</button>
+  <button type="submit" name="action" value="deny">Deny</button>
+</form>
+</body>
+</html>
+"""
+    return HTMLResponse(body)
+
+
+@router.post("/consent")
+async def consent(request: Request):
+    """Resume the authorization request parked by `GET /authorize`.
+
+    The form carries only an opaque handle, a CSRF token and the decision: the
+    request being approved is the one stored server-side, and every parameter
+    is re-validated against current client/user state before a code is issued.
+    """
+    config = request.app.state.config
+    storage = request.app.state.storage
+    store = request.app.state.consent_store
+
+    # Standing (enabled, denylist, epoch) comes from the stored user, not the
+    # cookie copy, as on `/oauth/authorize`.
+    session_user = await load_session_user(request)
+    if session_user is None:
+        return _error_page(401, "login_required", "login required")
+    user_id = session_user.id
+
+    form = dict(await request.form())
+    handle = form.get("handle")
+    action = form.get("action")
+    entry = store.peek(handle) if isinstance(handle, str) else None
+    csrf = form.get("csrf_token")
+    if (
+        entry is None
+        or entry.user_id != user_id
+        or not isinstance(csrf, str)
+        or not secrets.compare_digest(csrf, entry.csrf_token)
+    ):
+        return _error_page(400, "invalid_request", "unknown or expired consent request")
+    if action not in ("approve", "deny"):
+        return _error_page(400, "invalid_request", "action must be approve or deny")
+    store.take(handle)
+
+    # The browser may not change what is being approved.
+    for key, expected in (
+        ("client_id", entry.client_id),
+        ("redirect_uri", entry.redirect_uri),
+        ("scope", entry.scope),
+        ("state", entry.state or ""),
+        ("code_challenge", entry.code_challenge),
+    ):
+        if key in form and form[key] != expected:
+            return _error_page(400, "invalid_request", f"{key} does not match the pending request")
+
+    # Re-validate against current state: the client, its redirect URI and
+    # scope allow-list, and the user may all have changed since the page was
+    # rendered.
+    client = await storage.get_client(entry.client_id)
+    denylisted = await check_subject_denylisted(storage, "client_id", entry.client_id)
+    if client is None or not client.enabled or denylisted is not None:
+        return _error_page(401, "invalid_client", "unknown or disabled client_id")
+    if not any(
+        redirect_uri_matches(registered, entry.redirect_uri)
+        for registered in client.redirect_uri_list()
+    ):
+        return _error_page(400, "invalid_request", "redirect_uri is not registered for this client")
+    user = await storage.get_user_by_id(user_id)
+    if user is None or not user.enabled:
+        return _deliver_error(
+            entry.response_mode,
+            entry.redirect_uri,
+            "access_denied",
+            "user is not permitted to authorize",
+            entry.state,
+            config.issuer,
+        )
+    if not scope_is_subset(entry.scope, client.scope):
+        return _deliver_error(
+            entry.response_mode,
+            entry.redirect_uri,
+            "invalid_scope",
+            "requested scope exceeds the client's allowed scope",
+            entry.state,
+            config.issuer,
+        )
+    if entry.acr_values is not None and current_acr(request) not in entry.acr_values.split():
+        return _deliver_error(
+            entry.response_mode,
+            entry.redirect_uri,
+            "insufficient_user_authentication",
+            "Authentication Context Class does not satisfy acr_values",
+            entry.state,
+            config.issuer,
+        )
+
+    if action == "deny":
+        return _deliver_error(
+            entry.response_mode,
+            entry.redirect_uri,
+            "access_denied",
+            "the user denied the request",
+            entry.state,
+            config.issuer,
+        )
+
+    # Approve: record the union of what was previously approved and this request.
+    now = datetime.now(UTC)
+    existing = await storage.get_grant(user_id, client.client_id)
+    merged_scope = set(entry.scope.split())
+    if existing is not None:
+        merged_scope |= set(existing.scope.split())
+    await storage.save_grant(
+        Grant(
+            id=existing.id if existing is not None else uuid.uuid4().hex,
+            user_id=user_id,
+            client_id=client.client_id,
+            scope=" ".join(sorted(merged_scope)),
+            created_at=existing.created_at if existing is not None else now,
+            updated_at=now,
+        )
+    )
+    return await _issue_authorization_response(
+        request,
+        client=client,
+        user_id=user_id,
+        redirect_uri=entry.redirect_uri,
+        scope=entry.scope,
+        state=entry.state,
+        response_mode=entry.response_mode,
+        hybrid=entry.hybrid,
+        nonce=entry.nonce,
+        code_challenge=entry.code_challenge,
+        code_challenge_method=entry.code_challenge_method,
+        authorization_details=entry.authorization_details,
+        resource=entry.resource,
+        claims_request=entry.claims_request,
+        dpop_jkt=entry.dpop_jkt,
+    )
+
+
+async def _issue_authorization_response(
+    request: Request,
+    *,
+    client,
+    user_id: str,
+    redirect_uri: str,
+    scope: str,
+    state: str | None,
+    response_mode: str,
+    hybrid: bool,
+    nonce: str | None,
+    code_challenge: str | None,
+    code_challenge_method: str | None,
+    authorization_details: str | None,
+    resource: str | None,
+    claims_request: str | None,
+    dpop_jkt: str | None,
+) -> Response:
+    """Mint the authorization code and build the authorization response (shared
+    by `GET /authorize` and `POST /consent`)."""
+    config = request.app.state.config
+    storage = request.app.state.storage
     auth_code = await AuthorizeService(storage, config).issue_code(
         client,
         user_id,
