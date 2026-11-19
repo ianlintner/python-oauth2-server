@@ -22,12 +22,13 @@ from urllib.parse import quote, urlparse
 
 import httpx
 import jwt
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
 
 from oauth2_server.keys import KeySet, rsa_public_key
 from oauth2_server.models import Client
 from oauth2_server import clock
+from oauth2_server.sessions import current_user_id
 
 router = APIRouter()
 
@@ -158,9 +159,11 @@ def _append_state(uri: str, state: str | None) -> str:
 
 def _validate_post_logout_redirect_uri(uri: str, clients: list[Client]) -> str | None:
     """Returns an error description on failure, or `None` if `uri` is a
-    well-formed http(s) URI, fragment-free, and registered by some client
-    (either its `post_logout_redirect_uris` allowlist or, as a backwards-
-    compat fallback, its plain `redirect_uris`)."""
+    well-formed http(s) URI, fragment-free, and listed in the
+    `post_logout_redirect_uris` of one of `clients` -- the client(s)
+    identified by a verified `id_token_hint`. A client's plain
+    `redirect_uris` do not qualify, and with no identified client nothing
+    matches."""
     parsed = urlparse(uri)
 
     if not parsed.scheme or not parsed.netloc:
@@ -171,7 +174,7 @@ def _validate_post_logout_redirect_uri(uri: str, clients: list[Client]) -> str |
         return "post_logout_redirect_uri must not contain a fragment"
 
     for client in clients:
-        if uri in client.get_post_logout_redirect_uris() or uri in client.redirect_uri_list():
+        if uri in client.get_post_logout_redirect_uris():
             return None
     return "Unregistered post_logout_redirect_uri"
 
@@ -265,7 +268,7 @@ def _render_frontchannel_page(
 
 
 @router.get("/logout")
-async def logout(request: Request):
+async def logout(request: Request, background_tasks: BackgroundTasks):
     config = request.app.state.config
     storage = request.app.state.storage
     keyset = request.app.state.keyset
@@ -274,14 +277,18 @@ async def logout(request: Request):
     id_token_hint = params.get("id_token_hint")
     post_logout_redirect_uri = params.get("post_logout_redirect_uri")
     state = params.get("state")
-    # No id_token ever carries a `sid` claim yet (Task 13 backlog) and no
-    # session cookie stores one either, so `sid` is effectively caller-
-    # supplied query input — Rust parity (see research gotchas).
-    sid = params.get("sid") or request.session.get("session_id")
+    # The user bound to this browser's login session (None without one).
+    # Only this session-derived identity is used to address back-channel
+    # logout, and a hint only triggers revocation when it names this same
+    # user; query parameters are never trusted for either. No `sid` is
+    # issued yet, so a session id exists only if a session stored one.
+    session_user = current_user_id(request)
+    sid = request.session.get("session_id")
 
-    sub: str | None = None
+    hint_sub: str | None = None
+    hint_clients: list[Client] = []
 
-    # --- 1. id_token_hint: decode, aud check, best-effort user-token revoke ---
+    # --- 1. id_token_hint: decode, aud check, identify the requesting client ---
     if id_token_hint:
         try:
             claims = _decode_hint(id_token_hint, config, keyset)
@@ -290,56 +297,56 @@ async def logout(request: Request):
 
         audiences = _extract_audiences(claims)
         if audiences:
-            matched = False
             for aud in audiences:
-                if await storage.get_client(aud) is not None:
-                    matched = True
-                    break
-            if not matched:
+                hint_client = await storage.get_client(aud)
+                if hint_client is not None:
+                    hint_clients.append(hint_client)
+            if not hint_clients:
                 return _error("id_token_hint aud does not match a registered client")
 
-        hint_sub = claims.get("sub")
-        if isinstance(hint_sub, str) and hint_sub:
-            sub = hint_sub
-            await storage.revoke_tokens_by_user_id(sub)
+        claim_sub = claims.get("sub")
+        if isinstance(claim_sub, str) and claim_sub:
+            hint_sub = claim_sub
 
-    # --- 2. Always purge the session, hint or not ---
-    request.session.clear()
-
-    clients = await storage.list_all_clients()
-
-    # --- 3. Back-channel logout: bounded-concurrent POST to every subscriber ---
-    http_client = request.app.state.http_client
-    semaphore = asyncio.Semaphore(_BACKCHANNEL_CONCURRENCY)
-    dispatches = []
-    for client in clients:
-        if not client.backchannel_logout_uri:
-            continue
-        token_sid = sid if client.backchannel_logout_session_required and sid else None
-        if sub is None and token_sid is None:
-            # OIDC Back-Channel Logout 1.0 §2.5: a logout_token must identify
-            # a session via sub and/or sid — skip clients we can't identify.
-            continue
-        dispatches.append(
-            _dispatch_backchannel_logout_bounded(
-                semaphore, http_client, client, config, sub, token_sid
-            )
-        )
-    if dispatches:
-        # return_exceptions=True: _dispatch_backchannel_logout already
-        # swallows per-client failures internally, but this ensures one
-        # client's dispatch can never abort the others or the logout itself.
-        await asyncio.gather(*dispatches, return_exceptions=True)
-
-    # --- post_logout_redirect_uri validation, shared by both branches below ---
+    # --- post_logout_redirect_uri: must be a post-logout URI of the client
+    # identified by the hint (no hint -> nothing to match against) ---
     redirect_url: str | None = None
     if post_logout_redirect_uri:
-        error = _validate_post_logout_redirect_uri(post_logout_redirect_uri, clients)
+        error = _validate_post_logout_redirect_uri(post_logout_redirect_uri, hint_clients)
         if error:
             return _error(error)
         redirect_url = _append_state(post_logout_redirect_uri, state)
 
-    # --- 4. Front-channel logout: triggers whenever ANY client subscribes ---
+    # --- 2. Revoke only for a hint that matches the caller's own session ---
+    if session_user is not None and hint_sub == session_user:
+        await storage.revoke_tokens_by_user_id(session_user)
+
+    # --- 3. Always purge the browser session, hint or not ---
+    request.session.clear()
+
+    clients = await storage.list_all_clients()
+
+    # --- 4. Back-channel logout: only for a session that really existed.
+    # Dispatch runs after the response is sent (bounded concurrency), so
+    # slow RPs never hold up the caller. ---
+    if session_user is not None:
+        http_client = request.app.state.http_client
+        semaphore = asyncio.Semaphore(_BACKCHANNEL_CONCURRENCY)
+        for client in clients:
+            if not client.backchannel_logout_uri:
+                continue
+            token_sid = sid if client.backchannel_logout_session_required and sid else None
+            background_tasks.add_task(
+                _dispatch_backchannel_logout_bounded,
+                semaphore,
+                http_client,
+                client,
+                config,
+                session_user,
+                token_sid,
+            )
+
+    # --- 5. Front-channel logout: triggers whenever ANY client subscribes ---
     frontchannel_clients = [c for c in clients if c.frontchannel_logout_uri]
     if frontchannel_clients:
         page = _render_frontchannel_page(frontchannel_clients, config.issuer, sid, redirect_url)

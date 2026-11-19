@@ -84,6 +84,9 @@ class Client(BaseModel):
     require_state: bool = False
     tls_client_certificate_subject_dn: str = ""
     dpop_nonce_required: bool = False
+    # RFC 8707: JSON array of resource indicators this client may request.
+    # Empty means "not configured" (fall back to the server-wide list).
+    resources: str = "[]"
 
     def is_public(self) -> bool:
         return self.token_endpoint_auth_method == "none"
@@ -93,6 +96,14 @@ class Client(BaseModel):
 
     def grant_type_list(self) -> list[str]:
         return json.loads(self.grant_types) if self.grant_types else []
+
+    def resource_list(self) -> list[str]:
+        """Parse the `resources` JSON-array TEXT column; malformed -> `[]`."""
+        try:
+            v = json.loads(self.resources or "[]")
+        except ValueError:
+            return []
+        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
 
     def get_post_logout_redirect_uris(self) -> list[str]:
         """Parse the `post_logout_redirect_uris` JSON-array TEXT column.

@@ -19,6 +19,7 @@ same limitation (an in-process `Mutex<HashMap>` behind a `OnceLock`).
 from __future__ import annotations
 
 import logging
+import math
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
@@ -38,6 +39,10 @@ JWT_BEARER_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bea
 # otherwise turn the guard into a near-permanent store (jti_replay.rs
 # `MAX_TTL_SECS`).
 MAX_JTI_TTL_SECS = 300
+
+# Tolerated forward clock drift between the client and this server when
+# checking `iat`.
+IAT_SKEW_SECS = 60
 
 # Hard cap on in-memory entries so a client rotating `jti` values cannot
 # exhaust memory (jti_replay.rs `DEFAULT_MAX_ENTRIES`).
@@ -160,10 +165,14 @@ def validate_client_assertion(
             key,
             algorithms=[expected_alg],
             audience=token_endpoint_url,
-            options={"require": _REQUIRED_CLAIMS},
+            # `iat` is checked (with `IAT_SKEW_SECS` tolerance) in
+            # `_enforce_max_lifetime`, not by PyJWT's zero-leeway check.
+            options={"require": _REQUIRED_CLAIMS, "verify_iat": False},
         )
     except jwt.PyJWTError as exc:
         raise OAuthError("invalid_client", f"{method} validation failed: {exc}") from exc
+
+    _enforce_max_lifetime(claims)
 
     # RFC 7523 §3: `iss` and `sub` MUST both equal the client_id.
     if claims.get("iss") != client.client_id or claims.get("sub") != client.client_id:
@@ -221,6 +230,46 @@ def rsa_key_from_jwks(
     if not isinstance(key, RSAPublicKey):
         raise OAuthError(error, "Client JWKS key is not an RSA public key")
     return key
+
+
+def _claim_number(claims: dict, name: str) -> float:
+    value = claims.get(name)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise OAuthError("invalid_client", f"client_assertion {name} claim is not a number")
+    try:
+        out = float(value)
+    except OverflowError:
+        out = math.inf
+    if not math.isfinite(out):
+        raise OAuthError("invalid_client", f"client_assertion {name} claim is out of range")
+    return out
+
+
+def _enforce_max_lifetime(claims: dict) -> None:
+    """Reject an assertion that stays valid longer than the replay guard
+    remembers its `jti` (`MAX_JTI_TTL_SECS`).
+
+    Two bounds: `exp` must be at most `MAX_JTI_TTL_SECS` from now (the guard
+    records exactly the remaining lifetime), and, when `iat` is present,
+    `exp - iat` must not exceed it either. `iat` is optional and
+    client-controlled, so it can only tighten the check, never relax the
+    `exp - now` bound. An `iat` more than `IAT_SKEW_SECS` in the future is
+    rejected.
+    """
+    now = clock.time()
+    exp = _claim_number(claims, "exp")
+    too_long = OAuthError(
+        "invalid_client",
+        f"client_assertion lifetime exceeds the maximum of {MAX_JTI_TTL_SECS} seconds",
+    )
+    if exp - now > MAX_JTI_TTL_SECS:
+        raise too_long
+    if "iat" in claims:
+        iat = _claim_number(claims, "iat")
+        if iat > now + IAT_SKEW_SECS:
+            raise OAuthError("invalid_client", "client_assertion iat is in the future")
+        if exp - iat > MAX_JTI_TTL_SECS:
+            raise too_long
 
 
 def _enforce_jti_replay(client_id: str, claims: dict, guard: JtiReplayGuard) -> None:

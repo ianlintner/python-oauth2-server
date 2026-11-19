@@ -83,6 +83,7 @@ _CLIENT_UPDATE_COLS = [
     "tls_client_certificate_subject_dn",
     "enabled",
     "dpop_nonce_required",
+    "resources",
 ]
 
 

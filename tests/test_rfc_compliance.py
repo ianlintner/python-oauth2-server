@@ -789,13 +789,17 @@ async def test_oidc_logout_redirects_with_exact_state(client_app):
     """Full coverage: test_logout.py::test_logout_redirects_with_exact_state."""
     await reseed_client(
         client_app,
-        redirect_uris=json.dumps(["https://app.example.com/logged-out"]),
-        post_logout_redirect_uris="",
+        post_logout_redirect_uris=json.dumps(["https://app.example.com/logged-out"]),
     )
 
     resp = await client_app.get(
         "/oauth/logout",
         params={
+            "id_token_hint": jwt.encode(
+                {"iss": ISSUER, "sub": "u1", "aud": "client1", "exp": 9999999999, "iat": 0},
+                JWT_SECRET,
+                algorithm="HS256",
+            ),
             "post_logout_redirect_uri": "https://app.example.com/logged-out",
             "state": "pin-state",
         },
@@ -823,6 +827,7 @@ async def test_backchannel_logout_token_shape(client_app):
         backchannel_logout_uri="https://rp.example/bc-logout",
         backchannel_logout_session_required=False,
     )
+    await login_session(client_app)
 
     id_token_hint = jwt.encode(
         {"iss": ISSUER, "sub": "u1", "aud": "client1", "exp": 9999999999, "iat": 0},

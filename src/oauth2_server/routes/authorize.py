@@ -97,7 +97,7 @@ from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.jar import process_jar
 from oauth2_server.services.limits import LimitError, check_json_param
 from oauth2_server.services.rar import RarError, validate_authorization_details
-from oauth2_server.services.resource import validate_resource
+from oauth2_server.services.resource import validate_resource_for_client
 from oauth2_server.sessions import current_acr, current_amr, current_user_id
 
 logger = logging.getLogger(__name__)
@@ -415,7 +415,7 @@ async def authorize(request: Request):
     # never a raw 400. The validated value is stored on the authorization
     # code below and becomes the access token's `aud` at redemption.
     try:
-        resource = validate_resource(merged.get("resource"))
+        resource = validate_resource_for_client(client, config, merged.get("resource"))
     except OAuthError as exc:
         return _deliver_error(
             response_mode, redirect_uri, exc.error, exc.description, state, config.issuer

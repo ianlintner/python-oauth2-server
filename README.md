@@ -31,6 +31,10 @@ remaining Rust feature set:
 - **Full OIDC RP-initiated logout** — `GET /oauth/logout` supports `id_token_hint`,
   `post_logout_redirect_uri` validation, front-channel iframe logout, and back-channel
   `logout+JWT` delivery via `httpx`; `GET /oauth/check_session` for session-status iframes.
+  Logout acts on the caller's own login session: token revocation and back-channel delivery
+  require an active session (an `id_token_hint` for a different user revokes nothing), and
+  `post_logout_redirect_uri` must be one of the `post_logout_redirect_uris` registered by the
+  client named in the `id_token_hint`.
   `dynamic_registration_enabled` gates `/connect/register` (default off).
 - **PAR (RFC 9126)** — `POST /oauth/par` pushes authorization parameters and returns a
   short-lived, single-use `request_uri` that `GET /oauth/authorize` can consume.
@@ -465,9 +469,11 @@ earlier phases deliberately left open:
   presenting Basic auth still fails). `validate_client_assertion` enforces `alg` pinned to the
   registered method, required claims `exp`/`sub`/`iss`/`aud`, `aud` equal to the token endpoint
   URL for every endpoint that authenticates a client this way (token, introspect, revoke, PAR,
-  device authorization), `iss`/`sub` equal to `client_id`, and jti replay protection via
-  `JtiReplayGuard`. A JWT assertion may omit form `client_id`, resolving the client from the
-  assertion's `sub` instead (divergence 36). `services/jwks_cache.py::JwksCache` fetches and
+  device authorization), `iss`/`sub` equal to `client_id`, a maximum assertion lifetime of 300
+  seconds (`exp` at most 300 s ahead of the server clock, `exp - iat` at most 300 s when `iat` is
+  present, and `iat` at most 60 s in the future; longer-lived assertions are rejected with
+  `invalid_client`), and jti replay protection via `JtiReplayGuard`. A JWT assertion may omit form `client_id`,
+  resolving the client from the assertion's `sub` instead (divergence 36). `services/jwks_cache.py::JwksCache` fetches and
   caches a `private_key_jwt` client's `jwks_uri` document, TTL clamped to `[30, 86400]` seconds
   (default 300, from `Cache-Control: max-age`), with a 10 s fetch timeout; an inline registered
   `jwks` column is preferred over `jwks_uri` when both would apply. `ClientService.from_app`
@@ -484,6 +490,12 @@ earlier phases deliberately left open:
   claim on every grant (authorization_code redemption uses the `resource` stored on the
   authorization code at issuance, not a value re-supplied at the token request); introspection
   echoes the token's own `aud`. Discovery advertises `resource_indicators_supported: true`.
+  Resource indicators may be restricted to an allow-list: a client's own `resources` list
+  (admin API `POST`/`PUT /admin/api/clients`) when non-empty, otherwise the server-wide
+  `OAUTH2_RESOURCE_ALLOW_LIST` (comma-separated). A value not on the applicable list is
+  rejected with `invalid_target`; matching is exact string equality. With neither set
+  (the default) any valid absolute URI is accepted. On refresh the allow-list is applied in
+  addition to the existing audience-subset rule.
 - **RFC 9728 / metadata parity** — `GET /.well-known/oauth-protected-resource` and
   `GET /.well-known/oauth-authorization-server/status` (a static, all-valid
   `draft-ietf-oauth-status-list` stub — unrelated to RFC 9701 below) are new endpoints;
@@ -734,11 +746,17 @@ OAUTH2_JWT_SECRET=<32+ char secret> uv run python -m oauth2_server
 ```
 
 Tuned via `src/oauth2_server/__main__.py`: uvicorn with `loop="uvloop"`,
-`http="httptools"`, and one worker process per CPU core (override with
-`OAUTH2_WORKERS`). Each worker is spawned from the
+`http="httptools"`, and a single worker process. The worker is spawned from the
 `oauth2_server.app:build` factory (`uvicorn.run(..., factory=True)`), which
 builds its own `Config`/`SqlStorage` from `OAUTH2_*` env vars and runs the
 (idempotent, backfill-aware) migration runner on startup.
+
+The server is single-worker by default. Replay guards (client-assertion `jti`,
+DPoP), the PAR store, the device-poll tracker and the rate limiters keep their
+state in process memory, so multi-worker or multi-replica deployments are not
+supported until that state can be shared. `OAUTH2_WORKERS` above 1 is refused at
+startup, and an invalid value (non-numeric, zero or negative) fails with a clear
+error.
 
 SQLAlchemy pool sizing on Postgres is controlled by `OAUTH2_DATABASE_MAX_CONNECTIONS`
 (default 10; wired to `pool_size` + `pool_pre_ping=True`). Not applied to SQLite,
@@ -753,6 +771,10 @@ server and can be used instead of uvicorn:
 uv add granian  # not a default dependency
 uv run granian --interface asgi oauth2_server.app:build
 ```
+
+The same caveat applies: granian can run several workers, so run it with a
+single worker (`--workers 1`) to keep in-process replay and rate-limit state
+consistent.
 
 ## Conformance test mode
 
