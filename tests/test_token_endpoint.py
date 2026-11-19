@@ -389,6 +389,9 @@ async def test_concurrent_refresh_only_one_wins(tmp_path):
         jwt_secret=JWT_SECRET,
         issuer="https://auth.example.com",
         dynamic_registration_enabled=True,
+        # Same as the shared fixture: the code flow here is only plumbing for
+        # a refresh token, so skip the consent prompt for the seeded client.
+        consent_trusted_client_ids=["client1"],
     )
     app = create_app(config, storage)
     async with AsyncClient(
