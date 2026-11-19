@@ -291,6 +291,7 @@ async def social_callback(provider: str, request: Request):
             username=username,
             password_hash=password_hash,
             email=userinfo.email,
+            email_verified=userinfo.email_verified,
             role="user",
         )
         await storage.save_user(user)

@@ -10,6 +10,7 @@ from oauth2_server.models import (
     Client,
     DenylistEntry,
     DeviceAuthorization,
+    Grant,
     Token,
     TrustedIssuer,
     User,
@@ -80,6 +81,11 @@ class Storage(Protocol):
     async def list_device_authorizations_page(
         self, q: ListQuery
     ) -> tuple[list[DeviceAuthorization], int]: ...
+
+    # User consent grants
+    async def save_grant(self, grant: Grant) -> None: ...
+    async def get_grant(self, user_id: str, client_id: str) -> Grant | None: ...
+    async def delete_grant(self, user_id: str, client_id: str) -> None: ...
 
     # Denylist
     async def save_trusted_issuer(self, issuer: TrustedIssuer) -> None: ...

@@ -217,10 +217,22 @@ async def _reject_if_denylisted(storage: Storage, username: str, email: str | No
             raise _grant_error("subject is blocked")
 
 
+def jwt_bearer_local_user_id(trusted: TrustedIssuer, sub: str) -> str:
+    """Local user id for `sub` as asserted by `trusted` (`subject_mapping="sub"`).
+
+    The id is derived from the (issuer, subject) pair, so the same `sub` from
+    two issuers never maps to the same local account, and an assertion never
+    resolves to a local account that was not provisioned for that issuer. The
+    derivation is deterministic, so no extra storage is needed.
+    """
+    return f"jwtbearer:{trusted.id}:{sub}"
+
+
 async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dict) -> str:
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:
         raise _grant_error("assertion sub claim is not a string")
+    local_id = jwt_bearer_local_user_id(trusted, sub)
     raw_email = claims.get("email")
     email = raw_email.strip() if isinstance(raw_email, str) else ""
 
@@ -244,7 +256,7 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
             raise _grant_error("assertion email matches more than one local account")
         existing = matches[0] if matches else None
     else:
-        existing = await storage.get_user_by_id(sub)
+        existing = await storage.get_user_by_id(local_id)
 
     if existing is not None:
         if not existing.enabled:
@@ -258,11 +270,15 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
             "assertion subject has no local user and the issuer does not allow provisioning"
         )
 
-    await _reject_if_denylisted(storage, sub, email if claims.get("email_verified") is True else "")
+    verified_email = email if claims.get("email_verified") is True else ""
+    # Check both the raw subject and the qualified username against the denylist.
+    await _reject_if_denylisted(storage, sub, verified_email)
+    await _reject_if_denylisted(storage, local_id, "")
     now = datetime.now(UTC)
     user = User(
-        id=sub,
-        username=sub,
+        id=local_id,
+        # Issuer-qualified, so it cannot collide with a local account's username.
+        username=local_id,
         # Valid but unguessable: the random secret is discarded, so the
         # account cannot be used for password login.
         password_hash=await hash_password_async(secrets.token_urlsafe(32)),
@@ -281,7 +297,7 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
         # re-read once; still a grant failure, never a 500.
         logger.warning("RFC 7523: JIT provisioning insert failed (iss=%s)", trusted.issuer)
         try:
-            raced = await storage.get_user_by_id(sub)
+            raced = await storage.get_user_by_id(local_id)
         except Exception:
             raced = None
         if raced is not None and raced.enabled:
