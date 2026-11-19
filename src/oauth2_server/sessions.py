@@ -50,6 +50,7 @@ def set_login(
     # which stores the same fields at login.
     request.session["role"] = user.role
     request.session["email"] = user.email
+    request.session["email_verified"] = user.email_verified
     request.session["username"] = user.username
     # RFC 9470 / OIDC Core §2: what this authentication event can attest to.
     # `acr` comes from `config.acr_values_supported[0]` and `amr` from the

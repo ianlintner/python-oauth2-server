@@ -33,6 +33,10 @@ remaining Rust feature set:
 - **Full OIDC RP-initiated logout** — `GET /oauth/logout` supports `id_token_hint`,
   `post_logout_redirect_uri` validation, front-channel iframe logout, and back-channel
   `logout+JWT` delivery via `httpx`; `GET /oauth/check_session` for session-status iframes.
+  Logout acts on the caller's own login session: token revocation and back-channel delivery
+  require an active session (an `id_token_hint` for a different user revokes nothing), and
+  `post_logout_redirect_uri` must be one of the `post_logout_redirect_uris` registered by the
+  client named in the `id_token_hint`.
   `dynamic_registration_enabled` gates `/connect/register` (default off).
 - **PAR (RFC 9126)** — `POST /oauth/par` pushes authorization parameters and returns a
   short-lived, single-use `request_uri` that `GET /oauth/authorize` can consume.
@@ -56,6 +60,7 @@ All are `OAUTH2_`-prefixed (see `src/oauth2_server/config.py` for the full `Conf
 | Variable | Default | Purpose |
 |---|---|---|
 | `OAUTH2_ADMIN_CLIENT_IDS` | unset (empty) | Comma-separated `client_id` allowlist for the bearer-token admin-API path. Fails closed — an empty/unset list denies every bearer token, even one with `admin` scope. |
+| `OAUTH2_CONSENT_TRUSTED_CLIENT_IDS` | unset (empty) | Comma-separated `client_id`s that skip the user-consent step. Empty by default (every client needs a recorded approval). Each listed client can obtain codes for any signed-in user without a prompt, so list only first-party clients you fully control. |
 | `OAUTH2_ADMIN_EMAILS` | unset (empty) | Comma-separated, case-insensitive email allowlist that grants admin-API access to a session even when the user's `role` isn't `admin`. |
 | `OAUTH2_SEED_USERNAME` | `admin` | Username for the optional startup-seeded admin user. |
 | `OAUTH2_SEED_PASSWORD` | unset | **Admin seeding only runs when this is explicitly set** — a deliberate divergence from Rust, which ships an insecure default password rejected only in production mode. |
@@ -65,6 +70,17 @@ All are `OAUTH2_`-prefixed (see `src/oauth2_server/config.py` for the full `Conf
 | `OAUTH2_ID_TOKEN_ALG` | `RS256` if a PEM is set, else `HS256` | Explicit override for the signing algorithm; normalized to upper-case. |
 | `OAUTH2_KEY_ROTATION_GRACE_HOURS` | `24` | How long a rotated-out RS256 key stays published in JWKS after `POST /admin/api/keys/rotate`, so tokens signed just before rotation still verify. |
 | `OAUTH2_DYNAMIC_REGISTRATION_ENABLED` | `false` | Gates `POST /connect/register`. Off by default, unlike Rust. |
+
+### User consent
+
+`GET /oauth/authorize` records and checks the user's approval of each client's scopes: the first
+request for a client (or for scopes beyond those already approved) shows a consent page, and
+`POST /oauth/consent` completes or denies it. `prompt=consent` always shows the page; `prompt=none`
+returns `consent_required` when no stored approval covers the request, so relying parties that
+used `prompt=none` for users who never approved the client now receive that error. Existing users
+have no recorded approvals and are asked once. Consent is a divergence from the Rust server (see
+"Accepted divergences" 65 in `docs/PHASE2-BACKLOG.md`). The pending request is held in process
+memory, like PAR entries.
 
 ### Single-process state caveats
 
@@ -288,6 +304,16 @@ does not expose a verification flag for it). Operators who list any address in
 confirm that provider actually verifies email ownership before granting the OAuth app access to
 production.
 
+The allowlist is only applied to an email the server recorded as verified (`users.email_verified`).
+Google and GitHub accounts are verified; Microsoft/Azure accounts are not (their
+`userPrincipalName` is stored but marked unverified), so those accounts never gain admin through
+`OAUTH2_ADMIN_EMAILS` — the request is refused with 403 and a warning naming the user id is logged.
+Password users and emails set through the admin API count as verified. Migration V25 backfills
+`microsoft:`/`azure:` accounts to unverified; sessions issued before upgrading carry no flag and
+must log in again to use the allowlist. Note also that `OAUTH2_MICROSOFT_TENANT_ID` /
+`OAUTH2_AZURE_TENANT_ID` default to `common` (any Azure AD tenant can sign in); set a single tenant
+id for production.
+
 **Account linking by verified email** (`OAUTH2_SOCIAL_LINK_BY_VERIFIED_EMAIL`, default `false` —
 divergence 56) is the opt-in counterpart. With it off (the default), every social login provisions
 its own `provider:id` user row, so a social identity can never reach an existing password account.
@@ -445,9 +471,11 @@ earlier phases deliberately left open:
   presenting Basic auth still fails). `validate_client_assertion` enforces `alg` pinned to the
   registered method, required claims `exp`/`sub`/`iss`/`aud`, `aud` equal to the token endpoint
   URL for every endpoint that authenticates a client this way (token, introspect, revoke, PAR,
-  device authorization), `iss`/`sub` equal to `client_id`, and jti replay protection via
-  `JtiReplayGuard`. A JWT assertion may omit form `client_id`, resolving the client from the
-  assertion's `sub` instead (divergence 36). `services/jwks_cache.py::JwksCache` fetches and
+  device authorization), `iss`/`sub` equal to `client_id`, a maximum assertion lifetime of 300
+  seconds (`exp` at most 300 s ahead of the server clock, `exp - iat` at most 300 s when `iat` is
+  present, and `iat` at most 60 s in the future; longer-lived assertions are rejected with
+  `invalid_client`), and jti replay protection via `JtiReplayGuard`. A JWT assertion may omit form `client_id`,
+  resolving the client from the assertion's `sub` instead (divergence 36). `services/jwks_cache.py::JwksCache` fetches and
   caches a `private_key_jwt` client's `jwks_uri` document, TTL clamped to `[30, 86400]` seconds
   (default 300, from `Cache-Control: max-age`), with a 10 s fetch timeout; an inline registered
   `jwks` column is preferred over `jwks_uri` when both would apply. `ClientService.from_app`
@@ -464,6 +492,12 @@ earlier phases deliberately left open:
   claim on every grant (authorization_code redemption uses the `resource` stored on the
   authorization code at issuance, not a value re-supplied at the token request); introspection
   echoes the token's own `aud`. Discovery advertises `resource_indicators_supported: true`.
+  Resource indicators may be restricted to an allow-list: a client's own `resources` list
+  (admin API `POST`/`PUT /admin/api/clients`) when non-empty, otherwise the server-wide
+  `OAUTH2_RESOURCE_ALLOW_LIST` (comma-separated). A value not on the applicable list is
+  rejected with `invalid_target`; matching is exact string equality. With neither set
+  (the default) any valid absolute URI is accepted. On refresh the allow-list is applied in
+  addition to the existing audience-subset rule.
 - **RFC 9728 / metadata parity** — `GET /.well-known/oauth-protected-resource` and
   `GET /.well-known/oauth-authorization-server/status` (a static, all-valid
   `draft-ietf-oauth-status-list` stub — unrelated to RFC 9701 below) are new endpoints;
@@ -649,6 +683,14 @@ input-validation gaps the Phase 3b/4a/4b backlogs recorded:
   `post_logout_redirect_uris`, with the same rule RFC 7591 registration uses: absolute `http(s)`,
   a real authority, no fragment (divergence 58). An empty admin `redirect_uris` list stays allowed
   (that is how client_credentials/device clients are created).
+- **Client deletion revokes tokens** — `DELETE /admin/api/clients/{id}` revokes every token
+  issued to the client before removing it (the same revocation disable uses), and records the
+  count in the `client.delete` audit entry.
+- **jwt-bearer subject namespacing** — with `subject_mapping="sub"`, the local user id for an
+  assertion is `jwtbearer:<trusted issuer id>:<sub>` (JIT users get the same value as username),
+  so the same `sub` from different issuers maps to different users. Existing users must be
+  provisioned under that id. A trusted issuer's empty `allowed_client_ids` now allows no client;
+  list the permitted client ids explicitly. Email mapping is unchanged.
 - **`claims` honored in the id_token** — the `claims` request stored on the authorization code is
   read back when the id_token is minted (`services/claims_request.py`, divergence 59). The
   semantics are deliberately narrow: a requested claim is delivered only when the granted SCOPE
@@ -706,11 +748,17 @@ OAUTH2_JWT_SECRET=<32+ char secret> uv run python -m oauth2_server
 ```
 
 Tuned via `src/oauth2_server/__main__.py`: uvicorn with `loop="uvloop"`,
-`http="httptools"`, and one worker process per CPU core (override with
-`OAUTH2_WORKERS`). Each worker is spawned from the
+`http="httptools"`, and a single worker process. The worker is spawned from the
 `oauth2_server.app:build` factory (`uvicorn.run(..., factory=True)`), which
 builds its own `Config`/`SqlStorage` from `OAUTH2_*` env vars and runs the
 (idempotent, backfill-aware) migration runner on startup.
+
+The server is single-worker by default. Replay guards (client-assertion `jti`,
+DPoP), the PAR store, the device-poll tracker and the rate limiters keep their
+state in process memory, so multi-worker or multi-replica deployments are not
+supported until that state can be shared. `OAUTH2_WORKERS` above 1 is refused at
+startup, and an invalid value (non-numeric, zero or negative) fails with a clear
+error.
 
 SQLAlchemy pool sizing on Postgres is controlled by `OAUTH2_DATABASE_MAX_CONNECTIONS`
 (default 10; wired to `pool_size` + `pool_pre_ping=True`). Not applied to SQLite,
@@ -725,6 +773,10 @@ server and can be used instead of uvicorn:
 uv add granian  # not a default dependency
 uv run granian --interface asgi oauth2_server.app:build
 ```
+
+The same caveat applies: granian can run several workers, so run it with a
+single worker (`--workers 1`) to keep in-process replay and rate-limit state
+consistent.
 
 ## Conformance test mode
 
@@ -741,7 +793,8 @@ outside an ephemeral test process.
 When on, it loads the seed's `issuer`, `clients`, `users` and `signingKeys`
 into a process-local in-memory store before the server binds, drives the
 ordinary `POST /auth/login` form + `GET /oauth/authorize` non-interactively
-(no consent screen, so seeded clients are consented implicitly), provisions
+(the seeded user's `auto_approve_clients` skip the consent step; any other client
+gets the normal consent page), provisions
 fresh key material under each seeded `kid` (never from the seed), and adds a
 `conformance` object (seed_applied, counts, signing key ids — never
 credentials) to `GET /ready`. `conformance.yaml` pins the claimed contract

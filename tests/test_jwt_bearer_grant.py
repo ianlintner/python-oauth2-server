@@ -18,6 +18,7 @@ import pytest
 
 from oauth2_server.models import TrustedIssuer
 from oauth2_server.services.jwks_cache import JwksCache
+from oauth2_server.services.jwt_bearer_grant import jwt_bearer_local_user_id
 from tests.conftest import build_client_app
 from tests.helpers import generate_rsa_keypair, post_token, seed_client
 
@@ -27,7 +28,24 @@ JWKS_URI = "https://idp.example.org/jwks.json"
 AUD = "https://auth.example.com"
 
 
-async def _setup(client_app, *, jwks: dict, **issuer_overrides):
+async def _bound_user(
+    storage, trusted: TrustedIssuer, sub: str = "u1", username: str = "bound_user"
+):
+    """A local user already provisioned for `sub` as asserted by `trusted`."""
+    from oauth2_server.models import User
+
+    seeded = await storage.get_user_by_id("u1")
+    user = User(
+        id=jwt_bearer_local_user_id(trusted, sub),
+        username=username,
+        email="user_rfc@example.test",
+        password_hash=seeded.password_hash,
+    )
+    await storage.save_user(user)
+    return user
+
+
+async def _setup(client_app, *, jwks: dict, **issuer_overrides) -> TrustedIssuer:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=jwks)
 
@@ -41,9 +59,18 @@ async def _setup(client_app, *, jwks: dict, **issuer_overrides):
         grant_types=json.dumps([BEARER_URN]),
         scope="read profile",
     )
-    fields = {"id": uuid.uuid4().hex, "issuer": EXT_ISS, "jwks_uri": JWKS_URI}
+    fields = {
+        "id": uuid.uuid4().hex,
+        "issuer": EXT_ISS,
+        "jwks_uri": JWKS_URI,
+        "allowed_client_ids": json.dumps(["jb_client"]),
+    }
     fields.update(issuer_overrides)
-    await client_app.storage.save_trusted_issuer(TrustedIssuer(**fields))
+    trusted = TrustedIssuer(**fields)
+    await client_app.storage.save_trusted_issuer(trusted)
+    if trusted.subject_mapping == "sub":
+        await _bound_user(client_app.storage, trusted)
+    return trusted
 
 
 def _assertion(key, *, kid="client-key-1", **overrides) -> str:
@@ -76,7 +103,7 @@ def _assert_invalid_grant(resp):
 
 async def test_valid_assertion_issues_access_token(client_app):
     key, jwks = generate_rsa_keypair()
-    await _setup(client_app, jwks=jwks)
+    trusted = await _setup(client_app, jwks=jwks)
     resp = await _redeem(client_app, _assertion(key))
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -84,7 +111,7 @@ async def test_valid_assertion_issues_access_token(client_app):
     assert body["scope"] == "read profile"
     assert "refresh_token" not in body
     row = await client_app.storage.get_token_by_access_token(body["access_token"])
-    assert row is not None and row.user_id == "u1"
+    assert row is not None and row.user_id == jwt_bearer_local_user_id(trusted, "u1")
 
 
 async def test_requested_scope_subset_honoured_and_excess_rejected(client_app):
@@ -168,10 +195,13 @@ async def test_unknown_subject_without_jit_rejected(client_app):
 
 async def test_jit_provision_creates_user(client_app):
     key, jwks = generate_rsa_keypair()
-    await _setup(client_app, jwks=jwks, jit_provision=True)
+    trusted = await _setup(client_app, jwks=jwks, jit_provision=True)
     resp = await _redeem(client_app, _assertion(key, sub="fresh-user"))
     assert resp.status_code == 200, resp.text
-    assert await client_app.storage.get_user_by_id("fresh-user") is not None
+    assert (
+        await client_app.storage.get_user_by_id(jwt_bearer_local_user_id(trusted, "fresh-user"))
+        is not None
+    )
 
 
 async def test_email_mapping_resolves_existing_user(client_app):
@@ -319,10 +349,10 @@ async def test_jit_user_gets_valid_unguessable_password_hash(client_app):
     from oauth2_server.security import verify_password
 
     key, jwks = generate_rsa_keypair()
-    await _setup(client_app, jwks=jwks, jit_provision=True)
+    trusted = await _setup(client_app, jwks=jwks, jit_provision=True)
     resp = await _redeem(client_app, _assertion(key, sub="jit-pw"))
     assert resp.status_code == 200, resp.text
-    user = await client_app.storage.get_user_by_id("jit-pw")
+    user = await client_app.storage.get_user_by_id(jwt_bearer_local_user_id(trusted, "jit-pw"))
     assert user.password_hash.startswith("$argon2")
     assert verify_password("", user.password_hash) is False
 
@@ -330,25 +360,27 @@ async def test_jit_user_gets_valid_unguessable_password_hash(client_app):
 @pytest.mark.parametrize("verified", [None, False, "true", 1])
 async def test_jit_does_not_persist_unverified_email(client_app, verified):
     key, jwks = generate_rsa_keypair()
-    await _setup(client_app, jwks=jwks, jit_provision=True)
+    trusted = await _setup(client_app, jwks=jwks, jit_provision=True)
     extra = {} if verified is None else {"email_verified": verified}
     resp = await _redeem(
         client_app, _assertion(key, sub="jit-unv", email="victim@example.test", **extra)
     )
     assert resp.status_code == 200, resp.text
-    user = await client_app.storage.get_user_by_id("jit-unv")
+    user = await client_app.storage.get_user_by_id(jwt_bearer_local_user_id(trusted, "jit-unv"))
     assert not user.email
 
 
 async def test_jit_persists_verified_email(client_app):
     key, jwks = generate_rsa_keypair()
-    await _setup(client_app, jwks=jwks, jit_provision=True)
+    trusted = await _setup(client_app, jwks=jwks, jit_provision=True)
     resp = await _redeem(
         client_app,
         _assertion(key, sub="jit-ver", email="ok@example.test", email_verified=True),
     )
     assert resp.status_code == 200, resp.text
-    assert (await client_app.storage.get_user_by_id("jit-ver")).email == "ok@example.test"
+    assert (
+        await client_app.storage.get_user_by_id(jwt_bearer_local_user_id(trusted, "jit-ver"))
+    ).email == "ok@example.test"
 
 
 def _alt_key(alg: str):
@@ -561,7 +593,7 @@ async def _denylist(client_app, kind, value):
 
 
 @pytest.mark.parametrize(
-    ("kind", "value"), [("username", "user_rfc"), ("email", "user_rfc@example.test")]
+    ("kind", "value"), [("username", "bound_user"), ("email", "user_rfc@example.test")]
 )
 async def test_denylisted_existing_user_rejected(client_app, kind, value):
     key, jwks = generate_rsa_keypair()
@@ -580,10 +612,12 @@ async def test_denylisted_email_user_rejected_via_email_mapping(client_app):
 
 async def test_denylisted_jit_subject_not_provisioned(client_app):
     key, jwks = generate_rsa_keypair()
-    await _setup(client_app, jwks=jwks, jit_provision=True)
+    trusted = await _setup(client_app, jwks=jwks, jit_provision=True)
     await _denylist(client_app, "username", "newbie")
     _assert_invalid_grant(await _redeem(client_app, _assertion(key, sub="newbie")))
-    assert await client_app.storage.get_user_by_id("newbie") is None
+    assert (
+        await client_app.storage.get_user_by_id(jwt_bearer_local_user_id(trusted, "newbie")) is None
+    )
 
 
 async def _race_winner(client_app, monkeypatch, *, username, email):
@@ -630,3 +664,65 @@ async def test_jit_race_winner_allowed_succeeds(client_app, monkeypatch):
     await _setup(client_app, jwks=jwks, jit_provision=True)
     await _race_winner(client_app, monkeypatch, username="winner_name", email="winner@example.test")
     assert (await _redeem(client_app, _assertion(key, sub="racer"))).status_code == 200
+
+
+async def test_jwt_bearer_same_sub_from_two_issuers_maps_to_different_users(client_app):
+    key, jwks = generate_rsa_keypair()
+    first = await _setup(client_app, jwks=jwks)
+    other_iss = "https://other-idp.example.org"
+    second = TrustedIssuer(
+        id=uuid.uuid4().hex,
+        issuer=other_iss,
+        jwks_uri=JWKS_URI,
+        allowed_client_ids=json.dumps(["jb_client"]),
+    )
+    await client_app.storage.save_trusted_issuer(second)
+    await _bound_user(client_app.storage, second, username="bound_user_2")
+
+    users = set()
+    for iss in (EXT_ISS, other_iss):
+        resp = await _redeem(client_app, _assertion(key, iss=iss, sub="u1"))
+        assert resp.status_code == 200, resp.text
+        row = await client_app.storage.get_token_by_access_token(resp.json()["access_token"])
+        users.add(row.user_id)
+    assert users == {
+        jwt_bearer_local_user_id(first, "u1"),
+        jwt_bearer_local_user_id(second, "u1"),
+    }
+
+
+async def test_jwt_bearer_cannot_impersonate_existing_local_user(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks)
+    # No user is provisioned for this issuer and JIT is off: the locally
+    # seeded user `u1` must not be reachable by asserting `sub=u1`.
+    other = TrustedIssuer(
+        id=uuid.uuid4().hex,
+        issuer="https://unbound.example.org",
+        jwks_uri=JWKS_URI,
+        allowed_client_ids=json.dumps(["jb_client"]),
+    )
+    await client_app.storage.save_trusted_issuer(other)
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key, iss=other.issuer, sub="u1")))
+
+
+async def test_jwt_bearer_empty_client_allow_list_denies(client_app):
+    key, jwks = generate_rsa_keypair()
+    await _setup(client_app, jwks=jwks, allowed_client_ids="[]")
+    _assert_invalid_grant(await _redeem(client_app, _assertion(key)))
+
+
+async def test_jwt_bearer_jit_username_is_not_a_local_username(client_app):
+    from tests.helpers import seed_admin
+
+    key, jwks = generate_rsa_keypair()
+    trusted = await _setup(client_app, jwks=jwks, jit_provision=True)
+    await seed_admin(client_app.storage)
+    resp = await _redeem(client_app, _assertion(key, sub="admin1"))
+    assert resp.status_code == 200, resp.text
+    row = await client_app.storage.get_token_by_access_token(resp.json()["access_token"])
+    assert row.user_id == jwt_bearer_local_user_id(trusted, "admin1")
+    assert row.user_id != "admin1"
+    provisioned = await client_app.storage.get_user_by_id(row.user_id)
+    assert provisioned.username != "admin_rfc"
+    assert provisioned.role == "user"

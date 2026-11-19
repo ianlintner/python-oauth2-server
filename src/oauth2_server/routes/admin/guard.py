@@ -15,6 +15,7 @@ through to the session path.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -23,6 +24,8 @@ from fastapi.responses import ORJSONResponse, RedirectResponse, Response
 
 from oauth2_server.config import Config
 from oauth2_server.models import User
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,10 +67,14 @@ def client_id_in_allowlist(client_id: str, allowlist: list[str]) -> bool:
 
 def user_is_admin(user: User | None, config: Config) -> bool:
     """True iff `user` exists, is enabled, and is an admin by role or by the
-    (already normalised) `admin_emails` allowlist."""
+    (already normalised) `admin_emails` allowlist. As on the session path, an
+    allow-list match only counts for an email the server established as
+    verified."""
     if user is None or not user.enabled:
         return False
-    return user.role == "admin" or user.email.lower() in config.admin_emails
+    if user.role == "admin":
+        return True
+    return user.email_verified and user.email.lower() in config.admin_emails
 
 
 def _invalid_token_error() -> AdminAuthError:
@@ -146,8 +153,16 @@ def _authenticate_session(request: Request) -> AdminActor:
 
     role = session.get("role", "")
     email = session.get("email", "")
-    is_admin = role == "admin" or email.lower() in config.admin_emails
-    if not is_admin:
+    if role != "admin" and email.lower() in config.admin_emails:
+        # The allow-list only applies to an email the server established as
+        # verified. A missing flag (older session cookie) counts as unverified.
+        if session.get("email_verified") is not True:
+            logger.warning(
+                "admin email allow-list match refused for user %s: email is not verified",
+                user_id,
+            )
+            raise _insufficient_permissions_error()
+    elif role != "admin":
         raise _insufficient_permissions_error()
 
     return AdminActor(actor_id=user_id, actor_email=email)
