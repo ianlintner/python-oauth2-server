@@ -67,7 +67,7 @@ from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.jwt_bearer_grant import JWT_BEARER_GRANT, redeem_jwt_bearer_assertion
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.services.rar import RarError, validate_authorization_details
-from oauth2_server.services.resource import validate_resource
+from oauth2_server.services.resource import validate_resource_for_client
 from oauth2_server.services.tokens import TokenService
 
 logger = logging.getLogger(__name__)
@@ -295,7 +295,19 @@ def _mint_id_token(
 
 @router.post("/token")
 async def token(request: Request) -> ORJSONResponse:
-    form = dict(await request.form())
+    form_data = await request.form()
+
+    # RFC 6749 §3.2: request parameters MUST NOT be included more than once.
+    # Reject a repeated name (body, query string, or across both) before any
+    # client authentication or grant dispatch, rather than letting `dict()`
+    # silently keep one of the values.
+    seen_keys: set[str] = set()
+    for key, _ in (*request.query_params.multi_items(), *form_data.multi_items()):
+        if key in seen_keys:
+            return oauth_error("invalid_request", "duplicate parameter")
+        seen_keys.add(key)
+
+    form = dict(form_data)
     storage = request.app.state.storage
     config = request.app.state.config
     keyset = request.app.state.keyset
@@ -410,7 +422,7 @@ async def token(request: Request) -> ORJSONResponse:
                 return oauth_error(exc.error, exc.description)
 
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
@@ -654,7 +666,7 @@ async def token(request: Request) -> ORJSONResponse:
         # corrected retry would look like refresh-token reuse and revoke the
         # entire token family.
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
@@ -807,7 +819,7 @@ async def token(request: Request) -> ORJSONResponse:
             return oauth_error("authorization_pending", "authorization request is still pending")
 
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
@@ -979,7 +991,7 @@ async def token(request: Request) -> ORJSONResponse:
         # audience cannot be recovered (opaque token) no `resource` is
         # accepted, since it cannot be checked.
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
         subject_audience = _salvage_old_aud(subject_token)
@@ -1070,7 +1082,7 @@ async def token(request: Request) -> ORJSONResponse:
             scope = client.scope
 
         try:
-            resource = validate_resource(form.get("resource"))
+            resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 

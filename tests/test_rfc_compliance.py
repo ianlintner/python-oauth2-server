@@ -49,6 +49,7 @@ from tests.helpers import (
     seed_admin,
     seed_client,
     seed_user,
+    trust_client,
 )
 from tests.test_metrics import _metric_value
 from tests.test_social_login import _mock_transport, _state_from_location
@@ -232,6 +233,7 @@ async def test_rfc7662_introspection_nbf_le_iat(client_app):
 
 
 async def test_public_client_exchanges_code_without_secret(client_app):
+    trust_client(client_app, "client_public")
     await seed_client(
         client_app.storage,
         client_id="client_public",
@@ -262,6 +264,7 @@ async def test_public_client_exchanges_code_without_secret(client_app):
 
 
 async def test_public_client_must_not_present_secret(client_app):
+    trust_client(client_app, "client_pub_secret")
     await seed_client(
         client_app.storage,
         client_id="client_pub_secret",
@@ -786,13 +789,17 @@ async def test_oidc_logout_redirects_with_exact_state(client_app):
     """Full coverage: test_logout.py::test_logout_redirects_with_exact_state."""
     await reseed_client(
         client_app,
-        redirect_uris=json.dumps(["https://app.example.com/logged-out"]),
-        post_logout_redirect_uris="",
+        post_logout_redirect_uris=json.dumps(["https://app.example.com/logged-out"]),
     )
 
     resp = await client_app.get(
         "/oauth/logout",
         params={
+            "id_token_hint": jwt.encode(
+                {"iss": ISSUER, "sub": "u1", "aud": "client1", "exp": 9999999999, "iat": 0},
+                JWT_SECRET,
+                algorithm="HS256",
+            ),
             "post_logout_redirect_uri": "https://app.example.com/logged-out",
             "state": "pin-state",
         },
@@ -820,6 +827,7 @@ async def test_backchannel_logout_token_shape(client_app):
         backchannel_logout_uri="https://rp.example/bc-logout",
         backchannel_logout_session_required=False,
     )
+    await login_session(client_app)
 
     id_token_hint = jwt.encode(
         {"iss": ISSUER, "sub": "u1", "aud": "client1", "exp": 9999999999, "iat": 0},

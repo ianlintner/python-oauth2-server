@@ -20,6 +20,11 @@ async def build_client_app(config_overrides: dict | None = None):
         # explicitly in tests/test_registration.py) doesn't need to be
         # threaded through every call site.
         "dynamic_registration_enabled": True,
+        # Most tests drive /oauth/authorize only as plumbing for a code, so
+        # the fixture client is operator-trusted (consent skipped). The
+        # consent behaviour itself is covered with `consent_trusted_client_ids=[]`
+        # in tests/test_consent.py.
+        "consent_trusted_client_ids": ["client1"],
         **(config_overrides or {}),
     }
     config = Config(**overrides)
