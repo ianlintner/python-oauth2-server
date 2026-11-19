@@ -57,9 +57,7 @@ async def advance_clock(request: Request) -> ORJSONResponse:
     if isinstance(seconds, bool) or not isinstance(seconds, int):
         return _bad_request("advance_seconds must be an integer")
     if not 0 <= seconds <= clock.MAX_ADVANCE_SECS:
-        return _bad_request(
-            f"advance_seconds must be between 0 and {clock.MAX_ADVANCE_SECS}"
-        )
+        return _bad_request(f"advance_seconds must be between 0 and {clock.MAX_ADVANCE_SECS}")
     clock.advance(seconds)
     return ORJSONResponse({"now": int(clock.time())})
 
