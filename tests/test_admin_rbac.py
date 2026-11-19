@@ -268,3 +268,25 @@ async def test_admin_email_update_marks_verified():
         assert resp.status_code == 200
         after = await client.storage.get_user_by_id(user.id)
         assert after.email_verified is True
+
+
+def test_user_is_admin_allowlist_requires_verified_email():
+    from oauth2_server.models import User
+    from oauth2_server.routes.admin.guard import user_is_admin
+
+    class _Cfg:
+        admin_emails = ["boss@example.test"]
+
+    def _user(**kw):
+        return User(
+            id="u1",
+            username="boss",
+            password_hash="x",
+            email="boss@example.test",
+            **kw,
+        )
+
+    assert user_is_admin(_user(email_verified=True), _Cfg()) is True
+    assert user_is_admin(_user(email_verified=False), _Cfg()) is False
+    assert user_is_admin(_user(email_verified=False, role="admin"), _Cfg()) is True
+    assert user_is_admin(_user(email_verified=True, enabled=False), _Cfg()) is False
