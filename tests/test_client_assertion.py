@@ -16,10 +16,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from oauth2_server.errors import OAuthError
 from oauth2_server.services.client_assertion import (
     JWT_BEARER_ASSERTION_TYPE,
     JtiGuardFull,
     JtiReplayGuard,
+    validate_client_assertion,
 )
 from oauth2_server.services.jwks_cache import (
     DEFAULT_TTL_SECS,
@@ -30,6 +32,7 @@ from oauth2_server.services.jwks_cache import (
     parse_cache_control_max_age,
 )
 from tests.helpers import (
+    TOKEN_ENDPOINT,
     generate_rsa_keypair,
     make_client_assertion,
     post_token,
@@ -259,6 +262,125 @@ async def test_vector_l_client_assertion_jti_replay(client_app):
     assert replay.status_code == 401, replay.text
     assert replay.json()["error"] == "invalid_client"
     assert replay.json()["error_description"] == "client_assertion jti has already been used"
+
+
+async def test_long_lived_assertion_rejected_at_validation(client_app):
+    await reseed_secret_jwt_client(client_app)
+    client = await client_app.storage.get_client("client1")
+    assertion = make_client_assertion(
+        "client1", CLIENT_SECRET_JWT_SECRET, "HS256", exp=int(time.time()) + 900
+    )
+    with pytest.raises(OAuthError) as exc_info:
+        validate_client_assertion(
+            client, assertion, TOKEN_ENDPOINT, jwks=None, guard=JtiReplayGuard()
+        )
+    assert exc_info.value.error == "invalid_client"
+    assert exc_info.value.description == (
+        "client_assertion lifetime exceeds the maximum of 300 seconds"
+    )
+
+
+async def test_long_lived_client_assertion_rejected(client_app):
+    await reseed_secret_jwt_client(client_app)
+    assertion = make_client_assertion(
+        "client1", CLIENT_SECRET_JWT_SECRET, "HS256", exp=int(time.time()) + 900
+    )
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def test_assertion_within_window_accepted_and_replay_rejected(client_app):
+    await reseed_secret_jwt_client(client_app)
+    now = int(time.time())
+    assertion = make_client_assertion(
+        "client1", CLIENT_SECRET_JWT_SECRET, "HS256", iat=now, exp=now + 250
+    )
+    first = await post_token(client_app, assertion_form(assertion))
+    assert first.status_code == 200, first.text
+    second = await post_token(client_app, assertion_form(assertion))
+    assert second.status_code == 401, second.text
+    assert second.json()["error"] == "invalid_client"
+
+
+async def test_assertion_with_backdated_iat_still_bounded(client_app):
+    await reseed_secret_jwt_client(client_app)
+    now = int(time.time())
+    assertion = make_client_assertion(
+        "client1", CLIENT_SECRET_JWT_SECRET, "HS256", iat=now - 5000, exp=now + 900
+    )
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def test_assertion_lifetime_measured_from_iat(client_app):
+    """`exp` is near, but `exp - iat` exceeds the cap."""
+    await reseed_secret_jwt_client(client_app)
+    now = int(time.time())
+    assertion = make_client_assertion(
+        "client1", CLIENT_SECRET_JWT_SECRET, "HS256", iat=now - 1000, exp=now + 30
+    )
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def test_assertion_without_iat_accepted(client_app):
+    await reseed_secret_jwt_client(client_app)
+    assertion = make_client_assertion(
+        "client1", CLIENT_SECRET_JWT_SECRET, "HS256", iat=None, exp=int(time.time()) + 120
+    )
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 200, resp.text
+
+
+async def test_assertion_future_iat_rejected(client_app):
+    await reseed_secret_jwt_client(client_app)
+    now = int(time.time())
+    assertion = make_client_assertion(
+        "client1", CLIENT_SECRET_JWT_SECRET, "HS256", iat=now + 600, exp=now + 660
+    )
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def test_assertion_small_future_iat_within_skew_accepted(client_app):
+    await reseed_secret_jwt_client(client_app)
+    now = int(time.time())
+    assertion = make_client_assertion(
+        "client1", CLIENT_SECRET_JWT_SECRET, "HS256", iat=now + 20, exp=now + 120
+    )
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 200, resp.text
+
+
+async def test_assertion_non_numeric_iat_rejected(client_app):
+    await reseed_secret_jwt_client(client_app)
+    assertion = make_client_assertion("client1", CLIENT_SECRET_JWT_SECRET, "HS256", iat="soon")
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"] == "invalid_client"
+
+
+async def test_private_key_jwt_long_lived_assertion_rejected(client_app):
+    private_pem, jwks = generate_rsa_keypair()
+    await reseed_client(
+        client_app,
+        token_endpoint_auth_method="private_key_jwt",
+        jwks=json.dumps(jwks),
+    )
+    assertion = make_client_assertion(
+        "client1",
+        private_pem,
+        "RS256",
+        headers={"kid": "client-key-1"},
+        exp=int(time.time()) + 900,
+    )
+    resp = await post_token(client_app, assertion_form(assertion))
+    assert resp.status_code == 401, resp.text
+    assert resp.json()["error"] == "invalid_client"
 
 
 # --------------------------------------------------------------------------

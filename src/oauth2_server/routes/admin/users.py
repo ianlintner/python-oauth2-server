@@ -98,6 +98,26 @@ async def list_users(
     return ORJSONResponse(body)
 
 
+_MIN_PASSWORD_LENGTH = 8
+
+
+def _check_password_length(password: str) -> ORJSONResponse | None:
+    """Return the 400 response for a too-short password, or `None` if acceptable.
+
+    Shared by every admin path that sets a password so they apply one rule.
+    Length is measured in characters and the value is not trimmed.
+    """
+    if len(password) < _MIN_PASSWORD_LENGTH:
+        return ORJSONResponse(
+            {
+                "error": "weak_password",
+                "error_description": f"password must be at least {_MIN_PASSWORD_LENGTH} characters",
+            },
+            status_code=400,
+        )
+    return None
+
+
 @router.post("/users", status_code=201)
 async def create_user(request: Request, actor: AdminActor = AdminDep) -> ORJSONResponse:
     storage = request.app.state.storage
@@ -115,6 +135,10 @@ async def create_user(request: Request, actor: AdminActor = AdminDep) -> ORJSONR
             },
             status_code=400,
         )
+
+    weak = _check_password_length(password)
+    if weak is not None:
+        return weak
 
     if await storage.get_user_by_username(username) is not None:
         return ORJSONResponse(
@@ -175,6 +199,8 @@ async def update_user(
     updates: dict = {}
     if "email" in fields_set:
         updates["email"] = body_model.email
+        # An address set through the admin API is admin-established.
+        updates["email_verified"] = True
     if "role" in fields_set and body_model.role in _VALID_ROLES:
         updates["role"] = body_model.role
     if "enabled" in fields_set:
@@ -287,14 +313,9 @@ async def reset_user_password(
     body = await _json_body(request)
     password = str(body.get("password") or "")
 
-    if len(password) < 8:
-        return ORJSONResponse(
-            {
-                "error": "weak_password",
-                "error_description": "password must be at least 8 characters",
-            },
-            status_code=400,
-        )
+    weak = _check_password_length(password)
+    if weak is not None:
+        return weak
 
     password_hash = await hash_password_async(password)
     await storage.set_user_password_hash(user_id, password_hash)

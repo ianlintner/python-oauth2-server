@@ -742,9 +742,29 @@ admin-session server-side revocation.
 64. PKCE is required for confidential clients too (Rust parity): `/oauth/authorize` and PAR without
     `code_challenge` → `invalid_request`; a stored code with no challenge is refused at redemption
     with `invalid_grant`. This is a **breaking change for confidential clients that never sent PKCE**.
+65. `GET /oauth/logout` is bound to the caller's login session (divergence from Rust): an
+    `id_token_hint` revokes the subject's tokens only when its `sub` equals the session user, and
+    back-channel logout is dispatched only when a login session existed (using the session's user as
+    `sub`, never a query-supplied `sid`; dispatch runs as a background task with the same bounded
+    concurrency). `post_logout_redirect_uri` must be listed in `post_logout_redirect_uris` of the
+    client(s) named by the hint's `aud`; a client's plain `redirect_uris` no longer qualify and a
+    request without a hint gets no redirect (400 `invalid_request`). Clients that relied on
+    the old fallback must register their post-logout URIs explicitly.
 52 (amended). `dpop_jkt` is persisted on the code row — Rust migration `V22__add_dpop_jkt_to_auth_codes.sql`
     (vendored here; authored in the Rust repo, the schema owner). `app.state.dpop_code_bindings` and
     `services/dpop_bindings.py` are gone.
+
+65. User consent is implemented (the Rust server has no consent step). `GET /oauth/authorize` issues a
+    code only for scopes covered by a stored grant (`grants` table / collection, migration
+    `V24__create_grants_table.sql`, one row per user + client holding the union of approved scopes).
+    Otherwise it renders a consent page naming the client and the scopes still needing approval, and
+    parks the validated request server-side (`services/consent.py`, in-memory like the PAR store, so
+    single-process); `POST /oauth/consent` carries only an opaque handle, a CSRF token and
+    `action=approve|deny`, re-validates client/redirect/scope/user state, and then issues the code
+    (or `access_denied`). `prompt=consent` always asks; `prompt=none` without a covering grant
+    returns `consent_required` through the redirect channel. Clients listed in
+    `OAUTH2_CONSENT_TRUSTED_CLIENT_IDS` (default empty) skip the step; in conformance mode a seeded
+    user's `auto_approve_clients` do too. Existing users have no grants and are asked once.
 
 Still out of scope: `request_uri`-as-JAR-URL, and the parity-only items listed above.
 
