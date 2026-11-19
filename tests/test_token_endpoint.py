@@ -19,6 +19,7 @@ from tests.helpers import (
     reseed_client,
     seed_client,
     seed_user,
+    trust_client,
 )
 
 JWT_SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
@@ -108,6 +109,28 @@ async def test_client_credentials_issues_at_jwt(client_app):
     assert jwt.get_unverified_header(body["access_token"])["typ"] == "at+JWT"
     assert "refresh_token" not in body or body["refresh_token"] is None
     assert resp.headers["cache-control"] == "no-store"
+
+
+async def test_token_endpoint_rejects_duplicate_parameter(client_app):
+    auth = {"Authorization": "Basic " + base64.b64encode(b"client1:s3cret").decode()}
+    form_header = {"Content-Type": "application/x-www-form-urlencoded", **auth}
+
+    for body, url in (
+        ("grant_type=client_credentials&grant_type=client_credentials", "/oauth/token"),
+        ("grant_type=client_credentials&scope=a&scope=b", "/oauth/token"),
+        ("grant_type=client_credentials&resource=x:a&resource=x:b", "/oauth/token"),
+        ("grant_type=client_credentials", "/oauth/token?scope=a&scope=b"),
+        ("grant_type=client_credentials&scope=a", "/oauth/token?scope=a"),
+    ):
+        resp = await client_app.post(url, content=body, headers=form_header)
+        assert resp.status_code == 400, (url, body)
+        assert resp.json()["error"] == "invalid_request"
+        assert "duplicate" in resp.json()["error_description"]
+
+    ok = await client_app.post(
+        "/oauth/token", content="grant_type=client_credentials", headers=form_header
+    )
+    assert ok.status_code == 200
 
 
 async def test_wrong_secret_rejected_with_401(client_app):
@@ -210,6 +233,7 @@ async def _seed_public_client(client_app, client_id: str = "pubclient"):
         redirect_uris='["https://a.example/cb"]',
         token_endpoint_auth_method="none",
     )
+    trust_client(client_app, client_id)
 
 
 async def test_public_client_exchanges_code_without_secret(client_app):

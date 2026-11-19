@@ -49,6 +49,7 @@ from oauth2_server.models import (
     Client,
     DenylistEntry,
     DeviceAuthorization,
+    Grant,
     Token,
     TrustedIssuer,
     User,
@@ -154,6 +155,7 @@ class MongoStorage:
         self.device_authorizations = self._db["device_authorizations"]
         self.denylist = self._db["denylist"]
         self.trusted_issuers = self._db["trusted_issuers"]
+        self.grants = self._db["grants"]
         self.audit_log = self._db["audit_log"]
 
     async def _ensure_indexes(self) -> None:
@@ -176,6 +178,7 @@ class MongoStorage:
         await self.device_authorizations.create_index("client_id")
         await self.denylist.create_index([("kind", 1), ("value", 1)], unique=True)
         await self.trusted_issuers.create_index("issuer", unique=True)
+        await self.grants.create_index([("user_id", 1), ("client_id", 1)], unique=True)
 
     async def _normalize_legacy_timestamps(self) -> None:
         """Idempotent: rewrites any BSON-Date-typed datetime field back to
@@ -312,6 +315,7 @@ class MongoStorage:
                 "$set": {
                     "username": user.username,
                     "email": user.email,
+                    "email_verified": user.email_verified,
                     "enabled": user.enabled,
                     "role": user.role,
                     "password_hash": user.password_hash,
@@ -555,6 +559,30 @@ class MongoStorage:
 
     async def get_trusted_issuer(self, issuer: str) -> TrustedIssuer | None:
         return _from_doc(TrustedIssuer, await self.trusted_issuers.find_one({"issuer": issuer}))
+
+    # --- User consent grants ---
+
+    async def save_grant(self, grant: Grant) -> None:
+        # Upsert on (user_id, client_id); id/created_at only on insert.
+        doc = _to_doc(grant)
+        doc.pop("_id", None)
+        insert_only = {k: doc.pop(k) for k in ("id", "created_at") if k in doc}
+        for key in ("user_id", "client_id"):
+            doc.pop(key, None)
+        update: dict = {"$set": doc}
+        if insert_only:
+            update["$setOnInsert"] = insert_only
+        await self.grants.update_one(
+            {"user_id": grant.user_id, "client_id": grant.client_id}, update, upsert=True
+        )
+
+    async def get_grant(self, user_id: str, client_id: str) -> Grant | None:
+        return _from_doc(
+            Grant, await self.grants.find_one({"user_id": user_id, "client_id": client_id})
+        )
+
+    async def delete_grant(self, user_id: str, client_id: str) -> None:
+        await self.grants.delete_one({"user_id": user_id, "client_id": client_id})
 
     # --- Denylist ---
 
