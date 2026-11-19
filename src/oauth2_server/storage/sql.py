@@ -19,6 +19,7 @@ from oauth2_server.models import (
     Client,
     DenylistEntry,
     DeviceAuthorization,
+    Grant,
     Token,
     TrustedIssuer,
     User,
@@ -41,6 +42,7 @@ _TOKEN_COLS = ", ".join(Token.model_fields.keys())
 _AUTH_CODE_COLS = ", ".join(AuthorizationCode.model_fields.keys())
 _DEVICE_AUTH_COLS = ", ".join(DeviceAuthorization.model_fields.keys())
 _TRUSTED_ISSUER_COLS = ", ".join(TrustedIssuer.model_fields.keys())
+_GRANT_COLS = ", ".join(Grant.model_fields.keys())
 _DENYLIST_COLS = ", ".join(DenylistEntry.model_fields.keys())
 _AUDIT_LOG_COLS = ", ".join(AuditLogEntry.model_fields.keys())
 
@@ -54,7 +56,15 @@ _DENYLIST_SORT_COLS = ["kind", "value", "created_at"]
 _AUDIT_LOG_SORT_COLS = ["actor_id", "action", "target_kind", "created_at"]
 
 # Columns update_user is allowed to change.
-_USER_UPDATE_COLS = ["username", "email", "enabled", "role", "password_hash", "updated_at"]
+_USER_UPDATE_COLS = [
+    "username",
+    "email",
+    "email_verified",
+    "enabled",
+    "role",
+    "password_hash",
+    "updated_at",
+]
 
 # Columns update_client is allowed to change — mirrors the Rust UPDATE query,
 # which deliberately excludes id/client_id/created_at/require_state.
@@ -83,6 +93,7 @@ _CLIENT_UPDATE_COLS = [
     "tls_client_certificate_subject_dn",
     "enabled",
     "dpop_nonce_required",
+    "resources",
     "client_secret_key",
 ]
 
@@ -814,6 +825,41 @@ class SqlStorage:
                 .first()
             )
         return TrustedIssuer(**row) if row else None
+
+    # --- User consent grants ---
+
+    async def save_grant(self, grant: Grant) -> None:
+        # Upsert on (user_id, client_id): the original id/created_at survive.
+        stmt = (
+            _insert_stmt("grants", _GRANT_COLS) + " ON CONFLICT(user_id, client_id) DO UPDATE SET "
+            "scope = excluded.scope, updated_at = excluded.updated_at"
+        )
+        async with self._engine.begin() as conn:
+            await conn.execute(text(stmt), self._dump(grant))
+
+    async def get_grant(self, user_id: str, client_id: str) -> Grant | None:
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        text(
+                            f"SELECT {_GRANT_COLS} FROM grants "
+                            "WHERE user_id = :u AND client_id = :c"
+                        ),
+                        {"u": user_id, "c": client_id},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return Grant(**row) if row else None
+
+    async def delete_grant(self, user_id: str, client_id: str) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM grants WHERE user_id = :u AND client_id = :c"),
+                {"u": user_id, "c": client_id},
+            )
 
     # --- Denylist ---
 

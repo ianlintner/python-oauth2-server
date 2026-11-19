@@ -135,6 +135,24 @@ async def test_create_user_rejects_missing_fields():
         }
 
 
+async def test_create_user_rejects_short_password():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/users",
+            json={"username": "u2", "email": "u2@example.test", "password": "x"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "weak_password"
+        assert await client.storage.get_user_by_username("u2") is None
+
+        ok = await client.post(
+            "/admin/api/users",
+            json={"username": "u2", "email": "u2@example.test", "password": "12345678"},
+        )
+        assert ok.status_code == 201
+
+
 async def test_create_user_rejects_duplicate_username():
     async with build_client_app() as client:
         await _login(client)

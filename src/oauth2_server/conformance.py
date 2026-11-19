@@ -19,9 +19,10 @@ What the mode does:
 * lets `/ready` report that the seed was applied.
 
 Nothing here changes protocol behavior: redirect validation, PKCE, `iss`,
-and error handling are the normal code paths. This server grants consent to
-every authenticated authorization request (there is no consent screen), so
-`auto_approve_clients` is validated but needs no further handling.
+and error handling are the normal code paths. The one thing the seed changes
+is the consent step: a seeded user's `auto_approve_clients` are consented
+implicitly (`routes/authorize.py::_consent_is_implicit`); any other client
+still gets the consent page.
 
 Mirrors `rust-oauth2-server/crates/oauth2-server/src/conformance.rs`.
 """
@@ -402,8 +403,8 @@ def _validate_seed(seed: Seed) -> None:
         usernames.add(user.username)
         if user.email is not None and len(user.email) < 3:
             raise ConformanceError(f"user {user.username!r}: email is too short")
-        # This server consents implicitly, so the list needs no handling, but
-        # a dangling reference means the seed is wrong: refuse it.
+        # The list drives implicit consent (see the module docstring); a
+        # dangling reference means the seed is wrong: refuse it.
         for approved in user.auto_approve_clients or []:
             if approved not in client_ids:
                 raise ConformanceError(

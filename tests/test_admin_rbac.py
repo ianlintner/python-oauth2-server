@@ -177,3 +177,61 @@ def test_allowlist_exact_trimmed_match():
     assert client_id_in_allowlist("mcp", ["   "]) is False
     assert client_id_in_allowlist("mcp", [" other ", " mcp ", " third "]) is True
     assert client_id_in_allowlist("mcp_evil", [" other ", " mcp ", " third "]) is False
+
+
+async def test_unverified_social_email_does_not_grant_admin():
+    from oauth2_server.models import User
+    from tests.test_social_login import _microsoft_handler, _run_callback
+
+    async with build_client_app(
+        {
+            "admin_emails": ["user_rfc@example.test"],
+            "microsoft_client_id": "m-id",
+            "microsoft_client_secret": "m-secret",
+        }
+    ) as client:
+        await client.storage.save_user(
+            User(
+                id="s1",
+                username="microsoft:999",
+                email="user_rfc@example.test",
+                password_hash="x",
+                role="user",
+                email_verified=False,
+            )
+        )
+        resp = await _run_callback(
+            client, "microsoft", _microsoft_handler("999", "user_rfc@example.test")
+        )
+        assert resp.status_code == 302, resp.text
+        resp = await client.get("/admin/api/users")
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "insufficient_permissions"
+
+
+async def test_verified_email_allowlist_still_grants_admin():
+    async with build_client_app({"admin_emails": ["user_rfc@example.test"]}) as client:
+        user = await client.storage.get_user_by_username("user_rfc")
+        await client.storage.update_user(user.model_copy(update={"email_verified": True}))
+        await login_session(client)
+        assert (await client.get("/admin/api/users")).status_code == 200
+
+
+async def test_unverified_password_user_email_not_admin():
+    async with build_client_app({"admin_emails": ["user_rfc@example.test"]}) as client:
+        user = await client.storage.get_user_by_username("user_rfc")
+        await client.storage.update_user(user.model_copy(update={"email_verified": False}))
+        await login_session(client)
+        assert (await client.get("/admin/api/users")).status_code == 403
+
+
+async def test_admin_email_update_marks_verified():
+    async with build_client_app({}) as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+        user = await client.storage.get_user_by_username("user_rfc")
+        await client.storage.update_user(user.model_copy(update={"email_verified": False}))
+        resp = await client.put(f"/admin/api/users/{user.id}", json={"email": "new@example.test"})
+        assert resp.status_code == 200
+        after = await client.storage.get_user_by_id(user.id)
+        assert after.email_verified is True

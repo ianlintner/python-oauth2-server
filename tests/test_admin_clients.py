@@ -12,6 +12,8 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from oauth2_server.models import Token
 from oauth2_server.services.client_assertion import JWT_BEARER_ASSERTION_TYPE
 from oauth2_server.services.credential_storage import verify_client_secret
@@ -210,6 +212,26 @@ async def test_create_client_confidential_returns_secret_once():
         assert verify_client_secret(stored.client_secret, body["client_secret"])
 
 
+async def test_create_client_rejects_short_secret():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post("/admin/api/clients", json={"name": "c", "client_secret": "abc"})
+        assert resp.status_code == 400
+        assert not [c for c in await client.storage.list_all_clients() if c.name == "c"]
+
+        # Long but single-class is rejected too.
+        resp = await client.post(
+            "/admin/api/clients", json={"name": "c", "client_secret": "a" * 32}
+        )
+        assert resp.status_code == 400
+
+        ok = await client.post(
+            "/admin/api/clients",
+            json={"name": "c", "client_secret": "Kx9fQ2mZ7vLp4TnR8sWd1Bc6YhJ3aUe5"},
+        )
+        assert ok.status_code == 201
+
+
 async def test_create_public_client_has_no_secret():
     async with build_client_app() as client:
         await _login(client)
@@ -340,6 +362,41 @@ async def test_delete_client_removes_row():
         assert resp.status_code == 200
         assert resp.json() == {"message": "Client deleted"}
         assert await client.storage.get_client("client1") is None
+
+
+async def test_delete_client_revokes_tokens():
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        seeded = await storage.get_client("client1")
+        token = Token(
+            id=uuid.uuid4().hex,
+            access_token=uuid.uuid4().hex,
+            client_id="client1",
+            expires_at=_future(),
+        )
+        await storage.save_token(token)
+
+        resp = await client.delete(f"/admin/api/clients/{seeded.id}")
+        assert resp.status_code == 200
+        assert await storage.get_client("client1") is None
+        reloaded = await storage.get_token_by_access_token(token.access_token)
+        assert reloaded.revoked is True
+
+
+async def test_delete_client_keeps_row_when_revocation_fails(monkeypatch):
+    async with build_client_app() as client:
+        await _login(client)
+        storage = client.storage
+        seeded = await storage.get_client("client1")
+
+        async def boom(client_id):
+            raise RuntimeError("storage down")
+
+        monkeypatch.setattr(storage, "revoke_tokens_by_client_id", boom)
+        with pytest.raises(RuntimeError):
+            await client.delete(f"/admin/api/clients/{seeded.id}")
+        assert await storage.get_client("client1") is not None
 
 
 async def test_delete_client_404_for_missing():
@@ -767,6 +824,47 @@ async def test_admin_create_rejects_fragment_redirect_uri():
         assert "redirect_uris" in body["error_description"]
 
 
+async def test_is_valid_redirect_uri_rejects_plain_http_non_loopback():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={"name": "Http Redirect", "redirect_uris": ["http://billing.example.com/cb"]},
+        )
+        assert resp.status_code == 400
+        assert "redirect_uris" in resp.json()["error_description"]
+
+        for field in ("backchannel_logout_uri", "frontchannel_logout_uri"):
+            resp = await client.post(
+                "/admin/api/clients",
+                json={"name": "Http Logout", field: "http://billing.example.com/logout"},
+            )
+            assert resp.status_code == 400
+
+        for uri in (
+            "http://127.0.0.1:3000/cb",
+            "http://localhost:3000/cb",
+            "https://billing.example.com/cb",
+        ):
+            ok = await client.post(
+                "/admin/api/clients", json={"name": "Ok Redirect", "redirect_uris": [uri]}
+            )
+            assert ok.status_code == 201, uri
+
+
+def test_is_valid_redirect_uri_allows_http_loopback_only():
+    from oauth2_server.services.clients import is_valid_redirect_uri
+
+    assert is_valid_redirect_uri("http://127.0.0.1:3000/cb")
+    assert is_valid_redirect_uri("http://[::1]:3000/cb")
+    assert is_valid_redirect_uri("http://localhost/cb")
+    assert is_valid_redirect_uri("https://app.example.com/cb")
+    assert not is_valid_redirect_uri("http://app.example.com/cb")
+    assert not is_valid_redirect_uri("http://10.0.0.5/cb")
+    assert not is_valid_redirect_uri("http://localhost.evil.example/cb")
+    assert not is_valid_redirect_uri("https://app.example.com/cb#frag")
+
+
 async def test_admin_create_rejects_non_http_redirect_uri():
     async with build_client_app() as client:
         await _login(client)
@@ -836,3 +934,38 @@ async def test_admin_update_accepts_valid_logout_uris():
         assert reloaded.backchannel_logout_uri == "https://a.example/bc"
         assert reloaded.frontchannel_logout_uri == "https://a.example/fc"
         assert reloaded.get_post_logout_redirect_uris() == ["https://a.example/out"]
+
+
+# --- Per-client resource allow-list ---
+
+
+async def test_create_and_update_client_resources():
+    async with build_client_app() as client:
+        await _login(client)
+        created = await client.post(
+            "/admin/api/clients",
+            json={"name": "R", "resources": ["https://api.example"]},
+        )
+        assert created.status_code == 201, created.text
+        stored = await client.storage.get_client(created.json()["client_id"])
+        assert stored.resource_list() == ["https://api.example"]
+
+        updated = await client.put(
+            f"/admin/api/clients/{stored.id}", json={"resources": ["https://b.example"]}
+        )
+        assert updated.status_code == 200, updated.text
+        reloaded = await client.storage.get_client(stored.client_id)
+        assert reloaded.resource_list() == ["https://b.example"]
+
+        cleared = await client.put(f"/admin/api/clients/{stored.id}", json={"resources": []})
+        assert cleared.status_code == 200, cleared.text
+        assert (await client.storage.get_client(stored.client_id)).resource_list() == []
+
+
+async def test_client_resources_rejects_invalid_values():
+    async with build_client_app() as client:
+        await _login(client)
+        for bad in (["/relative"], ["https://a.example/#frag"], "https://a.example", [1]):
+            resp = await client.post("/admin/api/clients", json={"name": "R", "resources": bad})
+            assert resp.status_code == 400, (bad, resp.text)
+            assert resp.json()["error"] == "invalid_request"

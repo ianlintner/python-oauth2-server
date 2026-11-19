@@ -15,11 +15,14 @@ through to the session path.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import Depends, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse, Response
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -124,8 +127,16 @@ def _authenticate_session(request: Request) -> AdminActor:
 
     role = session.get("role", "")
     email = session.get("email", "")
-    is_admin = role == "admin" or email.lower() in config.admin_emails
-    if not is_admin:
+    if role != "admin" and email.lower() in config.admin_emails:
+        # The allow-list only applies to an email the server established as
+        # verified. A missing flag (older session cookie) counts as unverified.
+        if session.get("email_verified") is not True:
+            logger.warning(
+                "admin email allow-list match refused for user %s: email is not verified",
+                user_id,
+            )
+            raise _insufficient_permissions_error()
+    elif role != "admin":
         raise _insufficient_permissions_error()
 
     return AdminActor(actor_id=user_id, actor_email=email)

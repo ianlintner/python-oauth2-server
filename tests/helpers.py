@@ -116,6 +116,7 @@ async def build_mongo_client_app(uri: str, config_overrides: dict | None = None)
         "jwt_secret": "unit-test-secret-not-for-production-0123456789abcdef",
         "issuer": "https://auth.example.com",
         "dynamic_registration_enabled": True,
+        "consent_trusted_client_ids": ["client1"],
         **(config_overrides or {}),
     }
     config = Config(**overrides)
@@ -161,6 +162,27 @@ async def seed_client(storage, **overrides) -> Client:
     client = Client(**fields)
     await storage.save_client(client)
     return client
+
+
+def trust_client(client_app, client_id: str) -> None:
+    """Skip the consent step for `client_id` on `client_app` (operator-trusted
+    client). For tests that drive `/oauth/authorize` only to obtain a code."""
+    client_app.app.state.config.consent_trusted_client_ids.append(client_id)
+
+
+async def approve_consent(client_app, response, action: str = "approve", **form_overrides):
+    """Submit the consent form rendered in `response` (a 200 consent page from
+    `GET /oauth/authorize`) and return the `POST /oauth/consent` response."""
+    import re
+
+    def field(name: str) -> str:
+        match = re.search(rf'name="{name}" value="([^"]*)"', response.text)
+        assert match, f"consent page has no {name} field: {response.text}"
+        return match.group(1)
+
+    data = {"handle": field("handle"), "csrf_token": field("csrf_token"), "action": action}
+    data.update(form_overrides)
+    return await client_app.post("/oauth/consent", data=data)
 
 
 async def reseed_client(client_app, **overrides) -> Client:

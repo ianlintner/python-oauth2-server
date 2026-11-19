@@ -465,6 +465,53 @@ async def test_non_interactive_login_then_authorize_issues_a_code(conformance_en
         assert "code" in query
 
 
+async def test_seeded_auto_approve_client_skips_consent(conformance_env):
+    app = build()
+    async with app.router.lifespan_context(app), await _started_client(app) as client:
+        login = await client.post(
+            "/auth/login", data={"username": "alice", "password": "test-only-password"}
+        )
+        cookie = _session_cookie(login)
+        resp = await client.get(
+            "/oauth/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "client-a",
+                "redirect_uri": "https://client.example/callback",
+                "code_challenge": PKCE_CHALLENGE,
+                "code_challenge_method": "S256",
+            },
+            headers={"cookie": cookie},
+        )
+        assert resp.status_code == 302
+        assert "code" in parse_qs(urlparse(resp.headers["location"]).query)
+        # No grant was recorded: consent was implicit, not stored.
+        user = await app.state.storage.get_user_by_username("alice")
+        assert await app.state.storage.get_grant(user.id, "client-a") is None
+
+
+async def test_seeded_user_is_asked_for_clients_not_in_auto_approve(conformance_env):
+    app = build()
+    async with app.router.lifespan_context(app), await _started_client(app) as client:
+        login = await client.post(
+            "/auth/login", data={"username": "alice", "password": "test-only-password"}
+        )
+        cookie = _session_cookie(login)
+        resp = await client.get(
+            "/oauth/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "pub",
+                "redirect_uri": "http://127.0.0.1/cb",
+                "code_challenge": PKCE_CHALLENGE,
+                "code_challenge_method": "S256",
+            },
+            headers={"cookie": cookie},
+        )
+        assert resp.status_code == 200
+        assert "location" not in resp.headers
+
+
 async def test_http_seed_issuer_gets_a_cookie_the_runner_can_send_back(conformance_env):
     # The contract's example issuer is plain http://localhost:8080. A `Secure`
     # session cookie would never be returned by the runner over http, so the
@@ -660,16 +707,16 @@ def test_main_fails_closed_before_spawning_workers(conformance_env):
     assert ran == []
 
 
-def test_main_keeps_configured_workers_when_the_mode_is_off(monkeypatch):
+def test_main_keeps_explicit_single_worker_when_the_mode_is_off(monkeypatch):
     from oauth2_server import __main__ as entry
 
     monkeypatch.setenv("OAUTH2_JWT_SECRET", SECRET)
     monkeypatch.delenv("OAUTH2_CONFORMANCE_MODE", raising=False)
-    monkeypatch.setenv("OAUTH2_WORKERS", "3")
+    monkeypatch.setenv("OAUTH2_WORKERS", "1")
     captured: dict = {}
     monkeypatch.setattr(entry.uvicorn, "run", lambda *a, **kw: captured.update(kw))
     entry.main()
-    assert captured["workers"] == 3
+    assert captured["workers"] == 1
 
 
 def test_create_app_alone_never_enables_the_mode():

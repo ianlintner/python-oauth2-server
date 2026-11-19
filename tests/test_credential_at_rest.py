@@ -371,7 +371,7 @@ def test_rollback_plan_and_cli_refuse_without_confirmation(capsys):
 
 
 async def test_client_model_unchanged_columns(storage):
-    # The V24 columns are additive and default empty for pre-cutover rows.
+    # The V28 columns are additive and default empty for pre-cutover rows.
     c = await seed_client(storage, client_secret="")
     assert isinstance(c, Client) and c.client_secret_key == ""
     assert (await storage.get_client("client1")).hmac_secret() == ""

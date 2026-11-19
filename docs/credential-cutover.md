@@ -57,7 +57,7 @@ secrets after a rotation.
 1. **Back up** the database (this is the rollback — see below) and keep the
    previous release artifact.
 2. Stop all server instances (the cutover is offline).
-3. Deploy the new release's code to the operator shell and run the V24
+3. Deploy the new release's code to the operator shell and run the V28
    migration by starting the server once against a **restored copy**, or let
    your normal migration process run it. The migration only *adds* columns
    and never rewrites data.
@@ -114,7 +114,7 @@ are one-way. Roll back by restoring:
 
 1. Stop all instances.
 2. Deploy the previous release.
-3. Restore the pre-cutover backup (the V24 columns are additive, so the old
+3. Restore the pre-cutover backup (the V28 columns are additive, so the old
    release ignores them).
 4. Anything issued after the cutover exists only in the converted database and
    is lost by the restore. Credentials revoked by `--revoke-issued` return

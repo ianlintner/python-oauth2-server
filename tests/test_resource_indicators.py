@@ -13,6 +13,7 @@ fragment and rejected with `invalid_target` (RFC 8707 §2); Rust accepts any str
 """
 
 import base64
+import json
 from urllib.parse import parse_qs, urlparse
 
 import jwt
@@ -303,3 +304,149 @@ async def test_introspection_aud_reflects_resource(client_app):
     body = introspect.json()
     assert body["active"] is True
     assert body["aud"] == RESOURCE
+
+
+# --- per-client / server-wide resource allow-list -----------------------------
+
+ALLOWED_RESOURCE = "https://api.example"
+UNLISTED_RESOURCE = "https://other.example"
+_DEVICE_URN = "urn:ietf:params:oauth:grant-type:device_code"
+
+
+async def test_client_credentials_rejects_unlisted_resource():
+    async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
+        resp = await _client_credentials(app, UNLISTED_RESOURCE)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_target"
+
+
+async def test_client_credentials_accepts_listed_resource():
+    async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
+        resp = await _client_credentials(app, ALLOWED_RESOURCE)
+        assert resp.status_code == 200, resp.text
+        assert _claims(resp.json()["access_token"])["aud"] == ALLOWED_RESOURCE
+
+
+async def test_allow_list_match_is_exact():
+    async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
+        for variant in (
+            ALLOWED_RESOURCE + "/",
+            ALLOWED_RESOURCE + ".evil",
+            ALLOWED_RESOURCE + "/x",
+        ):
+            resp = await _client_credentials(app, variant)
+            assert resp.status_code == 400, (variant, resp.text)
+            assert resp.json()["error"] == "invalid_target"
+
+
+async def test_absent_resource_unaffected_by_allow_list():
+    async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
+        resp = await _client_credentials(app)
+        assert resp.status_code == 200, resp.text
+        assert _claims(resp.json()["access_token"])["aud"] == "client1"
+
+
+async def test_device_grant_rejects_unlisted_resource():
+    async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
+        start = (await start_device_flow(app)).json()
+        await login_session(app)
+        approve = await app.post(
+            "/oauth/device/verify", data={"user_code": start["user_code"], "action": "approve"}
+        )
+        assert approve.status_code == 200, approve.text
+        data = {
+            "grant_type": _DEVICE_URN,
+            "device_code": start["device_code"],
+            "resource": UNLISTED_RESOURCE,
+        }
+        resp = await post_token(app, data, basic_auth=BASIC)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_target"
+
+
+async def test_jwt_bearer_rejects_unlisted_resource():
+    from tests.helpers import generate_rsa_keypair
+    from tests.test_jwt_bearer_grant import _assertion, _redeem, _setup
+
+    async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
+        key, jwks = generate_rsa_keypair()
+        await _setup(app, jwks=jwks)
+        resp = await _redeem(app, _assertion(key), resource=UNLISTED_RESOURCE)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_target"
+
+
+async def test_authorize_rejects_unlisted_resource():
+    async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
+        resp, _ = await _authorize(app, UNLISTED_RESOURCE)
+        assert resp.status_code == 302, resp.text
+        query = parse_qs(urlparse(resp.headers["location"]).query)
+        assert query["error"] == ["invalid_target"]
+        assert "code" not in query
+
+
+async def test_per_client_resource_list_overrides_server_list():
+    from tests.helpers import reseed_client
+
+    async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
+        await reseed_client(app, resources=json.dumps([UNLISTED_RESOURCE]))
+        own = await _client_credentials(app, UNLISTED_RESOURCE)
+        assert own.status_code == 200, own.text
+        server_only = await _client_credentials(app, ALLOWED_RESOURCE)
+        assert server_only.status_code == 400, server_only.text
+        assert server_only.json()["error"] == "invalid_target"
+
+
+async def test_per_client_list_without_server_list():
+    from tests.helpers import reseed_client
+
+    async with build_client_app() as app:
+        await reseed_client(app, resources=json.dumps([ALLOWED_RESOURCE]))
+        assert (await _client_credentials(app, ALLOWED_RESOURCE)).status_code == 200
+        assert (await _client_credentials(app, UNLISTED_RESOURCE)).status_code == 400
+
+
+async def test_malformed_or_empty_per_client_list_is_not_configured():
+    from tests.helpers import reseed_client
+
+    async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
+        for raw in ("[]", "not json", '{"a": 1}'):
+            await reseed_client(app, resources=raw)
+            ok = await _client_credentials(app, ALLOWED_RESOURCE)
+            assert ok.status_code == 200, (raw, ok.text)
+            bad = await _client_credentials(app, UNLISTED_RESOURCE)
+            assert bad.status_code == 400, (raw, bad.text)
+
+
+async def test_no_allow_list_configured_keeps_free_form_resource(client_app):
+    resp = await _client_credentials(client_app, "https://anything.example/path")
+    assert resp.status_code == 200, resp.text
+
+
+async def test_refresh_still_narrows_and_allow_list_only_restricts(client_app):
+    issued = await _code_flow(client_app, RESOURCE)
+    # Narrowing rule still applies with no allow-list configured.
+    assert (await _refresh(client_app, issued["refresh_token"], OTHER_RESOURCE)).status_code == 400
+
+    # An allow-list that excludes the granted resource restricts the refresh.
+    client_app.app.state.config.resource_allow_list = [OTHER_RESOURCE]
+    rejected = await _refresh(client_app, issued["refresh_token"], RESOURCE)
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["error"] == "invalid_target"
+
+    # It never widens: OTHER_RESOURCE is allowed but was not granted.
+    still_rejected = await _refresh(client_app, issued["refresh_token"], OTHER_RESOURCE)
+    assert still_rejected.status_code == 400, still_rejected.text
+
+    # The refresh token survived the rejections.
+    client_app.app.state.config.resource_allow_list = []
+    ok = await _refresh(client_app, issued["refresh_token"], RESOURCE)
+    assert ok.status_code == 200, ok.text
+
+
+def test_resource_allow_list_env_is_comma_separated(monkeypatch):
+    from oauth2_server.config import Config
+
+    monkeypatch.setenv("OAUTH2_RESOURCE_ALLOW_LIST", "https://a.example, https://b.example")
+    cfg = Config(jwt_secret="x" * 40)
+    assert cfg.resource_allow_list == ["https://a.example", "https://b.example"]

@@ -4,7 +4,7 @@ Converts a database written by a pre-cutover release (raw tokens, codes and
 client secrets) to the at-rest format in `services/credential_storage.py`.
 It is an OFFLINE, EXPLICIT step:
 
-* never run by server startup (the V24 migration only adds columns);
+* never run by server startup (the V28 migration only adds columns);
 * idempotent — already-converted rows are skipped, so a re-run after a partial
   Mongo pass is safe; on SQL the whole conversion is one transaction;
 * never deletes rows. ``--revoke-issued`` additionally revokes every token
@@ -60,7 +60,7 @@ RESTORING, not by reversing:
  1. Before running `convert`: take a full backup of the database (pg_dump, a
     snapshot, or a Mongo dump) and keep the previous release artifact.
  2. To roll back: stop all server instances, deploy the PREVIOUS release,
-    restore the pre-cutover backup. The V24 columns are additive, so the old
+    restore the pre-cutover backup. The V28 columns are additive, so the old
     release ignores them.
  3. Anything issued after the cutover (new tokens, codes, clients, rotated
     secrets) exists only in the converted database and is lost by the restore.
@@ -341,7 +341,7 @@ async def status(storage) -> Report:
 
 async def convert(storage, master: str, *, revoke_issued: bool = False) -> Report:
     """Convert `storage` in place; returns the pre-conversion report. Callers
-    must have run the V24 migration (the server's `init()` does)."""
+    must have run the V28 migration (the server's `init()` does)."""
     fn = mongo_convert if _is_mongo(storage) else sql_convert
     return await fn(storage, master, revoke_issued=revoke_issued)
 
