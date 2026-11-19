@@ -28,6 +28,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr
 
+from oauth2_server.errors import OAuthError
 from oauth2_server.models import Client
 from oauth2_server.routes.admin._util import _json_body, _parse_body
 from oauth2_server.routes.admin.guard import AdminActor, AdminDep
@@ -40,6 +41,7 @@ from oauth2_server.services.clients import (
     is_valid_redirect_uri,
     validate_subject_dn,
 )
+from oauth2_server.services.resource import validate_resource
 from oauth2_server.storage.paging import ListQuery, page_envelope
 
 router = APIRouter()
@@ -82,6 +84,8 @@ class ClientUpdateBody(BaseModel):
     backchannel_logout_uri: StrictStr | None = None
     frontchannel_logout_uri: StrictStr | None = None
     post_logout_redirect_uris: list[StrictStr] | None = None
+    # RFC 8707 per-client resource allow-list; [] clears it.
+    resources: list[StrictStr] | None = None
 
 
 def _client_not_found() -> ORJSONResponse:
@@ -94,12 +98,39 @@ def _bad_request(description: str) -> ORJSONResponse:
     )
 
 
+_MIN_CLIENT_SECRET_LENGTH = 16
+
+
+def _validate_client_secret(secret: str) -> ORJSONResponse | None:
+    """Reject a caller-supplied client secret that is too short or too simple.
+
+    Requires at least `_MIN_CLIENT_SECRET_LENGTH` characters drawn from at
+    least two character classes (lower, upper, digit, other). Generated
+    secrets (32 hex characters) always satisfy this. Returns the 400 to
+    return verbatim, or `None` when the secret is acceptable.
+    """
+    if len(secret) < _MIN_CLIENT_SECRET_LENGTH:
+        return _bad_request(
+            f"client_secret must be at least {_MIN_CLIENT_SECRET_LENGTH} characters"
+        )
+    classes = (
+        any(c.islower() for c in secret),
+        any(c.isupper() for c in secret),
+        any(c.isdigit() for c in secret),
+        any(not c.isalnum() for c in secret),
+    )
+    if sum(classes) < 2:
+        return _bad_request("client_secret must mix at least two character types")
+    return None
+
+
 def _validate_redirect_uris(
     redirect_uris: object,
     *,
     backchannel_logout_uri: str | None = None,
     frontchannel_logout_uri: str | None = None,
     post_logout_redirect_uris: object = None,
+    resources: object = None,
 ) -> ORJSONResponse | None:
     """Divergence 58: the admin API validates client URIs the way RFC 7591
     dynamic registration does.
@@ -140,6 +171,15 @@ def _validate_redirect_uris(
             return _bad_request(
                 "post_logout_redirect_uris must be absolute http(s) URLs without fragments"
             )
+
+    if resources is not None:
+        if not isinstance(resources, list) or not all(isinstance(r, str) for r in resources):
+            return _bad_request("resources must be a list of strings")
+        for resource in resources:
+            try:
+                validate_resource(resource)
+            except OAuthError:
+                return _bad_request("resources must be absolute URIs without fragments")
     return None
 
 
@@ -207,6 +247,7 @@ def _client_detail(client: Client) -> dict:
         "jwks": client.jwks,
         "jwks_uri": client.jwks_uri,
         "tls_client_certificate_subject_dn": client.tls_client_certificate_subject_dn,
+        "resources": client.resources,
         "created_at": client.created_at.isoformat(),
         "updated_at": client.updated_at.isoformat(),
     }
@@ -282,6 +323,10 @@ async def create_client(request: Request, actor: AdminActor = AdminDep) -> ORJSO
 
     is_public = auth_method == "none"
     client_secret = "" if is_public else str(body.get("client_secret") or uuid.uuid4().hex)
+    if not is_public and body.get("client_secret"):
+        weak_secret = _validate_client_secret(client_secret)
+        if weak_secret is not None:
+            return weak_secret
 
     redirect_uris = body.get("redirect_uris", [])
     grant_types = body["grant_types"] if "grant_types" in body else list(_DEFAULT_GRANT_TYPES)
@@ -290,6 +335,7 @@ async def create_client(request: Request, actor: AdminActor = AdminDep) -> ORJSO
     backchannel_logout_uri = body.get("backchannel_logout_uri") or ""
     frontchannel_logout_uri = body.get("frontchannel_logout_uri") or ""
     post_logout_redirect_uris = body.get("post_logout_redirect_uris")
+    resources = body.get("resources")
     if not isinstance(backchannel_logout_uri, str) or not isinstance(frontchannel_logout_uri, str):
         return _bad_request("logout URIs must be strings")
 
@@ -298,12 +344,14 @@ async def create_client(request: Request, actor: AdminActor = AdminDep) -> ORJSO
         backchannel_logout_uri=backchannel_logout_uri,
         frontchannel_logout_uri=frontchannel_logout_uri,
         post_logout_redirect_uris=post_logout_redirect_uris,
+        resources=resources,
     )
     if invalid is not None:
         return invalid
 
     now = datetime.now(UTC)
     client = Client(
+        resources=json.dumps(resources or []),
         id=uuid.uuid4().hex,
         client_id=client_id,
         client_secret=client_secret,
@@ -413,6 +461,9 @@ async def update_client(
             else ""
         )
 
+    if "resources" in fields_set:
+        updates["resources"] = json.dumps(body_model.resources or [])
+
     # Divergence 58: only the SUBMITTED URIs are validated — a stored row that
     # predates this rule keeps working until someone edits it.
     invalid = _validate_redirect_uris(
@@ -420,6 +471,7 @@ async def update_client(
         backchannel_logout_uri=body_model.backchannel_logout_uri,
         frontchannel_logout_uri=body_model.frontchannel_logout_uri,
         post_logout_redirect_uris=body_model.post_logout_redirect_uris,
+        resources=body_model.resources,
     )
     if invalid is not None:
         return invalid
@@ -484,6 +536,9 @@ async def delete_client(
     if client is None:
         return _client_not_found()
 
+    # Revoke first: if revocation raises, the request fails (5xx) and the
+    # client row is kept, so live tokens are never left behind a vanished client.
+    revoked_tokens = await storage.revoke_tokens_by_client_id(client.client_id)
     await storage.delete_client(client.client_id)
 
     # Deliberate divergence from Rust (which forgot to audit this handler):
@@ -492,7 +547,12 @@ async def delete_client(
         storage,
         events,
         build_audit(
-            request, actor, "client.delete", "client", client.id, {"client_id": client.client_id}
+            request,
+            actor,
+            "client.delete",
+            "client",
+            client.id,
+            {"client_id": client.client_id, "tokens_revoked": revoked_tokens},
         ),
     )
 

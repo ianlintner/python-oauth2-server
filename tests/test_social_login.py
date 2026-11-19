@@ -828,3 +828,36 @@ async def test_linked_login_amr_is_fed():
         session = (await client.get("/__test_session")).json()
         assert session["user_id"] == local.id
         assert session["amr"] == ["fed"]
+
+
+async def test_microsoft_upn_does_not_grant_admin():
+    async with build_client_app(
+        {
+            "microsoft_client_id": "m-id",
+            "microsoft_client_secret": "m-secret",
+            "admin_emails": ["boss@corp.example"],
+        }
+    ) as client:
+        resp = await _run_callback(
+            client, "microsoft", _microsoft_handler("42", "boss@corp.example")
+        )
+        assert resp.status_code == 302, resp.text
+        assert resp.headers["location"] == "/profile"
+
+        social = await client.storage.get_user_by_username("microsoft:42")
+        assert social is not None
+        assert social.email == "boss@corp.example"
+        assert social.email_verified is False
+
+        assert (await client.get("/admin/api/users")).status_code == 403
+
+
+async def test_google_verified_email_creates_verified_user():
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as client:
+        resp = await _run_callback(client, "google", _google_handler("7", "dana@example.com"))
+        assert resp.status_code == 302, resp.text
+        social = await client.storage.get_user_by_username("google:7")
+        assert social is not None
+        assert social.email_verified is True

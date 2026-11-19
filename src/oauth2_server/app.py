@@ -43,6 +43,7 @@ from oauth2_server.services.events_bus import IdempotencyStore, build_event_bus
 from oauth2_server.services.jwks_cache import JwksCache
 from oauth2_server.services.limiter import TokenBucketLimiter
 from oauth2_server.services.metrics import Metrics
+from oauth2_server.services.consent import ConsentStore
 from oauth2_server.services.par import ParStore
 from oauth2_server.services.ratelimit import FixedWindowLimiter
 from oauth2_server.services.resilience import CircuitBreaker, ConcurrencyLimiter
@@ -71,6 +72,10 @@ def create_app(
     app.state.metrics = Metrics()
     app.state.metrics.bootstrap_seed()
     app.state.par_store = ParStore()
+    app.state.consent_store = ConsentStore()
+    # Conformance mode only: username -> client_ids whose consent is implicit
+    # (the seed's `auto_approve_clients`). Empty — and so inert — otherwise.
+    app.state.consent_auto_approve = {}
     app.state.login_limiter = FixedWindowLimiter(
         config.login_rate_limit_attempts, config.login_rate_limit_window_secs
     )
@@ -278,6 +283,9 @@ def build() -> FastAPI:
             # (or reports ready) with a partially applied seed.
             applied = await apply_seed(conformance_seed, storage, app.state.keyset)
             app.state.conformance = applied.readiness()
+            app.state.consent_auto_approve = {
+                u.username: frozenset(u.auto_approve_clients or []) for u in conformance_seed.users
+            }
         else:
             await seed_admin_user(storage, config)
         await warn_tls_clients_without_subject_dn(storage)
