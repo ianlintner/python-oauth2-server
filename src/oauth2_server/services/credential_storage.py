@@ -105,7 +105,7 @@ def is_legacy(stored: str | None, kind: str) -> bool:
 
 # --- client secret verifier ---------------------------------------------------
 
-_SECRET_TAG = "argon2id-v1$"
+_SECRET_TAG = "argon2id-v1$"  # nosec B105 - format tag, not a password
 
 # Verification runs on every client-authenticated request; raise the cost only
 # against a measured latency budget.

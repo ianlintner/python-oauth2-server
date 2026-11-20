@@ -37,6 +37,11 @@ from oauth2_server.storage.paging import ListQuery, whitelist_col
 logger = logging.getLogger(__name__)
 
 _CLIENT_COLS = ", ".join(Client.model_fields.keys())
+# _CLIENT_COLS is a fixed module constant; the presented value is bound.
+_CLIENT_BY_RAT_SQL = f"SELECT {_CLIENT_COLS} FROM clients WHERE registration_access_token = :r"  # nosec B608
+_CLIENT_BY_RAT_STMT = text(
+    _CLIENT_BY_RAT_SQL
+)  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
 _USER_COLS = ", ".join(User.model_fields.keys())
 _TOKEN_COLS = ", ".join(Token.model_fields.keys())
 _AUTH_CODE_COLS = ", ".join(AuthorizationCode.model_fields.keys())
@@ -265,10 +270,7 @@ class SqlStorage:
             row = (
                 (
                     await conn.execute(
-                        text(
-                            f"SELECT {_CLIENT_COLS} FROM clients "
-                            "WHERE registration_access_token = :r"
-                        ),
+                        _CLIENT_BY_RAT_STMT,
                         {"r": digest(presented, "rat")},
                     )
                 )
