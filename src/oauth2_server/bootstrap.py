@@ -39,6 +39,9 @@ async def seed_admin_user(storage: Storage, config: Config) -> bool:
     return True
 
 
+_TLS_CLIENT_AUTH_METHOD = "tls_client_auth"
+
+
 async def warn_tls_clients_without_subject_dn(storage: Storage) -> list[str]:
     """Log one warning per `tls_client_auth` client with no registered Subject DN.
 
@@ -50,7 +53,7 @@ async def warn_tls_clients_without_subject_dn(storage: Storage) -> list[str]:
     affected = [
         client.client_id
         for client in await storage.list_all_clients()
-        if client.token_endpoint_auth_method == "tls_client_auth"
+        if client.token_endpoint_auth_method == _TLS_CLIENT_AUTH_METHOD
         and not client.tls_client_certificate_subject_dn
     ]
     for client_id in affected:
