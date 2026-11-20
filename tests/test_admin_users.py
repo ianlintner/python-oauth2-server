@@ -426,3 +426,19 @@ async def test_admin_mutation_fans_out_to_events():
         assert event["idempotency_key"]
         assert event["target_kind"] == "user"
         assert event["metadata"]["username"] == "fanout"
+
+
+async def test_best_effort_revoke_failure_does_not_log_user_supplied_id(caplog) -> None:
+    from oauth2_server.routes.admin.users import _best_effort_revoke_by_user
+
+    class _Boom:
+        async def revoke_tokens_by_user_id(self, user_id: str) -> None:
+            raise RuntimeError("storage down")
+
+    marker = "evil\nINJECTED-user-id"
+    with caplog.at_level("ERROR"):
+        await _best_effort_revoke_by_user(_Boom(), marker)
+
+    assert caplog.records
+    assert "INJECTED" not in caplog.text.split("Traceback")[0]
+    assert all(marker not in r.getMessage() for r in caplog.records)

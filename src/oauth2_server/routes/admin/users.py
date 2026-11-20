@@ -79,7 +79,7 @@ async def _best_effort_revoke_by_user(storage, user_id: str) -> None:
     try:
         await storage.revoke_tokens_by_user_id(user_id)
     except Exception:
-        logger.error("failed to revoke tokens for user_id=%s", user_id, exc_info=True)
+        logger.error("best-effort user token revocation failed", exc_info=True)
 
 
 @router.get("/users")
