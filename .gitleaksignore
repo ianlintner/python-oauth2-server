@@ -1,9 +1,10 @@
 # NOTE: gitleaks 8.30.1 matches a `.gitleaksignore` entry against the finding's
 # *internal* fingerprint `commit:file:rule-id:START-LINE` (see detect.go
 # `AddFinding`): the 4th field is the integer start line at the commit that
-# introduced the match. `--redact` masks secret *values* (and rewrites the
-# reported Fingerprint's 4th field to `***`), but the ignore match still uses
-# the real line number — so copy the start line from an UNredacted run.
+# introduced the match. `--redact` masks only the secret *value* (the report's
+# `Secret`/`Match` become `REDACTED` and the reported `Fingerprint`'s 4th field
+# is shown as `***`); the top-level `StartLine` integer is preserved, so the
+# regen command below still emits the correct start line WITH redaction.
 #
 # gitleaks false positives — no real credentials in this repo.
 #
@@ -16,7 +17,7 @@
 # still reported. Format is `commit:file:rule-id:start-line` with the full
 # 40-char commit SHA (abbreviated SHAs do NOT match). Regenerate with:
 #
-#   gitleaks git --report-format json --report-path report.json .
+#   gitleaks git --redact --report-format json --report-path report.json .
 #   jq -r '.[] | "\(.Commit):\(.File):\(.RuleID):\(.StartLine)"' report.json
 #
 # When adding a new fixture secret, prefer a `# gitleaks:allow` comment on the
