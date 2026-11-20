@@ -6,6 +6,7 @@ Covers the mode switch, the fail-closed production guard, seed validation
 non-interactive login -> authorize flow through the real `build()` factory.
 """
 
+import json
 import re
 from urllib.parse import parse_qs, urlparse
 
@@ -217,7 +218,7 @@ def test_rejects_schema_violations(text, needle):
             ),
             "method none",
         ),
-        (VALID.replace("client_secret_basic", "private_key_jwt"), "token_endpoint_auth_method"),
+        (VALID.replace("client_secret_basic", "tls_client_auth"), "token_endpoint_auth_method"),
         (
             VALID.replace(
                 "grant_types: [authorization_code, refresh_token]", "grant_types: [implicit]"
@@ -727,3 +728,100 @@ def test_seed_text_never_logs_credentials():
     # `Seed.__repr__` is what lands in tracebacks: secrets must be masked.
     seed = Seed.parse(VALID)
     assert not re.search(r"test-only", repr(seed))
+
+
+# -- client jwks (contract seed field, private_key_jwt) ----------------------
+
+# Synthetic public-only EC P-256 JWK (the shape the contract seed carries).
+_EC_PUB = {
+    "kty": "EC",
+    "kid": "client-assertion",
+    "crv": "P-256",
+    "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4",
+    "y": "4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM",
+}
+
+
+def _jwt_seed(jwks_yaml: str, method: str = "private_key_jwt") -> str:
+    return (
+        "issuer: http://localhost:8080\n"
+        "clients:\n"
+        "  - client_id: client-jwt\n"
+        f"    token_endpoint_auth_method: {method}\n"
+        "    redirect_uris: [https://client.example/callback]\n"
+        "    grant_types: [client_credentials]\n"
+        f"{jwks_yaml}"
+        "users:\n  - username: alice\n    password: test-only-password\n"
+    )
+
+
+_GOOD_JWKS = (
+    "    jwks:\n      keys:\n"
+    f"        - {{kty: EC, kid: client-assertion, crv: P-256, x: {_EC_PUB['x']}, y: {_EC_PUB['y']}}}\n"
+)
+
+
+def test_parses_a_private_key_jwt_client_with_public_jwks():
+    seed = Seed.parse(_jwt_seed(_GOOD_JWKS))
+    client = seed.clients[0]
+    assert client.jwks == {"keys": [_EC_PUB]}
+    assert not client.is_public()
+
+
+@pytest.mark.parametrize(
+    ("jwks_yaml", "needle"),
+    [
+        ("    jwks: not-a-mapping\n", "jwks"),
+        ("    jwks: [a]\n", "jwks"),
+        ("    jwks: {}\n", "keys"),
+        ("    jwks: {keys: []}\n", "keys"),
+        ("    jwks: {keys: x}\n", "keys"),
+        ("    jwks: {keys: [a]}\n", "mapping"),
+        ("    jwks: {keys: [{kid: k}]}\n", "kty"),
+        ("    jwks: {keys: [{kty: ''}]}\n", "kty"),
+        ("    jwks: {keys: [{kty: EC, kid: 1}]}\n", "kid"),
+        ("    jwks: {keys: [{kty: EC, kid: ''}]}\n", "kid"),
+        ("    jwks: {keys: [{kty: EC, alg: ''}]}\n", "alg"),
+        ("    jwks: {keys: [{kty: EC}], extra: 1}\n", "unknown"),
+        ("    jwks: {keys: [{kty: EC, d: secret}]}\n", "private"),
+        ("    jwks: {keys: [{kty: RSA, n: a, e: b, p: x}]}\n", "private"),
+        ("    jwks: {keys: [{kty: RSA, n: a, e: b, qi: x}]}\n", "private"),
+        ("    jwks: {keys: [{kty: oct, k: secret}]}\n", "private"),
+    ],
+)
+def test_rejects_malformed_or_private_client_jwks(jwks_yaml, needle):
+    with pytest.raises(ConformanceError, match=needle):
+        Seed.parse(_jwt_seed(jwks_yaml))
+
+
+def test_private_key_jwt_client_requires_jwks_and_no_secret():
+    with pytest.raises(ConformanceError, match="jwks"):
+        Seed.parse(_jwt_seed(""))
+    with pytest.raises(ConformanceError, match="secret"):
+        Seed.parse(_jwt_seed(_GOOD_JWKS + "    client_secret: nope\n"))
+
+
+def test_private_key_jwt_error_never_echoes_private_values():
+    with pytest.raises(ConformanceError) as err:
+        Seed.parse(_jwt_seed("    jwks: {keys: [{kty: EC, d: SUPERSECRETVALUE}]}\n"))
+    assert "SUPERSECRETVALUE" not in str(err.value)
+
+
+async def test_apply_registers_jwks_for_private_key_jwt_auth():
+    storage = await make_storage()
+    await conformance.apply_seed(Seed.parse(_jwt_seed(_GOOD_JWKS)), storage, KeySet())
+    client = await storage.get_client("client-jwt")
+    assert client.token_endpoint_auth_method == "private_key_jwt"
+    assert client.client_secret == ""
+    assert json.loads(client.jwks) == {"keys": [_EC_PUB]}
+    assert client.jwks_uri == ""
+
+
+def test_accepts_the_jwt_bearer_grant_type_the_contract_seed_uses():
+    seed = Seed.parse(
+        _jwt_seed(_GOOD_JWKS).replace(
+            "[client_credentials]",
+            "[client_credentials, urn:ietf:params:oauth:grant-type:jwt-bearer]",
+        )
+    )
+    assert "urn:ietf:params:oauth:grant-type:jwt-bearer" in seed.clients[0].grant_types

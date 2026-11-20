@@ -84,8 +84,12 @@ GRANT_TYPES = (
     "refresh_token",
     "client_credentials",
     "urn:ietf:params:oauth:grant-type:device_code",
+    "urn:ietf:params:oauth:grant-type:jwt-bearer",
 )
-AUTH_METHODS = ("none", "client_secret_basic", "client_secret_post")
+AUTH_METHODS = ("none", "client_secret_basic", "client_secret_post", "private_key_jwt")
+# JWK members that carry private/secret key material (RFC 7518 section 6). A
+# seed's `jwks` is public-only; any of these makes the whole seed invalid.
+PRIVATE_JWK_MEMBERS = ("d", "p", "q", "dp", "dq", "qi", "oth", "k")
 # Algorithms this server can provision. Other well-formed schema values
 # (ES256, PS256, ...) are refused rather than silently skipped.
 SUPPORTED_SEED_ALGS = ("HS256", "RS256")
@@ -119,6 +123,8 @@ class SeedClient:
     public: bool | None = None
     scopes: list[str] | None = None
     grant_types: list[str] | None = None
+    # Public-only JWK set (RFC 7517) verifying private_key_jwt assertions.
+    jwks: dict | None = None
 
     def is_public(self) -> bool:
         return self.public is True or self.token_endpoint_auth_method == "none"
@@ -299,6 +305,7 @@ def _build_client(obj: dict) -> SeedClient:
             "redirect_uris",
             "scopes",
             "grant_types",
+            "jwks",
         },
         {"client_id", "redirect_uris"},
         where,
@@ -315,7 +322,35 @@ def _build_client(obj: dict) -> SeedClient:
         public=public,
         scopes=_string_list(obj, "scopes", where),
         grant_types=_string_list(obj, "grant_types", where),
+        jwks=_build_jwks(obj["jwks"], where) if "jwks" in obj else None,
     )
+
+
+def _build_jwks(value: object, client_where: str) -> dict:
+    """Shape-check a client `jwks` (schemas/seed.schema.json): an object with
+    only `keys`, a non-empty list of key objects each with a non-empty `kty`
+    and optional non-empty string `kid`/`alg`. Private members are refused.
+    Error text names fields, never values."""
+    where = f"{client_where} jwks"
+    jwks = _mapping(value, where)
+    _check_keys(jwks, {"keys"}, {"keys"}, where)
+    keys = jwks["keys"]
+    if not isinstance(keys, list) or not keys:
+        raise ConformanceError(f"{where}: keys must be a non-empty list")
+    for raw_key in keys:
+        key = _mapping(raw_key, f"{where}.keys[]")
+        if not isinstance(key.get("kty"), str) or not key["kty"]:
+            raise ConformanceError(f"{where}.keys[]: kty must be a non-empty string")
+        for member in ("kid", "alg"):
+            if member in key and (not isinstance(key[member], str) or not key[member]):
+                raise ConformanceError(f"{where}.keys[]: {member} must be a non-empty string")
+        private = [m for m in PRIVATE_JWK_MEMBERS if m in key]
+        if private:
+            raise ConformanceError(
+                f"{where}.keys[]: private key member(s) {', '.join(private)} are not allowed; "
+                "a seed carries public key material only"
+            )
+    return jwks
 
 
 def _build_user(obj: dict) -> SeedUser:
@@ -436,7 +471,14 @@ def _validate_client(client: SeedClient) -> None:
     if client.client_secret == "":
         raise ConformanceError(f"client {cid!r}: client_secret must not be empty")
 
-    if client.is_public():
+    if method == "private_key_jwt":
+        if client.client_secret is not None:
+            raise ConformanceError(
+                f"client {cid!r}: a private_key_jwt client must not carry a secret"
+            )
+        if client.jwks is None:
+            raise ConformanceError(f"client {cid!r}: a private_key_jwt client needs jwks")
+    elif client.is_public():
         if client.client_secret is not None:
             raise ConformanceError(f"client {cid!r}: a public client must not carry a secret")
         if method is not None and method != "none":
@@ -579,6 +621,7 @@ async def apply_seed(seed: Seed, storage: Storage, keyset: KeySet) -> Applied:
             token_endpoint_auth_method=(
                 "none" if public else seeded.token_endpoint_auth_method or "client_secret_basic"
             ),
+            jwks=json.dumps(seeded.jwks) if seeded.jwks is not None else "",
         )
         await storage.save_client(client)
 
