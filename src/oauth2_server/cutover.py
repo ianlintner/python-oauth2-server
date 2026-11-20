@@ -36,7 +36,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from sqlalchemy import text
+from sqlalchemy import column, select, table, text, update
 
 from oauth2_server.security import decode_unverified_claims
 from oauth2_server.services.credential_storage import (
@@ -146,9 +146,14 @@ _STATE_DDL = (
 )
 
 
+def _tbl(name: str, *cols: str):
+    """Lightweight Core table so statements are built without raw SQL strings."""
+    return table(name, *(column(c) for c in cols))
+
+
 async def _sql_rows(conn, table: str, cols: str) -> list[dict]:
-    # table/cols are fixed literals from this module (never operator or request input).
-    stmt = text(f"SELECT {cols} FROM {table}")  # nosec B608  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+    tbl = _tbl(table, *(c.strip() for c in cols.split(",")))
+    stmt = select(*tbl.c)
     return [dict(r) for r in (await conn.execute(stmt)).mappings()]
 
 
@@ -197,31 +202,27 @@ async def sql_convert(storage, master: str, *, revoke_issued: bool) -> Report:
             if is_legacy(c["registration_access_token"], "rat"):
                 sets["registration_access_token"] = digest(c["registration_access_token"], "rat")
             if sets:
-                assign = ", ".join(f"{k} = :{k}" for k in sets)
-                # column names come from the fixed `sets` keys above; values are bound.
-                stmt = text(f"UPDATE clients SET {assign} WHERE client_id = :cid")  # nosec B608  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
-                await conn.execute(stmt, {**sets, "cid": c["client_id"]})
+                tbl = _tbl("clients", "client_id", *sets)
+                await conn.execute(
+                    update(tbl).where(tbl.c.client_id == c["client_id"]).values(**sets)
+                )
 
         for t in await _sql_rows(conn, "tokens", "id, access_token, refresh_token"):
             if not (
                 is_legacy(t["access_token"], "access") or is_legacy(t["refresh_token"], "refresh")
             ):
                 continue
-            params = {"id": t["id"], "a": t["access_token"], "f": t["refresh_token"]}
+            values: dict[str, str | None] = {
+                "access_token": t["access_token"],
+                "refresh_token": t["refresh_token"],
+            }
             if is_legacy(t["access_token"], "access"):
-                params["cnf"], params["aud"] = _token_context(t["access_token"])
-                params["a"] = digest(t["access_token"], "access")
-                cnf_sql = ", cnf = :cnf, audience = :aud"
-            else:
-                cnf_sql = ""
+                values["cnf"], values["audience"] = _token_context(t["access_token"])
+                values["access_token"] = digest(t["access_token"], "access")
             if is_legacy(t["refresh_token"], "refresh"):
-                params["f"] = digest(t["refresh_token"], "refresh")
-            # cnf_sql is one of two fixed literals; values are bound.
-            sql = f"UPDATE tokens SET access_token = :a, refresh_token = :f{cnf_sql} WHERE id = :id"  # nosec B608
-            stmt = text(
-                sql
-            )  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
-            await conn.execute(stmt, params)
+                values["refresh_token"] = digest(t["refresh_token"], "refresh")
+            tbl = _tbl("tokens", "id", *values)
+            await conn.execute(update(tbl).where(tbl.c.id == t["id"]).values(**values))
 
         for a in await _sql_rows(conn, "authorization_codes", "code"):
             if is_legacy(a["code"], "authcode"):
