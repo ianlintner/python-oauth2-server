@@ -159,6 +159,10 @@ async def test_registration_rejects_http_backchannel_logout_uri(client):
         "https://[::1]/bc",
         "https://localhost/bc",
         "https://rp.example/bc#frag",
+        "https://[::1/bc",
+        "https://rp.example:notaport/bc",
+        "https://rp.example:99999/bc",
+        "https://rp.example:/bc",
     ):
         resp = await client.post(
             "/connect/register",

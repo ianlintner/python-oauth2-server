@@ -8,6 +8,7 @@ stays in `tests/test_rfc_compliance.py`.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 
@@ -305,6 +306,39 @@ async def test_backchannel_logout_skips_stored_rows_with_unacceptable_uris(rsa_p
         assert captured == []
 
 
+async def test_backchannel_logout_stalled_dns_lookup_releases_slot_without_sending(
+    rsa_pem, monkeypatch
+):
+    async def stalled(host: str, port: int) -> list[str]:
+        await asyncio.sleep(3600)
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr("oauth2_server.services.outbound.resolve_host", stalled)
+    async with _rs256_app(rsa_pem) as client_app:
+        captured = _capture_http(client_app.app)
+        # A short connect timeout also bounds name resolution.
+        client_app.app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: captured.append(r) or httpx.Response(200)),
+            timeout=httpx.Timeout(10, connect=0.05),
+        )
+        await reseed_client(client_app, backchannel_logout_uri="https://rp.example/bc")
+        await login_session(client_app)
+        resp = await asyncio.wait_for(client_app.get("/oauth/logout"), timeout=5)
+        assert resp.status_code == 200, resp.text
+        assert captured == []
+
+
+async def test_backchannel_logout_requests_do_not_share_connections_across_hostnames(rsa_pem):
+    """Both RPs resolve to the same pinned IP and port, so the pool origin is
+    identical; every request must therefore ask for its own connection."""
+    async with _rs256_app(rsa_pem) as client_app:
+        captured = await _deliver_to_multiple_clients(client_app)
+        assert len(captured) == 2
+        for req in captured:
+            assert req.headers["connection"] == "close"
+            assert req.extensions["sni_hostname"] == req.headers["host"]
+
+
 async def test_backchannel_logout_uri_rejects_private_targets():
     async with build_client_app() as client:
         await seed_admin(client.storage)
@@ -315,6 +349,10 @@ async def test_backchannel_logout_uri_rejects_private_targets():
             "http://rp.example/bc",
             "https://localhost/bc",
             "https://2130706433/bc",
+            "https://[::1/bc",
+            "https://rp.example:notaport/bc",
+            "https://rp.example:99999/bc",
+            "https://rp.example:/bc",
         ):
             resp = await client.post(
                 "/admin/api/clients", json={"name": "Bc", "backchannel_logout_uri": uri}
@@ -355,6 +393,7 @@ async def _deliver_to_multiple_clients(client_app):
         assert req.headers["content-type"] == "application/x-www-form-urlencoded"
         body = req.content.decode()
         assert body.startswith("logout_token=")
+    return captured
 
 
 async def test_anon_sid_does_not_dispatch_backchannel(client_app):

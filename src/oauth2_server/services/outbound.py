@@ -40,6 +40,15 @@ async def resolve_host(host: str, port: int) -> list[str]:
     return list(dict.fromkeys(str(info[4][0]).split("%", 1)[0] for info in infos))
 
 
+_DEFAULT_RESOLVE_TIMEOUT = 10.0
+
+
+def _resolve_timeout(http_client: httpx.AsyncClient) -> float:
+    """The caller's connect timeout, used to bound DNS resolution too."""
+    connect = http_client.timeout.connect
+    return connect if connect is not None else _DEFAULT_RESOLVE_TIMEOUT
+
+
 async def post_to_public_https_target(
     http_client: httpx.AsyncClient,
     url: str,
@@ -54,20 +63,27 @@ async def post_to_public_https_target(
     caller's client timeout applies. Raises `OutboundTargetError` when the URL
     is not https, has no host, or any resolved address is non-public.
     """
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise OutboundTargetError("target must be an https URL")
-    host = parsed.hostname
     try:
-        port = parsed.port or _DEFAULT_PORTS["https"]
+        parsed = urlparse(url)
+        host = parsed.hostname
+        explicit_port = parsed.port
     except ValueError as exc:
-        raise OutboundTargetError("invalid port") from exc
+        raise OutboundTargetError("malformed target authority") from exc
+    if parsed.scheme != "https" or not host:
+        raise OutboundTargetError("target must be an https URL")
+    port = explicit_port or _DEFAULT_PORTS["https"]
 
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
+        # Name resolution happens before httpx is involved, so the client's
+        # connect timeout does not cover it; bound it explicitly so a stalled
+        # lookup releases its dispatch slot without anything being sent.
         try:
-            addresses = await resolve_host(host, port)
+            async with asyncio.timeout(_resolve_timeout(http_client)):
+                addresses = await resolve_host(host, port)
+        except TimeoutError as exc:
+            raise OutboundTargetError("target resolution timed out") from exc
         except OSError as exc:
             raise OutboundTargetError("target did not resolve") from exc
     else:
@@ -88,10 +104,16 @@ async def post_to_public_https_target(
     pinned_url = parsed._replace(netloc=netloc).geturl()
     host_header = parsed.netloc.rsplit("@", 1)[-1]
 
+    # The pinned IP is the URL host, so httpx's pool keys connections by
+    # (scheme, IP, port) alone: a kept-alive connection whose TLS session was
+    # authenticated for one hostname could be reused for another hostname
+    # that resolves to the same address. `Connection: close` makes every
+    # request use (and then discard) its own connection, authenticated for
+    # exactly this `sni_hostname`.
     return await http_client.post(
         pinned_url,
         content=content,
-        headers={**headers, "Host": host_header},
+        headers={**headers, "Host": host_header, "Connection": "close"},
         extensions={"sni_hostname": host},
         follow_redirects=False,
     )

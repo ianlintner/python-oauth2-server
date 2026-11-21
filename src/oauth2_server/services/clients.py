@@ -246,10 +246,18 @@ def is_valid_backchannel_logout_uri(uri: str) -> bool:
     against their resolved addresses at dispatch time
     (`services/outbound.py`).
     """
-    if not is_valid_jwks_uri(uri):
+    # Parse the authority strictly first: an unmatched IPv6 bracket makes
+    # `urlparse` raise, and a non-numeric, out-of-range or empty port is only
+    # noticed when `.port` is read. All of those are plain validation failures.
+    try:
+        parsed = urlparse(uri)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
         return False
-    host = urlparse(uri).hostname
-    if not host:
+    if not host or (port is None and parsed.netloc.endswith(":")):
+        return False
+    if not is_valid_jwks_uri(uri):
         return False
     try:
         address = ipaddress.ip_address(host)
