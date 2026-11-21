@@ -145,8 +145,34 @@ async def test_invalid_scheme_backchannel_logout_uri_rejected(client):
     body = resp.json()
     assert body["error"] == "invalid_client_metadata"
     assert body["error_description"] == (
-        "backchannel_logout_uri must be an absolute http(s) URL without fragment"
+        "backchannel_logout_uri must be an absolute https URL with a public host"
     )
+
+
+async def test_registration_rejects_http_backchannel_logout_uri(client):
+    for uri in (
+        "http://127.0.0.1:9090/x",
+        "http://rp.example/bc",
+        "https://127.0.0.1/bc",
+        "https://10.0.0.5/bc",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://[::1]/bc",
+        "https://localhost/bc",
+        "https://rp.example/bc#frag",
+        "https://[::1/bc",
+        "https://rp.example:notaport/bc",
+        "https://rp.example:99999/bc",
+        "https://rp.example:/bc",
+    ):
+        resp = await client.post(
+            "/connect/register",
+            json={
+                "redirect_uris": ["https://app.example/cb"],
+                "backchannel_logout_uri": uri,
+            },
+        )
+        assert resp.status_code == 400, (uri, resp.text)
+        assert resp.json()["error"] == "invalid_client_metadata"
 
 
 async def test_fragment_frontchannel_logout_uri_rejected(client):
