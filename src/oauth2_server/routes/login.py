@@ -31,6 +31,7 @@ from oauth2_server.client_address import client_address
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.security import verify_password_async
 from oauth2_server.services.auth import is_safe_redirect
+from oauth2_server.services.csrf import require_same_origin
 from oauth2_server.sessions import set_login
 from oauth2_server import clock
 
@@ -106,6 +107,9 @@ async def login_page(request: Request) -> HTMLResponse:
 
 @router.post("/login")
 async def login(request: Request):
+    rejection = require_same_origin(request)
+    if rejection is not None:
+        return rejection
     form = await request.form()
     username = form.get("username", "")
     password = form.get("password", "")

@@ -20,12 +20,13 @@ from datetime import timedelta
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse, Response
 
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.models import DeviceAuthorization
 from oauth2_server.routes.token import client_auth_failure_response
 from oauth2_server.services.clients import ClientService
+from oauth2_server.services.csrf import require_same_origin
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.sessions import current_user_id
 from oauth2_server import clock
@@ -149,7 +150,10 @@ async def device_verify_page(request: Request):
 
 
 @router.post("/device/verify")
-async def device_verify(request: Request) -> ORJSONResponse:
+async def device_verify(request: Request) -> Response:
+    rejection = require_same_origin(request)
+    if rejection is not None:
+        return rejection
     user_id = current_user_id(request)
     if user_id is None:
         return ORJSONResponse({"error": "login_required"}, status_code=401)

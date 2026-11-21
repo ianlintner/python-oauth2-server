@@ -21,6 +21,7 @@ from oauth2_server.keys import seed_keyset
 from oauth2_server.middleware import _SECURITY_HEADERS, DenylistGuard, MetricsMiddleware
 from oauth2_server.middleware_ratelimit import RateLimitMiddleware, ResilienceMiddleware
 from oauth2_server.routes.admin import admin_router
+from oauth2_server.routes.admin._util import UnsupportedMediaTypeError
 from oauth2_server.routes.admin.guard import AdminAuthError
 from oauth2_server.routes.authorize import router as authorize_router
 from oauth2_server.routes.device import router as device_router
@@ -169,6 +170,16 @@ def create_app(
     @app.exception_handler(AdminAuthError)
     async def _admin_auth_error_handler(request: Request, exc: AdminAuthError):
         return exc.response
+
+    @app.exception_handler(UnsupportedMediaTypeError)
+    async def _unsupported_media_type_handler(request: Request, exc: UnsupportedMediaTypeError):
+        return ORJSONResponse(
+            {
+                "error": "invalid_request",
+                "error_description": "Content-Type must be application/json",
+            },
+            status_code=415,
+        )
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):

@@ -24,6 +24,7 @@ from fastapi.responses import ORJSONResponse, RedirectResponse, Response
 
 from oauth2_server.config import Config
 from oauth2_server.models import User
+from oauth2_server.services.csrf import cross_origin_error, is_same_origin_request
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,11 @@ async def require_admin(request: Request) -> AdminActor:
     if auth_header[:7].lower() == "bearer ":
         token_value = auth_header[7:].strip()
         return await _authenticate_bearer(request, token_value)
+    # Cookie-authenticated admin calls are browser-driven: require proof that
+    # the state-changing request originated from this server. Bearer callers
+    # above are not browser-bound and skip this check.
+    if not is_same_origin_request(request):
+        raise AdminAuthError(cross_origin_error())
     return _authenticate_session(request)
 
 
