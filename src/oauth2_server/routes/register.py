@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
@@ -20,6 +19,7 @@ from oauth2_server.services.clients import (
     is_valid_redirect_uri,
 )
 from oauth2_server.services.events_bus import emit_event
+from oauth2_server import clock
 
 router = APIRouter()
 
@@ -132,7 +132,7 @@ async def register_client(request: Request) -> ORJSONResponse:
             "client_credentials grant"
         )
 
-    now = datetime.now(UTC)
+    now = clock.now()
     client_id = secrets.token_urlsafe(16)
     client_secret = "" if is_public else secrets.token_urlsafe(32)
     registration_access_token = secrets.token_urlsafe(32)

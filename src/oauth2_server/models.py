@@ -8,10 +8,11 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, Field, model_validator
+from oauth2_server import clock
 
 
 def _now() -> datetime:
-    return datetime.now(UTC)
+    return clock.now()
 
 
 def _coerce_datetime(value: Any) -> Any:

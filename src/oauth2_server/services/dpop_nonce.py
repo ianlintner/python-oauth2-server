@@ -30,11 +30,11 @@ import logging
 import re
 import secrets
 import struct
-import time
 
 from fastapi.responses import ORJSONResponse
 
 from oauth2_server.services.dpop import DpopError, DpopValidated
+from oauth2_server import clock
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class DpopNonceIssuer:
 
     Ported from `DpopNonceIssuer` (`crates/oauth2-actix/src/handlers/
     dpop_nonce.rs`). `issue()` encodes the current time bucket
-    (`int(time.time()) // lifetime_secs`, wall clock — matches Rust, which
+    (`int(clock.time()) // lifetime_secs`, wall clock — matches Rust, which
     uses `SystemTime::now()` rather than a monotonic clock); `verify()`
     accepts the current bucket and the immediately preceding one, so the
     effective acceptance window is `[lifetime_secs, 2 * lifetime_secs)`.
@@ -77,9 +77,18 @@ class DpopNonceIssuer:
     def __init__(self, secret: bytes, lifetime_secs: int) -> None:
         self._secret = secret
         self._lifetime_secs = max(1, lifetime_secs)
+        # Conformance `dpop-nonce-mode` (contract 7.3): when True every DPoP
+        # request needs a server nonce, as if each client had
+        # `dpop_nonce_required`. Only `POST /conformance/dpop-nonce` (mounted
+        # in conformance mode only) can set it; off by default.
+        self.require_all = False
+
+    def required_for(self, client: object | None) -> bool:
+        """Whether DPoP requests for `client` must carry a server nonce."""
+        return self.require_all or bool(getattr(client, "dpop_nonce_required", False))
 
     def _current_bucket(self) -> int:
-        return int(time.time()) // self._lifetime_secs
+        return int(clock.time()) // self._lifetime_secs
 
     def _tag_for_bucket(self, bucket_bytes: bytes) -> bytes:
         return hmac.new(self._secret, bucket_bytes, "sha256").digest()[:_TAG_LEN]
