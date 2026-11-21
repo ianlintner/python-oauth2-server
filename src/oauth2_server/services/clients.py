@@ -21,6 +21,7 @@ from oauth2_server.services.client_assertion import (
 )
 from oauth2_server.services.events_bus import EventBus, emit_event
 from oauth2_server.services.jwks_cache import JwksCache, resolve_client_jwks
+from oauth2_server.services.outbound import is_public_address
 from oauth2_server.storage.base import Storage
 
 logger = logging.getLogger(__name__)
@@ -201,6 +202,34 @@ def is_valid_jwks_uri(uri: str) -> bool:
     if mapped is not None:
         address = mapped
     return not (address.is_loopback or address.is_link_local or address.is_unspecified)
+
+
+BACKCHANNEL_LOGOUT_URI_ERROR = (
+    "backchannel_logout_uri must be an absolute https URL with a public host"
+)
+
+
+def is_valid_backchannel_logout_uri(uri: str) -> bool:
+    """Whether `uri` is acceptable as a client `backchannel_logout_uri`.
+
+    The server POSTs to this URL itself, so it must be an `https` URL (a
+    relying party is a server; the RFC 8252 loopback exception does not
+    apply) whose host is not a loopback/link-local/unspecified name or
+    literal (see `is_valid_jwks_uri`) and not a private or otherwise
+    non-global IP literal in any spelling. Hostnames are additionally checked
+    against their resolved addresses at dispatch time
+    (`services/outbound.py`).
+    """
+    if not is_valid_jwks_uri(uri):
+        return False
+    host = urlparse(uri).hostname
+    if not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = _loose_ipv4(host)
+    return address is None or is_public_address(address)
 
 
 def _loose_ipv4(host: str) -> ipaddress.IPv4Address | None:

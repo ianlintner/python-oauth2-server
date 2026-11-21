@@ -34,9 +34,11 @@ from oauth2_server.routes.admin._util import _json_body, _parse_body
 from oauth2_server.routes.admin.guard import AdminActor, AdminDep
 from oauth2_server.services.audit import build_audit, record_audit
 from oauth2_server.services.clients import (
+    BACKCHANNEL_LOGOUT_URI_ERROR,
     JWKS_URI_ERROR,
     SELF_SIGNED_REQUIRES_JWKS_ERROR,
     VALID_AUTH_METHODS,
+    is_valid_backchannel_logout_uri,
     is_valid_jwks_uri,
     is_valid_redirect_uri,
 )
@@ -157,12 +159,13 @@ def _validate_redirect_uris(
         if not all(is_valid_redirect_uri(uri) for uri in redirect_uris):
             return _bad_request("redirect_uris must be absolute http(s) URLs without fragments")
 
-    for name, uri in (
-        ("backchannel_logout_uri", backchannel_logout_uri),
-        ("frontchannel_logout_uri", frontchannel_logout_uri),
-    ):
-        if uri and not is_valid_redirect_uri(uri):
-            return _bad_request(f"{name} must be an absolute http(s) URL without a fragment")
+    if backchannel_logout_uri and not is_valid_backchannel_logout_uri(backchannel_logout_uri):
+        return _bad_request(BACKCHANNEL_LOGOUT_URI_ERROR)
+
+    if frontchannel_logout_uri and not is_valid_redirect_uri(frontchannel_logout_uri):
+        return _bad_request(
+            "frontchannel_logout_uri must be an absolute http(s) URL without a fragment"
+        )
 
     if post_logout_redirect_uris is not None:
         if not isinstance(post_logout_redirect_uris, list) or not all(

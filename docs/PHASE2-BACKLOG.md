@@ -750,6 +750,10 @@ admin-session server-side revocation.
     client(s) named by the hint's `aud`; a client's plain `redirect_uris` no longer qualify and a
     request without a hint gets no redirect (400 `invalid_request`). Clients that relied on
     the old fallback must register their post-logout URIs explicitly.
+    The back-channel `logout_token` is signed RS256 with the keyset's current key (`kid` header)
+    instead of Rust's HS256(`jwt_secret`), and `backchannel_logout_uri` must be `https` with a
+    public host, re-checked against the resolved address at dispatch (`services/outbound.py`).
+    Without an RS256 key, back-channel logout is skipped.
 52 (amended). `dpop_jkt` is persisted on the code row — Rust migration `V22__add_dpop_jkt_to_auth_codes.sql`
     (vendored here; authored in the Rust repo, the schema owner). `app.state.dpop_code_bindings` and
     `services/dpop_bindings.py` are gone.

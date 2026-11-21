@@ -13,9 +13,11 @@ from pydantic import ValidationError
 
 from oauth2_server.models import Client, ClientRegistration, ClientRegistrationResponse
 from oauth2_server.services.clients import (
+    BACKCHANNEL_LOGOUT_URI_ERROR,
     JWKS_URI_ERROR,
     SELF_SIGNED_REQUIRES_JWKS_ERROR,
     VALID_AUTH_METHODS,
+    is_valid_backchannel_logout_uri,
     is_valid_jwks_uri,
     is_valid_redirect_uri,
 )
@@ -65,10 +67,10 @@ async def register_client(request: Request) -> ORJSONResponse:
     if not reg.redirect_uris or not all(_is_valid_redirect_uri(u) for u in reg.redirect_uris):
         return _registration_error("redirect_uris must be a non-empty list of absolute URLs")
 
-    if reg.backchannel_logout_uri and not _is_valid_redirect_uri(reg.backchannel_logout_uri):
-        return _registration_error(
-            "backchannel_logout_uri must be an absolute http(s) URL without fragment"
-        )
+    if reg.backchannel_logout_uri and not is_valid_backchannel_logout_uri(
+        reg.backchannel_logout_uri
+    ):
+        return _registration_error(BACKCHANNEL_LOGOUT_URI_ERROR)
 
     if reg.frontchannel_logout_uri and not _is_valid_redirect_uri(reg.frontchannel_logout_uri):
         return _registration_error(
