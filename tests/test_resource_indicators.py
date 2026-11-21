@@ -348,9 +348,7 @@ async def test_device_grant_rejects_unlisted_resource():
     async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
         start = (await start_device_flow(app)).json()
         await login_session(app)
-        approve = await app.post(
-            "/oauth/device/verify", data={"user_code": start["user_code"], "action": "approve"}
-        )
+        approve = await device_verify_post(app, start["user_code"], "approve")
         assert approve.status_code == 200, approve.text
         data = {
             "grant_type": _DEVICE_URN,
