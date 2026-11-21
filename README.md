@@ -723,7 +723,11 @@ terminating proxy strips both headers from inbound requests and re-adds them its
 `OAUTH2_TRUSTED_PROXY_CIDRS` (comma-separated CIDRs, default empty) additionally restricts which
 TCP peers those headers are believed from: when set, a request from any other address has both
 headers ignored (divergence 67). Empty keeps the previous behavior, so set it to the proxy's
-address range whenever the app is reachable by anything other than the proxy.
+address range whenever the app is reachable by anything other than the proxy. The check is made
+against the real socket peer: `python -m oauth2_server` starts uvicorn with `proxy_headers=False`
+so uvicorn does not replace the peer address with a forwarded one (forwarded addresses are
+derived by the app itself). If you run the app under your own uvicorn invocation, pass
+`--no-proxy-headers` as well.
 
 ### Phase 4d additions
 
