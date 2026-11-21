@@ -3,6 +3,7 @@ from httpx import ASGITransport, AsyncClient
 
 from oauth2_server.app import create_app
 from oauth2_server.config import Config
+from tests.conftest import build_client_app
 from tests.helpers import make_storage, post_token
 
 
@@ -78,23 +79,25 @@ async def test_confidential_registration_returns_secret(client):
     assert body["registration_client_uri"].startswith("https://auth.example.com")
 
 
-async def test_registered_client_can_get_token(client):
-    resp = await client.post(
-        "/connect/register",
-        json={
-            "redirect_uris": ["https://app.example/cb"],
-            "grant_types": ["client_credentials"],
-        },
-    )
-    assert resp.status_code == 201, resp.text
-    body = resp.json()
+async def test_registered_client_can_get_token():
+    async with build_client_app({"dynamic_registration_initial_access_token": "iat-secret"}) as c:
+        resp = await c.post(
+            "/connect/register",
+            json={
+                "redirect_uris": ["https://app.example/cb"],
+                "grant_types": ["client_credentials"],
+            },
+            headers={"Authorization": "Bearer iat-secret"},
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
 
-    token_resp = await post_token(
-        client,
-        {"grant_type": "client_credentials"},
-        basic_auth=(body["client_id"], body["client_secret"]),
-    )
-    assert token_resp.status_code == 200, token_resp.text
+        token_resp = await post_token(
+            c,
+            {"grant_type": "client_credentials"},
+            basic_auth=(body["client_id"], body["client_secret"]),
+        )
+        assert token_resp.status_code == 200, token_resp.text
 
 
 async def test_missing_redirect_uris_rejected(client):
@@ -330,3 +333,107 @@ async def test_registration_self_signed_with_jwks_succeeds(client):
     assert resp.json()["jwks"] == jwks
     # Not registered, so not echoed (RFC 7591 §3.2.1).
     assert "tls_client_certificate_subject_dn" not in resp.json()
+
+
+_BASE = {
+    "redirect_uris": ["https://a.example/cb"],
+    "token_endpoint_auth_method": "client_secret_basic",
+}
+
+
+async def _rejected(client, **extra):
+    before = len(await client.storage.list_all_clients())
+    resp = await client.post("/connect/register", json={**_BASE, **extra})
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_client_metadata"
+    assert len(await client.storage.list_all_clients()) == before
+
+
+@pytest.mark.parametrize(
+    "grant",
+    [
+        "urn:ietf:params:oauth:grant-type:token-exchange",
+        "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "client_credentials",
+    ],
+)
+async def test_registration_rejects_privileged_grant_types(client, grant):
+    await _rejected(client, grant_types=[grant])
+
+
+async def test_registration_rejects_unknown_grant_type_even_with_token():
+    async with build_client_app({"dynamic_registration_initial_access_token": "iat-secret"}) as c:
+        resp = await c.post(
+            "/connect/register",
+            json={**_BASE, "grant_types": ["password"]},
+            headers={"Authorization": "Bearer iat-secret"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_client_metadata"
+
+
+async def test_registration_rejects_admin_scope(client):
+    await _rejected(client, scope="admin read")
+
+
+async def test_registration_rejects_admin_scope_even_with_token_and_allowlist():
+    overrides = {
+        "dynamic_registration_initial_access_token": "iat-secret",
+        "self_registration_scopes": "admin read",
+    }
+    async with build_client_app(overrides) as c:
+        resp = await c.post(
+            "/connect/register",
+            json={**_BASE, "scope": "admin"},
+            headers={"Authorization": "Bearer iat-secret"},
+        )
+        assert resp.status_code == 400
+
+
+async def test_registration_rejects_unlisted_scope(client):
+    await _rejected(client, scope="read billing")
+
+
+async def test_registration_empty_scope_allowlist_denies_all_scopes():
+    async with build_client_app({"self_registration_scopes": []}) as c:
+        await _rejected(c, scope="read")
+        resp = await c.post("/connect/register", json=_BASE)
+        assert resp.status_code == 201
+
+
+async def test_registration_accepts_allowlisted_scope_and_grants(client):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            **_BASE,
+            "scope": "openid read",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code", "code id_token"],
+        },
+    )
+    assert resp.status_code == 201, resp.text
+
+
+async def test_registration_rejects_unknown_response_type(client):
+    await _rejected(client, response_types=["code", "token"])
+
+
+async def test_registration_requires_initial_access_token_when_configured():
+    async with build_client_app({"dynamic_registration_initial_access_token": "iat-secret"}) as c:
+        resp = await c.post("/connect/register", json=_BASE)
+        assert resp.status_code == 401
+        resp = await c.post(
+            "/connect/register", json=_BASE, headers={"Authorization": "Bearer wrong"}
+        )
+        assert resp.status_code == 401
+        resp = await c.post(
+            "/connect/register", json=_BASE, headers={"Authorization": "Bearer iat-secret"}
+        )
+        assert resp.status_code == 201, resp.text
+
+
+async def test_registration_not_open_without_token_or_anonymous_opt_in():
+    async with build_client_app({"dynamic_registration_anonymous": False}) as c:
+        resp = await c.post("/connect/register", json=_BASE)
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "access_denied"

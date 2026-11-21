@@ -7,13 +7,13 @@ mismatch, param precedence).
 
 from __future__ import annotations
 
+import time
 import base64
 import hashlib
 import json
 import secrets
 from urllib.parse import parse_qs, urlparse
 
-from oauth2_server.services import par as par_service
 from tests.helpers import PKCE_CHALLENGE, login_session, post_token, seed_client
 
 
@@ -267,8 +267,8 @@ async def test_par_request_uri_client_mismatch_consumes_entry(client_app):
 async def test_par_request_uri_expires(client_app, monkeypatch):
     request_uri = await _push_client1_par(client_app)
 
-    real_monotonic = par_service.time.monotonic
-    monkeypatch.setattr(par_service.time, "monotonic", lambda: real_monotonic() + 61)
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + 61)
 
     await login_session(client_app)
     resp = await client_app.get(

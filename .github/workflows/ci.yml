@@ -95,7 +95,7 @@ jobs:
     env:
       # The contract's example seed advertises http://localhost:8080; driving
       # the runner on the host loopback leaves 8080 free on the runner VM.
-      CONFORMANCE_REF: b968cb19a2194268b819effae8b060b1e62d99df
+      CONFORMANCE_REF: ad45cc7f2240c41e71622177ea2a88e917c617b4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

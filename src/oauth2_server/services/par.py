@@ -12,9 +12,9 @@ limitation, not an oversight.
 
 from __future__ import annotations
 
-import time
 import uuid
 from dataclasses import dataclass, field
+from oauth2_server import clock
 
 PAR_TTL_SECS = 60
 
@@ -23,7 +23,7 @@ PAR_TTL_SECS = 60
 class ParEntry:
     client_id: str
     params: dict[str, str]
-    created_at: float = field(default_factory=time.monotonic)
+    created_at: float = field(default_factory=clock.monotonic)
 
 
 class ParStore:
@@ -31,7 +31,7 @@ class ParStore:
         self._entries: dict[str, ParEntry] = {}
 
     def _sweep_expired(self) -> None:
-        now = time.monotonic()
+        now = clock.monotonic()
         expired = [
             request_uri
             for request_uri, entry in self._entries.items()

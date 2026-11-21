@@ -77,6 +77,32 @@ VALID_AUTH_METHODS = frozenset(
     }
 )
 
+# Grant types a client may declare at registration. Anonymous self-service
+# registration is limited to the first set; the remainder require the
+# operator-issued initial access token (RFC 7591 §3). Anything outside
+# `KNOWN_GRANT_TYPES` is rejected for every caller.
+SELF_REGISTRABLE_GRANT_TYPES = frozenset(
+    {
+        "authorization_code",
+        "refresh_token",
+        "urn:ietf:params:oauth:grant-type:device_code",
+    }
+)
+KNOWN_GRANT_TYPES = SELF_REGISTRABLE_GRANT_TYPES | frozenset(
+    {
+        "client_credentials",
+        "urn:ietf:params:oauth:grant-type:token-exchange",
+        "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    }
+)
+
+# `response_type` values `/oauth/authorize` implements.
+SUPPORTED_RESPONSE_TYPES = frozenset({"code", "code id_token"})
+
+# Never requestable through registration, even if an operator lists it in
+# `self_registration_scopes`.
+RESERVED_REGISTRATION_SCOPES = frozenset({"admin"})
+
 JWKS_URI_ERROR = "jwks_uri must be an absolute https URL"
 
 
