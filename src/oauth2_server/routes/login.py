@@ -24,7 +24,6 @@ import html
 import importlib.resources
 import logging
 import secrets
-import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -34,6 +33,7 @@ from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.security import hash_password, verify_password_async
 from oauth2_server.services.auth import is_safe_redirect
 from oauth2_server.sessions import set_login
+from oauth2_server import clock
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +211,7 @@ async def login(request: Request):
     # Only honor return_to when it was stamped by a recent redirect. A stale
     # (or unstamped) value from an abandoned request must not be replayed on
     # a later unrelated login (login-CSRF hardening).
-    fresh = isinstance(return_to_ts, int) and time.time() - return_to_ts <= RETURN_TO_MAX_AGE_SECS
+    fresh = isinstance(return_to_ts, int) and clock.time() - return_to_ts <= RETURN_TO_MAX_AGE_SECS
 
     target = return_to if fresh and is_safe_redirect(return_to) else "/"
     # RFC 9700 §4.11: 303 See Other for a POST-triggered redirect, so a

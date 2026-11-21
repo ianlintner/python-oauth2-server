@@ -73,10 +73,9 @@ import json
 import logging
 import re
 import secrets
-import time
 import uuid
-from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode
+from oauth2_server import clock
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
@@ -508,7 +507,7 @@ async def authorize(request: Request):
             max_age_secs = None
         if max_age_secs is not None:
             auth_time = request.session.get("auth_time")
-            auth_expired = auth_time is None or (time.time() - auth_time) >= max_age_secs
+            auth_expired = auth_time is None or (clock.time() - auth_time) >= max_age_secs
 
     # prompt=none: the AS must not display any UI. If the caller isn't
     # authenticated, re-authentication would be forced, or the existing
@@ -532,7 +531,7 @@ async def authorize(request: Request):
         # Timestamp the pending redirect so POST /auth/login can reject a stale
         # return_to left over from an abandoned (possibly attacker-initiated)
         # authorization request instead of silently replaying it.
-        request.session["return_to_ts"] = int(time.time())
+        request.session["return_to_ts"] = int(clock.time())
         return RedirectResponse("/auth/login", status_code=302)
 
     # --- 5a. `admin` scope requires the user to currently be an admin ---
@@ -768,7 +767,7 @@ async def consent(request: Request):
         )
 
     # Approve: record the union of what was previously approved and this request.
-    now = datetime.now(UTC)
+    now = clock.now()
     existing = await storage.get_grant(user_id, client.client_id)
     merged_scope = set(entry.scope.split())
     if existing is not None:

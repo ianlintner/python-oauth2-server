@@ -24,13 +24,13 @@ import base64
 import hashlib
 import hmac
 import json
-import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import jwt
 from fastapi import Request
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+from oauth2_server import clock
 
 # +/-5 minutes acceptance window on the proof's `iat` claim (dpop.rs line 55).
 DPOP_IAT_SKEW_SECS = 300
@@ -121,7 +121,7 @@ class DpopReplayStore:
     def check_and_insert(self, jti: str) -> None:
         """Sweep expired entries, then record `jti` with a `REPLAY_TTL_SECS`
         expiry. Raises `DpopError` if `jti` is already present (replay)."""
-        now = time.monotonic()
+        now = clock.monotonic()
         self._sweep_expired(now)
         if jti in self._entries:
             raise DpopError("invalid_dpop_proof", "DPoP proof jti has already been used (replay)")
@@ -285,7 +285,7 @@ def validate_dpop_proof(
         # can't smuggle a non-numeric-typed `iat` past this gate.
         raise DpopError("invalid_dpop_proof", "DPoP proof iat must be a number")
     iat = float(iat_claim)
-    if not (-DPOP_IAT_SKEW_SECS <= (time.time() - iat) <= DPOP_IAT_SKEW_SECS):
+    if not (-DPOP_IAT_SKEW_SECS <= (clock.time() - iat) <= DPOP_IAT_SKEW_SECS):
         raise DpopError("invalid_dpop_proof", "DPoP proof iat is outside the acceptance window")
 
     # A validly-signed proof can carry any JSON type for the optional

@@ -8,13 +8,13 @@ into `ClientService.authenticate` but not acted on (Task 2).
 
 from __future__ import annotations
 
+import time
 import base64
 import json
 
 import pytest
 from starlette.requests import Request
 
-import oauth2_server.services.device_poll as device_poll_module
 from oauth2_server.config import Config
 from oauth2_server.security import decode_unverified_claims
 from oauth2_server.services.clients import ClientService, is_valid_redirect_uri
@@ -549,8 +549,8 @@ async def test_device_grant_never_binds_x5t(monkeypatch):
         # RFC 8628 slow_down: advance the poll tracker's clock past the
         # device's 5s interval so this poll isn't rate-limited (same trick as
         # tests/test_device_flow.py).
-        real_monotonic = device_poll_module.time.monotonic
-        monkeypatch.setattr(device_poll_module.time, "monotonic", lambda: real_monotonic() + 5)
+        real_monotonic = time.monotonic
+        monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + 5)
         token = await post_token(
             client_app,
             {

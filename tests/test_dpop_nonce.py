@@ -17,6 +17,7 @@ unit-tested there either).
 
 from __future__ import annotations
 
+import time
 import base64
 import logging
 import struct
@@ -81,16 +82,15 @@ def test_forged_nonce_rejected_as_invalid_proof():
 
 
 def test_stale_nonce_returns_use_dpop_nonce(monkeypatch):
-    import oauth2_server.services.dpop_nonce as dpop_nonce_module
 
     issuer = DpopNonceIssuer(SECRET_A, lifetime_secs=1)
     base_time = 1_000_000.0
-    monkeypatch.setattr(dpop_nonce_module.time, "time", lambda: base_time)
+    monkeypatch.setattr(time, "time", lambda: base_time)
     nonce = issuer.issue()
 
     # Two buckets later (2s, at 1s/bucket): current-1 no longer covers the
     # bucket the nonce was issued in.
-    monkeypatch.setattr(dpop_nonce_module.time, "time", lambda: base_time + 2)
+    monkeypatch.setattr(time, "time", lambda: base_time + 2)
 
     with pytest.raises(DpopNonceError) as exc_info:
         issuer.verify(nonce)
@@ -104,28 +104,27 @@ def test_stale_nonce_returns_use_dpop_nonce(monkeypatch):
 
 
 def test_previous_bucket_accepted_current_plus_one_rejected(monkeypatch):
-    import oauth2_server.services.dpop_nonce as dpop_nonce_module
 
     issuer = DpopNonceIssuer(SECRET_A, lifetime_secs=1)
     base_time = 2_000_000.0
-    monkeypatch.setattr(dpop_nonce_module.time, "time", lambda: base_time)
+    monkeypatch.setattr(time, "time", lambda: base_time)
     nonce = issuer.issue()
 
     # current - 1: still within the accepted window.
-    monkeypatch.setattr(dpop_nonce_module.time, "time", lambda: base_time + 1)
+    monkeypatch.setattr(time, "time", lambda: base_time + 1)
     issuer.verify(nonce)  # must not raise
 
     # current - 2 (from the nonce's perspective, one bucket further stale).
-    monkeypatch.setattr(dpop_nonce_module.time, "time", lambda: base_time + 2)
+    monkeypatch.setattr(time, "time", lambda: base_time + 2)
     with pytest.raises(DpopNonceError) as exc_info:
         issuer.verify(nonce)
     assert exc_info.value.kind == "stale"
 
     # A nonce encoded for a future bucket (current + 1 relative to "now")
     # must also be rejected as stale, not accepted early.
-    monkeypatch.setattr(dpop_nonce_module.time, "time", lambda: base_time)
+    monkeypatch.setattr(time, "time", lambda: base_time)
     future_nonce = issuer.issue()
-    monkeypatch.setattr(dpop_nonce_module.time, "time", lambda: base_time - 1)
+    monkeypatch.setattr(time, "time", lambda: base_time - 1)
     with pytest.raises(DpopNonceError) as exc_info:
         issuer.verify(future_nonce)
     assert exc_info.value.kind == "stale"
@@ -268,11 +267,10 @@ def test_garbled_secret_falls_back_loudly_not_leniently(caplog):
 
 
 def test_issue_encodes_current_bucket_as_big_endian_u64(monkeypatch):
-    import oauth2_server.services.dpop_nonce as dpop_nonce_module
 
     lifetime = 300
     now = 1_700_000_000.0
-    monkeypatch.setattr(dpop_nonce_module.time, "time", lambda: now)
+    monkeypatch.setattr(time, "time", lambda: now)
     issuer = DpopNonceIssuer(SECRET_A, lifetime_secs=lifetime)
 
     nonce = issuer.issue()

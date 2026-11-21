@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hmac
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 import jwt
 from fastapi import APIRouter, Request, Response
@@ -23,6 +23,7 @@ from oauth2_server.services.dpop import DpopError, read_dpop_header, validate_dp
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server.routes.token import client_auth_failure_response
 from oauth2_server.services.mtls import mtls_headers
+from oauth2_server import clock
 
 router = APIRouter()
 
@@ -50,7 +51,7 @@ def _expiry_deadline(row: Token, matched_via_refresh: bool, config: Config) -> d
 def _is_active(row: Token | None, deadline: datetime | None) -> bool:
     if row is None or row.revoked or deadline is None:
         return False
-    return deadline > datetime.now(UTC)
+    return deadline > clock.now()
 
 
 # RFC 9701 §3: the media type a caller puts in `Accept` to ask for a
@@ -84,7 +85,7 @@ def _introspection_response(request: Request, body: dict, client: Client) -> Res
         payload = {
             "iss": config.issuer,
             "aud": client.client_id,
-            "iat": int(datetime.now(UTC).timestamp()),
+            "iat": int(clock.now().timestamp()),
             "token_introspection": body,
         }
         try:

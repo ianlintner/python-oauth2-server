@@ -21,8 +21,8 @@ effective rate.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
+from oauth2_server import clock
 
 # An entry is dropped after this long of inactivity, same
 # sweep-on-every-call house pattern as `DpopReplayStore._sweep_expired`.
@@ -71,7 +71,7 @@ class DevicePollTracker:
         the new, incremented required interval (in seconds) when the poll
         arrived too soon (RFC 8628 §3.5 `slow_down`).
         """
-        now = time.monotonic()
+        now = clock.monotonic()
         self._sweep_expired(now)
 
         state = self._entries.get(device_code)

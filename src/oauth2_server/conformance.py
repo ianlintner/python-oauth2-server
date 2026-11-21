@@ -84,8 +84,9 @@ GRANT_TYPES = (
     "refresh_token",
     "client_credentials",
     "urn:ietf:params:oauth:grant-type:device_code",
+    "urn:ietf:params:oauth:grant-type:jwt-bearer",
 )
-AUTH_METHODS = ("none", "client_secret_basic", "client_secret_post")
+AUTH_METHODS = ("none", "client_secret_basic", "client_secret_post", "private_key_jwt")
 # Algorithms this server can provision. Other well-formed schema values
 # (ES256, PS256, ...) are refused rather than silently skipped.
 SUPPORTED_SEED_ALGS = ("HS256", "RS256")
@@ -119,6 +120,8 @@ class SeedClient:
     public: bool | None = None
     scopes: list[str] | None = None
     grant_types: list[str] | None = None
+    # Public-only JWK set (contract section 2a); required for private_key_jwt.
+    jwks: dict | None = None
 
     def is_public(self) -> bool:
         return self.public is True or self.token_endpoint_auth_method == "none"
@@ -299,6 +302,7 @@ def _build_client(obj: dict) -> SeedClient:
             "redirect_uris",
             "scopes",
             "grant_types",
+            "jwks",
         },
         {"client_id", "redirect_uris"},
         where,
@@ -315,7 +319,29 @@ def _build_client(obj: dict) -> SeedClient:
         public=public,
         scopes=_string_list(obj, "scopes", where),
         grant_types=_string_list(obj, "grant_types", where),
+        jwks=_build_jwks(obj.get("jwks"), where),
     )
+
+
+def _build_jwks(raw: object, where: str) -> dict | None:
+    """Shape-check a seeded `jwks` (schema: `keys` minItems 1, each key an
+    object with a non-empty `kty`; optional non-empty `kid`/`alg`)."""
+    if raw is None:
+        return None
+    jwks = _mapping(raw, f"{where} jwks")
+    _check_keys(jwks, {"keys"}, {"keys"}, f"{where} jwks")
+    keys = jwks["keys"]
+    if not isinstance(keys, list) or not keys:
+        raise ConformanceError(f"{where}: jwks.keys must be a non-empty list")
+    for key in keys:
+        key = _mapping(key, f"{where} jwks.keys[]")
+        if "kty" not in key:
+            raise ConformanceError(f"{where}: jwks key is missing required kty")
+        for name in ("kty", "kid", "alg"):
+            value = key.get(name)
+            if name in key and (not isinstance(value, str) or not value):
+                raise ConformanceError(f"{where}: jwks key {name} must be a non-empty string")
+    return jwks
 
 
 def _build_user(obj: dict) -> SeedUser:
@@ -424,6 +450,30 @@ def _validate_redirect_uri(cid: str, uri: str) -> None:
         raise ConformanceError(f"client {cid!r}: redirect_uri {uri!r} has a fragment")
 
 
+# JWK members that carry private key material (RFC 7517/7518). The seed is
+# public-only: refuse any of them rather than store or ignore them.
+_PRIVATE_JWK_MEMBERS = ("d", "p", "q", "dp", "dq", "qi", "oth", "k")
+
+
+def _validate_client_jwks(client: SeedClient) -> None:
+    cid = client.client_id
+    if client.token_endpoint_auth_method == "private_key_jwt":
+        if client.jwks is None:
+            raise ConformanceError(f"client {cid!r}: private_key_jwt requires jwks")
+    elif client.jwks is not None:
+        raise ConformanceError(
+            f"client {cid!r}: jwks is only meaningful with token_endpoint_auth_method "
+            "private_key_jwt"
+        )
+    for key in (client.jwks or {}).get("keys", []):
+        leaked = [m for m in _PRIVATE_JWK_MEMBERS if m in key]
+        if leaked:
+            raise ConformanceError(
+                f"client {cid!r}: jwks must be public-only; private member(s) "
+                f"{', '.join(leaked)} are not accepted"
+            )
+
+
 def _validate_client(client: SeedClient) -> None:
     cid = client.client_id
     if client.name == "":
@@ -436,11 +486,18 @@ def _validate_client(client: SeedClient) -> None:
     if client.client_secret == "":
         raise ConformanceError(f"client {cid!r}: client_secret must not be empty")
 
+    _validate_client_jwks(client)
+
     if client.is_public():
         if client.client_secret is not None:
             raise ConformanceError(f"client {cid!r}: a public client must not carry a secret")
         if method is not None and method != "none":
             raise ConformanceError(f"client {cid!r}: a public client must use method none")
+    elif method == "private_key_jwt":
+        if client.client_secret is not None:
+            raise ConformanceError(
+                f"client {cid!r}: a private_key_jwt client must not carry a client_secret"
+            )
     elif client.client_secret is None:
         raise ConformanceError(
             f"client {cid!r}: a confidential client needs client_secret (or set public: true)"
@@ -579,6 +636,7 @@ async def apply_seed(seed: Seed, storage: Storage, keyset: KeySet) -> Applied:
             token_endpoint_auth_method=(
                 "none" if public else seeded.token_endpoint_auth_method or "client_secret_basic"
             ),
+            jwks=json.dumps(seeded.jwks) if seeded.jwks is not None else "",
         )
         await storage.save_client(client)
 
