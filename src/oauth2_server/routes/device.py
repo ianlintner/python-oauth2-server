@@ -22,13 +22,13 @@ from urllib.parse import quote
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
 
+from oauth2_server import clock
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.models import DeviceAuthorization
 from oauth2_server.routes.token import client_auth_failure_response
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.mtls import mtls_headers
-from oauth2_server.sessions import current_user_id
-from oauth2_server import clock
+from oauth2_server.sessions import load_session_user
 
 router = APIRouter()
 
@@ -131,8 +131,8 @@ def _render_device_verify_page(user_code: str) -> str:
 
 @router.get("/device/verify")
 async def device_verify_page(request: Request):
-    user_id = current_user_id(request)
-    if user_id is None:
+    session_user = await load_session_user(request)
+    if session_user is None:
         target = "/oauth/device/verify"
         raw_user_code = request.query_params.get("user_code")
         if raw_user_code:
@@ -150,9 +150,10 @@ async def device_verify_page(request: Request):
 
 @router.post("/device/verify")
 async def device_verify(request: Request) -> ORJSONResponse:
-    user_id = current_user_id(request)
-    if user_id is None:
+    session_user = await load_session_user(request)
+    if session_user is None:
         return ORJSONResponse({"error": "login_required"}, status_code=401)
+    user_id = session_user.id
 
     form = dict(await request.form())
     raw_user_code = form.get("user_code")

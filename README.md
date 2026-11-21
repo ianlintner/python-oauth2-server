@@ -136,6 +136,9 @@ Phase 3a (see `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` and `docs/P
 |---|---|---|
 | `OAUTH2_LOGIN_RATE_LIMIT_ATTEMPTS` | `10` | Max `POST /auth/login` attempts allowed per window, per IP and per username (either exhausted → blocked). |
 | `OAUTH2_LOGIN_RATE_LIMIT_WINDOW_SECS` | `900` | Fixed-window duration (seconds) for the login rate limiter. |
+| `OAUTH2_SESSION_MAX_AGE_SECS` | `28800` | Lifetime of the session cookie. Sessions are also re-checked against the stored user on each request. |
+
+SQL deployments must apply migration `V27` (adds `users.session_epoch`). Sessions issued before this change carry no epoch, so users sign in once more after upgrading.
 
 ## Phase 3b: DPoP, RAR, Token Exchange
 

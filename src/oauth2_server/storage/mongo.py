@@ -319,10 +319,21 @@ class MongoStorage:
                     "enabled": user.enabled,
                     "role": user.role,
                     "password_hash": user.password_hash,
+                    "session_epoch": user.session_epoch,
                     "updated_at": user.updated_at.isoformat(),
                 }
             },
         )
+
+    async def update_user_fields(
+        self, user_id: str, fields: dict, *, bump_session_epoch: bool = False
+    ) -> None:
+        if not set(fields) <= {"email", "email_verified", "enabled", "role"}:
+            raise ValueError("unsupported user field")
+        update: dict = {"$set": {**fields, "updated_at": _now_iso()}}
+        if bump_session_epoch:
+            update["$inc"] = {"session_epoch": 1}
+        await self.users.update_one({"id": user_id}, update)
 
     async def delete_user(self, user_id: str) -> None:
         # Rust's Mongo backend has no FK to a `users` row, so (unlike
@@ -332,18 +343,29 @@ class MongoStorage:
 
     async def set_user_enabled(self, user_id: str, enabled: bool) -> None:
         await self.users.update_one(
-            {"id": user_id}, {"$set": {"enabled": enabled, "updated_at": _now_iso()}}
+            {"id": user_id},
+            {
+                "$set": {"enabled": enabled, "updated_at": _now_iso()},
+                "$inc": {"session_epoch": 1},
+            },
         )
 
     async def set_user_role(self, user_id: str, role: str) -> None:
         await self.users.update_one(
-            {"id": user_id}, {"$set": {"role": role, "updated_at": _now_iso()}}
+            {"id": user_id},
+            {
+                "$set": {"role": role, "updated_at": _now_iso()},
+                "$inc": {"session_epoch": 1},
+            },
         )
 
     async def set_user_password_hash(self, user_id: str, password_hash: str) -> None:
         await self.users.update_one(
             {"id": user_id},
-            {"$set": {"password_hash": password_hash, "updated_at": _now_iso()}},
+            {
+                "$set": {"password_hash": password_hash, "updated_at": _now_iso()},
+                "$inc": {"session_epoch": 1},
+            },
         )
 
     async def list_all_users(self) -> list[User]:
