@@ -25,6 +25,7 @@ from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
 
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.models import DeviceAuthorization
+from oauth2_server.routes.token import client_auth_failure_response
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.sessions import current_user_id
@@ -63,7 +64,7 @@ async def device_authorization(request: Request) -> ORJSONResponse:
             form, request.headers.get("authorization"), mtls=mtls_headers(request, config)
         )
     except OAuthError as exc:
-        return oauth_error(exc.error, exc.description, exc.status)
+        return client_auth_failure_response(request, form, exc)
 
     if _DEVICE_GRANT_TYPE not in client.grant_type_list():
         return oauth_error("unauthorized_client", "client is not authorized for this grant type")

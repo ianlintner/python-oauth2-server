@@ -132,7 +132,7 @@ def _extract_client_id_for_penalty(form: dict, authorization_header: str | None)
 
 
 def _invalid_client_response(
-    request: Request, client_id: str | None, description: str
+    request: Request, client_id: str | None, description: str | None
 ) -> ORJSONResponse:
     """Build the `401 invalid_client` response for `client_id`, first
     consuming a token from the invalid_client penalty bucket (RFC 9700
@@ -168,6 +168,27 @@ def _invalid_client_response(
             }
             return ORJSONResponse(body, status_code=429, headers={"Cache-Control": "no-store"})
     return oauth_error("invalid_client", description)
+
+
+def client_auth_failure_response(
+    request: Request, form: dict, exc: OAuthError, *, authorization_header: str | None = None
+) -> ORJSONResponse:
+    """Error response for a failed `ClientService.authenticate` call.
+
+    Shared by every endpoint that authenticates a client (token,
+    introspection, revocation, PAR, device authorization) so they all spend
+    from the same per-`client_id` invalid_client penalty bucket — one budget
+    per client, not one per endpoint. Other errors pass through unchanged.
+    """
+    if exc.error == "invalid_client":
+        header = (
+            authorization_header
+            if authorization_header is not None
+            else request.headers.get("authorization")
+        )
+        client_id = _extract_client_id_for_penalty(form, header)
+        return _invalid_client_response(request, client_id, exc.description)
+    return oauth_error(exc.error, exc.description, exc.status)
 
 
 def _pkce_challenge(verifier: str) -> str:

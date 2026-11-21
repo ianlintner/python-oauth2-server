@@ -10,10 +10,10 @@ passes through untouched.
 Deliberate divergence from Rust (see `research-denylist-audit.md` gotchas):
 the Rust guard reads `realip_remote_addr()`, which honors `Forwarded`/
 `X-Forwarded-For` unconditionally — spoofable, and independent of any
-trusted-proxy config. This port uses `request.client.host` (the raw ASGI
-peer address) directly and does not consult forwarding headers at all; a
-faithful reproduction of the spoofable behavior would carry the vulnerability
-forward for no benefit.
+trusted-proxy config. This port derives the address with the shared
+`client_address` helper: the raw ASGI peer address unless
+`trust_proxy_headers` is on, in which case the right-most
+`X-Forwarded-For` entry (the one the trusted proxy appended).
 
 `check_subject_denylisted` is the non-IP counterpart for the other four
 kinds (`user_id`/`username`/`email`/`client_id`). It originated unit tested
@@ -37,6 +37,8 @@ import time
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from oauth2_server.client_address import client_address
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +89,16 @@ class DenylistGuard:
             return
 
         request = Request(scope, receive=receive)
-        client = request.client
-        if client is not None:
+        if request.client is not None:
+            # Same address derivation as the rate limiters (`client_address`):
+            # behind a trusted proxy an IP entry matches the real client, not
+            # the proxy's own address.
+            address = client_address(request, request.app.state.config.trust_proxy_headers)
             storage = request.app.state.storage
             try:
-                entry = await storage.find_denylist_entry(_DENYLIST_KIND_IP, client.host)
+                entry = await storage.find_denylist_entry(_DENYLIST_KIND_IP, address)
             except Exception:
-                logger.warning("denylist lookup failed for ip=%s", client.host, exc_info=True)
+                logger.warning("denylist lookup failed for ip=%s", address, exc_info=True)
                 entry = None
             if entry is not None:
                 path = request.url.path
