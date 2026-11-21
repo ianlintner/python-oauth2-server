@@ -43,6 +43,13 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from oauth2_server.errors import OAuthError
+from oauth2_server.services.credential_storage import (
+    SealError,
+    at_rest,
+    derive_seal_key,
+    digest,
+    unseal,
+)
 from oauth2_server.models import (
     AuditLogEntry,
     AuthorizationCode,
@@ -149,6 +156,7 @@ class MongoStorage:
         self._client = motor.motor_asyncio.AsyncIOMotorClient(url)
         self._db = self._client[_db_name_from_url(url)]
         self.clients = self._db["clients"]
+        self._seal_key: bytes | None = None
         self.users = self._db["users"]
         self.tokens = self._db["tokens"]
         self.authorization_codes = self._db["authorization_codes"]
@@ -231,17 +239,41 @@ class MongoStorage:
 
     # --- Clients ---
 
+    def configure_secret_key(self, master: str) -> None:
+        """Set the server key used to unseal HMAC client-secret key material
+        when a client row is loaded (see `services/credential_storage.py`)."""
+        self._seal_key = derive_seal_key(master)
+
+    def _unsealed(self, client: Client | None) -> Client | None:
+        if client is not None and client.client_secret_key and self._seal_key is not None:
+            try:
+                client.set_hmac_secret(
+                    unseal(client.client_secret_key, self._seal_key, client.client_id)
+                )
+            except SealError:
+                # Wrong server key or tampering: leave the HMAC secret empty
+                # so every HMAC use fails closed. Never log the value.
+                logger.warning("client %s: sealed key material not openable", client.client_id)
+        return client
+
+    @staticmethod
+    def _client_doc(client: Client) -> dict:
+        doc = _to_doc(client)
+        if doc.get("registration_access_token"):
+            doc["registration_access_token"] = at_rest(doc["registration_access_token"], "rat")
+        return doc
+
     async def save_client(self, client: Client) -> None:
-        await self._insert(self.clients, _to_doc(client))
+        await self._insert(self.clients, self._client_doc(client))
 
     async def get_client(self, client_id: str) -> Client | None:
         doc = await self.clients.find_one({"client_id": client_id})
-        return _from_doc(Client, doc)
+        return self._unsealed(_from_doc(Client, doc))
 
     async def update_client(self, client: Client) -> None:
         # Full document replace (not `$set`) — matches the Rust
         # `replace_one`. No upsert; a missing match is silently a no-op.
-        await self.clients.replace_one({"client_id": client.client_id}, _to_doc(client))
+        await self.clients.replace_one({"client_id": client.client_id}, self._client_doc(client))
 
     async def delete_client(self, client_id: str) -> None:
         await self.clients.delete_one({"client_id": client_id})
@@ -251,11 +283,34 @@ class MongoStorage:
             {"client_id": client_id}, {"$set": {"enabled": enabled, "updated_at": _now_iso()}}
         )
 
-    async def set_client_secret(self, client_id: str, client_secret: str) -> None:
+    async def set_client_secret(
+        self, client_id: str, client_secret: str, client_secret_key: str = ""
+    ) -> None:
         await self.clients.update_one(
             {"client_id": client_id},
-            {"$set": {"client_secret": client_secret, "updated_at": _now_iso()}},
+            {
+                "$set": {
+                    "client_secret": client_secret,
+                    "client_secret_key": client_secret_key,
+                    "updated_at": _now_iso(),
+                }
+            },
         )
+
+    async def set_client_registration_access_token(
+        self, client_id: str, registration_access_token: str
+    ) -> None:
+        stored = at_rest(registration_access_token, "rat") if registration_access_token else ""
+        await self.clients.update_one(
+            {"client_id": client_id},
+            {"$set": {"registration_access_token": stored, "updated_at": _now_iso()}},
+        )
+
+    async def resolve_registration_access_token(self, presented: str) -> Client | None:
+        if not presented:
+            return None
+        doc = await self.clients.find_one({"registration_access_token": digest(presented, "rat")})
+        return self._unsealed(_from_doc(Client, doc))
 
     async def list_all_clients(self) -> list[Client]:
         # Full scan (deliberate CosmosDB-compatibility choice — see
@@ -263,12 +318,12 @@ class MongoStorage:
         # into a real `datetime` by `_from_doc`/`MongoDateTime`, so this
         # sorts chronologically even with mixed ISO-string offsets — sorting
         # the raw stored strings would not.
-        items = [_from_doc(Client, doc) async for doc in self.clients.find({})]
+        items = [self._unsealed(_from_doc(Client, doc)) async for doc in self.clients.find({})]
         items.sort(key=lambda c: c.created_at, reverse=True)
         return items
 
     async def list_clients_page(self, q: ListQuery) -> tuple[list[Client], int]:
-        items = [_from_doc(Client, doc) async for doc in self.clients.find({})]
+        items = [self._unsealed(_from_doc(Client, doc)) async for doc in self.clients.find({})]
         search = (q.search or "").lower()
         if search:
             items = [c for c in items if search in c.name.lower() or search in c.client_id.lower()]
@@ -361,25 +416,35 @@ class MongoStorage:
     # --- Tokens ---
 
     async def save_token(self, token: Token) -> None:
-        await self._insert(
-            self.tokens, _to_doc(token, omit_when_none=("refresh_token", "token_family"))
-        )
+        doc = _to_doc(token, omit_when_none=("refresh_token", "token_family"))
+        doc["access_token"] = at_rest(doc["access_token"], "access")
+        if doc.get("refresh_token"):
+            doc["refresh_token"] = at_rest(doc["refresh_token"], "refresh")
+        await self._insert(self.tokens, doc)
 
     async def get_token_by_access_token(self, access_token: str) -> Token | None:
-        doc = await self.tokens.find_one({"access_token": access_token})
+        doc = await self.tokens.find_one({"access_token": digest(access_token, "access")})
         return _from_doc(Token, doc)
 
     async def get_token_by_refresh_token(self, refresh_token: str) -> Token | None:
-        doc = await self.tokens.find_one({"refresh_token": refresh_token})
+        doc = await self.tokens.find_one({"refresh_token": digest(refresh_token, "refresh")})
         return _from_doc(Token, doc)
 
     async def get_token_by_id(self, token_id: str) -> Token | None:
         doc = await self.tokens.find_one({"id": token_id})
         return _from_doc(Token, doc)
 
+    async def revoke_token_by_id(self, token_id: str) -> None:
+        await self.tokens.update_one({"id": token_id}, {"$set": {"revoked": True}})
+
     async def revoke_token(self, token: str) -> None:
         await self.tokens.update_many(
-            {"$or": [{"access_token": token}, {"refresh_token": token}]},
+            {
+                "$or": [
+                    {"access_token": digest(token, "access")},
+                    {"refresh_token": digest(token, "refresh")},
+                ]
+            },
             {"$set": {"revoked": True}},
         )
 
@@ -429,24 +494,23 @@ class MongoStorage:
     # --- Authorization codes ---
 
     async def save_authorization_code(self, code: AuthorizationCode) -> None:
-        await self._insert(
-            self.authorization_codes,
-            _to_doc(
-                code,
-                omit_when_none=(
-                    "code_challenge",
-                    "code_challenge_method",
-                    "nonce",
-                    "resource",
-                    "authorization_details",
-                    "claims_request",
-                    "token_family",
-                ),
+        doc = _to_doc(
+            code,
+            omit_when_none=(
+                "code_challenge",
+                "code_challenge_method",
+                "nonce",
+                "resource",
+                "authorization_details",
+                "claims_request",
+                "token_family",
             ),
         )
+        doc["code"] = at_rest(doc["code"], "authcode")
+        await self._insert(self.authorization_codes, doc)
 
     async def get_authorization_code(self, code: str) -> AuthorizationCode | None:
-        doc = await self.authorization_codes.find_one({"code": code})
+        doc = await self.authorization_codes.find_one({"code": digest(code, "authcode")})
         return _from_doc(AuthorizationCode, doc)
 
     async def get_authorization_code_by_token_family(self, family: str) -> AuthorizationCode | None:
@@ -461,7 +525,7 @@ class MongoStorage:
         # keeping the same 1-claimed/0-already-used `int` contract as
         # `SqlStorage.mark_authorization_code_used`'s `rowcount`.
         doc = await self.authorization_codes.find_one_and_update(
-            {"code": code, "used": False},
+            {"code": digest(code, "authcode"), "used": False},
             {"$set": {"used": True}},
             return_document=ReturnDocument.BEFORE,
         )
@@ -470,12 +534,16 @@ class MongoStorage:
     # --- Device authorizations (RFC 8628) ---
 
     async def save_device_authorization(self, d: DeviceAuthorization) -> None:
-        await self._insert(self.device_authorizations, _to_doc(d))
+        doc = _to_doc(d)
+        doc["device_code"] = at_rest(doc["device_code"], "device")
+        await self._insert(self.device_authorizations, doc)
 
     async def get_device_authorization_by_device_code(
         self, device_code: str
     ) -> DeviceAuthorization | None:
-        doc = await self.device_authorizations.find_one({"device_code": device_code})
+        doc = await self.device_authorizations.find_one(
+            {"device_code": digest(device_code, "device")}
+        )
         return _from_doc(DeviceAuthorization, doc)
 
     async def get_device_authorization_by_user_code(
@@ -498,19 +566,22 @@ class MongoStorage:
     async def mark_device_authorization_used(self, device_code: str) -> int:
         # Same atomic single-claim treatment as mark_authorization_code_used.
         doc = await self.device_authorizations.find_one_and_update(
-            {"device_code": device_code, "used": False},
+            {"device_code": digest(device_code, "device"), "used": False},
             {"$set": {"used": True}},
             return_document=ReturnDocument.BEFORE,
         )
         return 1 if doc is not None else 0
 
     async def expire_device_authorization(self, device_code: str) -> None:
+        # Admin action, not a redemption: accepts the plaintext code OR the
+        # stored digest the admin list displays (`at_rest` is idempotent).
         # Deliberately an RFC 3339 STRING (not a BSON date) to match the
         # encoding `insert_one` used — mixing encodings on the same field is
         # what caused the upstream mixed-encoding deserialization bug.
         now_minus_1s = datetime.now(UTC) - timedelta(seconds=1)
         await self.device_authorizations.update_one(
-            {"device_code": device_code}, {"$set": {"expires_at": now_minus_1s.isoformat()}}
+            {"device_code": at_rest(device_code, "device")},
+            {"$set": {"expires_at": now_minus_1s.isoformat()}},
         )
 
     async def list_all_device_authorizations(self) -> list[DeviceAuthorization]:

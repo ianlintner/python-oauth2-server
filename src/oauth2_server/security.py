@@ -185,10 +185,10 @@ def encode_introspection_jwt(payload: dict, *, keyset: KeySet | None, client: Cl
             algorithm="RS256",
             headers={"typ": INTROSPECTION_JWT_TYP, "kid": signing_key.kid},
         )
-    if not client.is_public() and client.client_secret:
+    if not client.is_public() and client.hmac_secret():
         return jwt.encode(
             payload,
-            client.client_secret,
+            client.hmac_secret(),
             algorithm="HS256",
             headers={"typ": INTROSPECTION_JWT_TYP},
         )
