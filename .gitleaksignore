@@ -1,6 +1,10 @@
-# NOTE: `gitleaks --redact` masks secret *values*, but it also prints `***` in
-# place of the line-number field in JSON/SARIF output — the integers below are
-# the real start lines; copy fingerprints from an UNredacted run only.
+# NOTE: gitleaks 8.30.1 matches a `.gitleaksignore` entry against the finding's
+# *internal* fingerprint `commit:file:rule-id:START-LINE` (see detect.go
+# `AddFinding`): the 4th field is the integer start line at the commit that
+# introduced the match. `--redact` masks only the secret *value* (the report's
+# `Secret`/`Match` become `REDACTED` and the reported `Fingerprint`'s 4th field
+# is shown as `***`); the top-level `StartLine` integer is preserved, so the
+# regen command below still emits the correct start line WITH redaction.
 #
 # gitleaks false positives — no real credentials in this repo.
 #
@@ -14,7 +18,7 @@
 # 40-char commit SHA (abbreviated SHAs do NOT match). Regenerate with:
 #
 #   gitleaks git --redact --report-format json --report-path report.json .
-#   jq -r '.[].Fingerprint' report.json
+#   jq -r '.[] | "\(.Commit):\(.File):\(.RuleID):\(.StartLine)"' report.json
 #
 # When adding a new fixture secret, prefer a `# gitleaks:allow` comment on the
 # line itself; only add a fingerprint here for matches buried in history.
@@ -60,3 +64,9 @@ efa73d25857a75cd62c884b5a30db5db47baa791:README.md:generic-api-key:99
 5ab057d344d33434239b29ade63356522785a0e4:tests/test_rfc_compliance.py:generic-api-key:852
 9850581a4ee4501c79cca0d7c53ba7159ed841b0:tests/test_rfc_compliance.py:generic-api-key:821
 dae4290cbee2ec23940ec1820d9980e7cb6b6ebc:tests/test_rfc_compliance.py:generic-api-key:821
+
+# tests/test_admin_clients.py — synthetic 32-char client_secret used
+# in test_create_client_rejects_short_secret to assert the *valid* (201) path of
+# secret-complexity validation. Introduced at 506c38bd (PR #129); entropy 5.0.
+# It is already GitHub-classified ["test"] and is a demonstrably fake fixture.
+506c38bd7eb8411ac3fe1d61fe4099b897b5ba0e:tests/test_admin_clients.py:generic-api-key:226
