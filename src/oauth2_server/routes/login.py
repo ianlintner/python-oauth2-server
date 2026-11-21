@@ -23,6 +23,7 @@ from __future__ import annotations
 import html
 import importlib.resources
 import logging
+import secrets
 import time
 
 from fastapi import APIRouter, Request
@@ -30,7 +31,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from oauth2_server.client_address import client_address
 from oauth2_server.middleware import check_subject_denylisted
-from oauth2_server.security import verify_password_async
+from oauth2_server.security import hash_password, verify_password_async
 from oauth2_server.services.auth import is_safe_redirect
 from oauth2_server.sessions import set_login
 
@@ -42,6 +43,15 @@ router = APIRouter()
 # GET /oauth/device/verify) stays valid. After this window a login no longer
 # replays the stored redirect target.
 RETURN_TO_MAX_AGE_SECS = 600
+
+# Hash verified when the submitted username matches no account, so a failed
+# login costs the same password-hashing work either way. Generated once at
+# import time with the project's hasher from a random, discarded password.
+_DECOY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+
+# Placeholder email for the denylist lookup when no user row exists (keeps the
+# number of storage lookups the same as for an existing user).
+_UNKNOWN_USER_EMAIL = "unknown-user@invalid"
 
 _SERVER_ERROR_PLACEHOLDER = "<!--SERVER_ERROR-->"
 
@@ -138,30 +148,35 @@ async def login(request: Request):
     storage = request.app.state.storage
     user = await storage.get_user_by_username(username)
 
-    # Subject-kind denylist (Phase 3a): a hit on either the submitted
-    # username or the looked-up user's email blocks the login just like an
-    # unknown user or bad password would — same generic redirect below, so
-    # a denylisted account is indistinguishable from any other login
-    # failure (no oracle). Only meaningful once a user row exists; an
-    # unknown username already falls through to the same generic error.
-    denylist_reason = None
-    denylist_kind = None
-    if user is not None:
-        denylist_reason = await check_subject_denylisted(storage, "username", username)
-        denylist_kind = "username"
-        if denylist_reason is None:
-            denylist_reason = await check_subject_denylisted(storage, "email", user.email)
-            denylist_kind = "email"
+    # Every attempt performs the same work regardless of whether the username
+    # exists, whether the account is enabled, or whether it is denylisted:
+    # both denylist lookups and exactly one password verification (against the
+    # stored hash, or a decoy hash when there is no user). Do not turn these
+    # into a short-circuiting `or` chain or skip steps for unknown users, as
+    # that would make response time depend on account state.
+    #
+    # Subject-kind denylist (Phase 3a): a hit on either the submitted username
+    # or the looked-up user's email blocks the login with the same generic
+    # redirect as any other failure. For an unknown user the email lookup runs
+    # against a placeholder so the number of storage lookups matches; its
+    # result is ignored because an unknown user always fails.
+    username_denied = await check_subject_denylisted(storage, "username", username)
+    email_denied = await check_subject_denylisted(
+        storage, "email", user.email if user is not None else _UNKNOWN_USER_EMAIL
+    )
+    denylist_kind = "username" if username_denied is not None else "email"
+    denylist_reason = username_denied if username_denied is not None else email_denied
+    if user is None:
+        denylist_reason = None
+
+    password_ok = await verify_password_async(
+        password, user.password_hash if user is not None else _DECOY_PASSWORD_HASH
+    )
 
     # Generic error for unknown username, disabled account, bad password, and
     # a denylisted username/email alike, to avoid leaking account
-    # existence/state.
-    if (
-        user is None
-        or not user.enabled
-        or not await verify_password_async(password, user.password_hash)
-        or denylist_reason is not None
-    ):
+    # existence/state. All operands are already computed (no short-circuit).
+    if user is None or not user.enabled or not password_ok or denylist_reason is not None:
         if denylist_reason is not None:
             logger.warning(
                 "login blocked: %s is denylisted (reason=%s)", denylist_kind, denylist_reason
