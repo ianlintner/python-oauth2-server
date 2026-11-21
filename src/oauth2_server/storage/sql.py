@@ -31,6 +31,19 @@ _CLIENT_COLS = ", ".join(Client.model_fields.keys())
 _USER_COLS = ", ".join(User.model_fields.keys())
 _TOKEN_COLS = ", ".join(Token.model_fields.keys())
 _AUTH_CODE_COLS = ", ".join(AuthorizationCode.model_fields.keys())
+# Static statements, one per terminal state of the pending -> decided move.
+_DEVICE_TRANSITIONS = {
+    "approved": text(
+        "UPDATE device_authorizations SET approved = :t, user_id = :uid "
+        "WHERE user_code = :uc AND approved = :f AND denied = :f "
+        "AND used = :f AND expires_at > :now"
+    ),
+    "denied": text(
+        "UPDATE device_authorizations SET denied = :t, user_id = :uid "
+        "WHERE user_code = :uc AND approved = :f AND denied = :f "
+        "AND used = :f AND expires_at > :now"
+    ),
+}
 _DEVICE_AUTH_COLS = ", ".join(DeviceAuthorization.model_fields.keys())
 _TRUSTED_ISSUER_COLS = ", ".join(TrustedIssuer.model_fields.keys())
 _GRANT_COLS = ", ".join(Grant.model_fields.keys())
@@ -638,15 +651,11 @@ class SqlStorage:
         self, user_code: str, column: str, user_id: str | None
     ) -> int:
         # Single conditional transition out of the pending state; the affected
-        # row count tells a losing racer that it lost. `column` is one of two
-        # internal literals, never caller input.
+        # row count tells a losing racer that it lost.
+        statement = _DEVICE_TRANSITIONS[column]
         async with self._engine.begin() as conn:
             result = await conn.execute(
-                text(
-                    f"UPDATE device_authorizations SET {column} = :t, user_id = :uid "
-                    "WHERE user_code = :uc AND approved = :f AND denied = :f "
-                    "AND used = :f AND expires_at > :now"
-                ),
+                statement,
                 {
                     "t": True,
                     "f": False,
