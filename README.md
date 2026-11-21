@@ -705,7 +705,8 @@ input-validation gaps the Phase 3b/4a/4b backlogs recorded:
 - **Atomic refresh rotation** — consuming a refresh token is a single conditional storage
   transition (`claim_refresh_token`, SQL and Mongo). When concurrent requests present the same
   refresh token, exactly one receives `200`; the others get `400 invalid_grant` and the token
-  family is revoked (RFC 9700 §4.14.2). Requests rejected by validation (scope, `resource`,
+  family is revoked (RFC 9700 §4.14.2). The successor is persisted before the old token is
+  claimed, so a loser's family revocation always covers the winner's successor. Requests rejected by validation (scope, `resource`,
   DPoP) do not consume the token.
 
 ### New environment variables (Phase 4c)
