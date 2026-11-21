@@ -5,6 +5,7 @@ Mirrors `crates/oauth2-config/src/lib.rs::ServerConfig`.
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Annotated
 
 from pydantic import Field, field_validator, model_validator
@@ -97,6 +98,12 @@ class Config(BaseSettings):
     trust_proxy_headers: Annotated[
         bool, Field(validation_alias="OAUTH2_SERVER_TRUST_PROXY_HEADERS")
     ] = False
+    # Peer allow-list for the proxy-supplied mTLS certificate headers
+    # (`services/mtls.py::mtls_headers`), env `OAUTH2_TRUSTED_PROXY_CIDRS`
+    # (comma-separated CIDRs). Empty (default) = no allow-list: with
+    # `trust_proxy_headers` on, the headers are honored from any peer. When
+    # non-empty, they are honored only from a TCP peer inside one of the ranges.
+    trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     resilience_enabled: bool = False
     resilience_max_concurrent: int = 1000
     resilience_cb_failure_threshold: int = 5
@@ -173,6 +180,20 @@ class Config(BaseSettings):
     def _split_events_types(cls, v: object) -> object:
         if isinstance(v, str):
             return [t.strip() for t in v.split(",") if t.strip()]
+        return v
+
+    @field_validator("trusted_proxy_cidrs", mode="before")
+    @classmethod
+    def _split_trusted_proxy_cidrs(cls, v: object) -> object:
+        if isinstance(v, str):
+            v = v.split(",")
+        if isinstance(v, list):
+            cidrs = [str(c).strip() for c in v if str(c).strip()]
+            for cidr in cidrs:
+                # Fail at startup on a typo rather than silently trusting
+                # (or distrusting) the wrong range.
+                ipaddress.ip_network(cidr, strict=False)
+            return cidrs
         return v
 
     @field_validator("dpop_nonce_lifetime_secs")

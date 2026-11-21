@@ -39,6 +39,7 @@ from oauth2_server.services.clients import (
     VALID_AUTH_METHODS,
     is_valid_jwks_uri,
     is_valid_redirect_uri,
+    validate_subject_dn,
 )
 from oauth2_server.services.resource import validate_resource
 from oauth2_server.storage.paging import ListQuery, page_envelope
@@ -89,9 +90,6 @@ class ClientUpdateBody(BaseModel):
 
 def _client_not_found() -> ORJSONResponse:
     return ORJSONResponse({"error": "client not found"}, status_code=404)
-
-
-_BLANK_SUBJECT_DN_ERROR = "tls_client_certificate_subject_dn must not be blank"
 
 
 def _bad_request(description: str) -> ORJSONResponse:
@@ -315,10 +313,9 @@ async def create_client(request: Request, actor: AdminActor = AdminDep) -> ORJSO
     subject_dn = body.get("tls_client_certificate_subject_dn") or ""
     if not isinstance(subject_dn, str):
         return _bad_request("tls_client_certificate_subject_dn must be a string")
-    # Only the exactly-empty DN is the "any certificate" wildcard; see
-    # `routes/register.py` and `services/clients.py`.
-    if subject_dn and not subject_dn.strip():
-        return _bad_request(_BLANK_SUBJECT_DN_ERROR)
+    dn_error = validate_subject_dn(auth_method, subject_dn)
+    if dn_error is not None:
+        return _bad_request(dn_error)
 
     invalid = _validate_key_material(auth_method, jwks_json, jwks_uri)
     if invalid is not None:
@@ -452,10 +449,7 @@ async def update_client(
     if "jwks_uri" in fields_set:
         updates["jwks_uri"] = body_model.jwks_uri
     if "tls_client_certificate_subject_dn" in fields_set:
-        submitted_dn = body_model.tls_client_certificate_subject_dn
-        if submitted_dn and not submitted_dn.strip():
-            return _bad_request(_BLANK_SUBJECT_DN_ERROR)
-        updates["tls_client_certificate_subject_dn"] = submitted_dn
+        updates["tls_client_certificate_subject_dn"] = body_model.tls_client_certificate_subject_dn
     if "backchannel_logout_uri" in fields_set:
         updates["backchannel_logout_uri"] = body_model.backchannel_logout_uri
     if "frontchannel_logout_uri" in fields_set:
@@ -491,6 +485,20 @@ async def update_client(
     )
     if invalid is not None:
         return invalid
+
+    # Same merged-row rule for the Subject DN: switching a client to
+    # `tls_client_auth`, or clearing its DN, must not leave it without one.
+    # Only when the update touches one of those two fields, so a legacy row
+    # can still be disabled or renamed before its DN is fixed.
+    if {"token_endpoint_auth_method", "tls_client_certificate_subject_dn"} & updates.keys():
+        dn_error = validate_subject_dn(
+            updates.get("token_endpoint_auth_method", client.token_endpoint_auth_method),
+            updates.get(
+                "tls_client_certificate_subject_dn", client.tls_client_certificate_subject_dn
+            ),
+        )
+        if dn_error is not None:
+            return _bad_request(dn_error)
 
     now = datetime.now(UTC)
     updated = client.model_copy(update={**updates, "updated_at": now})

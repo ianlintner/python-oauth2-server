@@ -18,6 +18,7 @@ from oauth2_server.services.clients import (
     VALID_AUTH_METHODS,
     is_valid_jwks_uri,
     is_valid_redirect_uri,
+    validate_subject_dn,
 )
 from oauth2_server.services.events_bus import emit_event
 
@@ -110,14 +111,14 @@ async def register_client(request: Request) -> ORJSONResponse:
     if reg.jwks is not None and reg.jwks_uri:
         return _registration_error("jwks and jwks_uri are mutually exclusive")
 
-    # An EXACTLY empty registered Subject DN is the RFC 8705 "any certificate
-    # the proxy vouched for" wildcard (`services/clients.py`). A
-    # whitespace-only one is a registrant mistake that reads like a real DN,
-    # so refuse it rather than storing a row one stray `.strip()` away from
-    # authenticating every certificate.
-    subject_dn = reg.tls_client_certificate_subject_dn
-    if subject_dn and not subject_dn.strip():
-        return _registration_error("tls_client_certificate_subject_dn must not be blank")
+    # RFC 8705 §2.1: a `tls_client_auth` client is identified by its
+    # registered Subject DN, so one must be supplied. Shape rules shared with
+    # the admin API live in `services/clients.py::validate_subject_dn`.
+    dn_error = validate_subject_dn(
+        reg.token_endpoint_auth_method, reg.tls_client_certificate_subject_dn
+    )
+    if dn_error is not None:
+        return _registration_error(dn_error)
 
     # `jwks_uri` is the one registrant-supplied URL this server dereferences
     # itself, so it gets a stricter rule than the redirect URIs above — see

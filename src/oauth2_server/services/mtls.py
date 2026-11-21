@@ -15,7 +15,8 @@ binding. This matches the conditional gate already applied to
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import ipaddress
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -58,14 +59,41 @@ def _subject_dn_header(request: _HasHeaders) -> str | None:
     return value
 
 
+def peer_in_trusted_proxies(peer_host: str | None, cidrs: Sequence[str]) -> bool:
+    """True iff `peer_host` (the TCP peer address) lies inside one of `cidrs`.
+
+    Fails closed: a missing or unparseable peer address is never trusted.
+    """
+    if not peer_host:
+        return False
+    try:
+        address = ipaddress.ip_address(peer_host)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    for cidr in cidrs:
+        network = ipaddress.ip_network(cidr, strict=False)
+        if address.version == network.version and address in network:
+            return True
+    return False
+
+
 def mtls_headers(request: _HasHeaders, config: Config) -> tuple[str | None, str | None]:
     """Return `(thumbprint, subject_dn)` from the proxy's mTLS headers.
 
     Both are `None` unless `config.trust_proxy_headers` is true (divergence
-    47). An empty or whitespace-only thumbprint reads as `None`; the DN is
-    returned verbatim and only an exactly-empty value reads as `None`, so the
-    Subject DN comparison stays byte-exact.
+    47) and, when `config.trusted_proxy_cidrs` is non-empty, the TCP peer is
+    inside one of those ranges. An empty or whitespace-only thumbprint reads
+    as `None`; the DN is returned verbatim and only an exactly-empty value
+    reads as `None`, so the Subject DN comparison stays byte-exact.
     """
     if not config.trust_proxy_headers:
         return (None, None)
+    if config.trusted_proxy_cidrs:
+        client = getattr(request, "client", None)
+        if not peer_in_trusted_proxies(
+            client.host if client is not None else None, config.trusted_proxy_cidrs
+        ):
+            return (None, None)
     return (_thumbprint_header(request), _subject_dn_header(request))
