@@ -70,6 +70,11 @@ All are `OAUTH2_`-prefixed (see `src/oauth2_server/config.py` for the full `Conf
 | `OAUTH2_ID_TOKEN_ALG` | `RS256` if a PEM is set, else `HS256` | Explicit override for the signing algorithm; normalized to upper-case. |
 | `OAUTH2_KEY_ROTATION_GRACE_HOURS` | `24` | How long a rotated-out RS256 key stays published in JWKS after `POST /admin/api/keys/rotate`, so tokens signed just before rotation still verify. |
 | `OAUTH2_DYNAMIC_REGISTRATION_ENABLED` | `false` | Gates `POST /connect/register`. Off by default, unlike Rust. |
+| `OAUTH2_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN` | unset | When set, `POST /connect/register` requires `Authorization: Bearer <token>` (RFC 7591 §3). A caller presenting it may also register `client_credentials`, token-exchange and jwt-bearer clients. |
+| `OAUTH2_DYNAMIC_REGISTRATION_ANONYMOUS` | `false` | Explicit opt-in for registration without an initial access token. With neither this nor a token configured, an enabled endpoint answers `403`. Anonymous callers may only register `authorization_code`, `refresh_token` and device-code clients. |
+| `OAUTH2_SELF_REGISTRATION_SCOPES` | `openid profile email offline_access read` | Space- or comma-separated scopes a registering client may request. Empty permits none; `admin` is never accepted. |
+
+Registration metadata outside these allow-lists (grant types, `response_types` other than `code` / `code id_token`, scopes) is rejected with `400 invalid_client_metadata` rather than dropped. Deployments that previously registered privileged grants or scopes anonymously must now configure an initial access token or adjust the scope allow-list.
 
 ### User consent
 
