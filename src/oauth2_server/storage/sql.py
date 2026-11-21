@@ -9,7 +9,10 @@ query string works for both backends here.
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import column as sa_column
+from sqlalchemy import table as sa_table
 from sqlalchemy import text
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from oauth2_server.models import (
@@ -56,6 +59,18 @@ _USER_UPDATE_COLS = [
     "session_epoch",
     "updated_at",
 ]
+
+# Lightweight table construct for Core (non-text) UPDATEs.
+_USERS_TABLE = sa_table(
+    "users",
+    sa_column("id"),
+    sa_column("email"),
+    sa_column("email_verified"),
+    sa_column("enabled"),
+    sa_column("role"),
+    sa_column("updated_at"),
+    sa_column("session_epoch"),
+)
 
 # Columns update_user_fields (the partial, epoch-safe admin update) may set.
 _USER_FIELD_UPDATE_COLS = frozenset({"email", "email_verified", "enabled", "role"})
@@ -332,18 +347,17 @@ class SqlStorage:
     async def update_user_fields(
         self, user_id: str, fields: dict, *, bump_session_epoch: bool = False
     ) -> None:
-        cols = [c for c in fields if c in _USER_FIELD_UPDATE_COLS]
-        if len(cols) != len(fields):
+        if not set(fields) <= _USER_FIELD_UPDATE_COLS:
             raise ValueError("unsupported user field")
-        parts = [f"{c} = :{c}" for c in cols] + ["updated_at = :updated_at"]
+        # SQLAlchemy Core construct (no raw SQL text): column names come from
+        # the whitelist above and every value is a bound parameter.
+        values: dict = {c: fields[c] for c in fields}
+        values["updated_at"] = self._dt(datetime.now(UTC))
         if bump_session_epoch:
-            parts.append("session_epoch = session_epoch + 1")
-        params = {**fields, "updated_at": self._dt(datetime.now(UTC)), "uid": user_id}
+            values["session_epoch"] = _USERS_TABLE.c.session_epoch + 1
+        stmt = sa_update(_USERS_TABLE).where(_USERS_TABLE.c.id == user_id).values(**values)
         async with self._engine.begin() as conn:
-            await conn.execute(
-                text(f"UPDATE users SET {', '.join(parts)} WHERE id = :uid"),
-                params,
-            )
+            await conn.execute(stmt)
 
     async def delete_user(self, user_id: str) -> None:
         async with self._engine.begin() as conn:
