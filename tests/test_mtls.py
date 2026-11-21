@@ -22,6 +22,7 @@ from oauth2_server.services.dpop import jwk_thumbprint
 from oauth2_server.services.mtls import mtls_headers
 from tests.conftest import build_client_app
 from tests.helpers import (
+    device_verify_post,
     generate_rsa_keypair,
     login_session,
     make_dpop_proof,
@@ -541,9 +542,7 @@ async def test_device_grant_never_binds_x5t(monkeypatch):
         user_code = start.json()["user_code"]
 
         assert (await login_session(client_app)).status_code == 303
-        verify = await client_app.post(
-            "/oauth/device/verify", data={"user_code": user_code, "action": "approve"}
-        )
+        verify = await device_verify_post(client_app, user_code, "approve")
         assert verify.status_code == 200, verify.text
 
         # RFC 8628 slow_down: advance the poll tracker's clock past the

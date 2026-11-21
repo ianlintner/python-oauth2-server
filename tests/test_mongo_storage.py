@@ -439,14 +439,22 @@ async def test_approve_and_deny_device_authorization(storage):
     await storage.save_client(_client())
     await storage.save_device_authorization(_device_auth())
 
-    await storage.approve_device_authorization("UC1", "u1")
+    assert await storage.approve_device_authorization("UC1", "u1") == 1
     got = await storage.get_device_authorization_by_user_code("UC1")
     assert got.approved is True
     assert got.denied is False
     assert got.user_id == "u1"
 
-    await storage.deny_device_authorization("UC1")
+    # Only a pending row can transition: a late deny does not overwrite the approval.
+    assert await storage.deny_device_authorization("UC1", "u1") == 0
     got = await storage.get_device_authorization_by_user_code("UC1")
+    assert got.approved is True
+    assert got.denied is False
+
+    await storage.save_device_authorization(_device_auth("dc2", "UC2"))
+    assert await storage.deny_device_authorization("UC2", "u1") == 1
+    assert await storage.approve_device_authorization("UC2", "u2") == 0
+    got = await storage.get_device_authorization_by_user_code("UC2")
     assert got.denied is True
     assert got.approved is False
 

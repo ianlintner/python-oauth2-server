@@ -212,6 +212,18 @@ async def login_session(client, username: str = "user_rfc", password: str = "pas
     return await client.post("/auth/login", data={"username": username, "password": password})
 
 
+async def device_verify_post(client, user_code: str, action: str):
+    """Drive the device verification step like a browser: GET the page for the
+    code (which resolves the client and issues the CSRF token), then POST the
+    form fields it rendered along with the chosen action."""
+    import re
+
+    page = await client.get("/oauth/device/verify", params={"user_code": user_code})
+    assert page.status_code == 200, page.text
+    fields = dict(re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)">', page.text))
+    return await client.post("/oauth/device/verify", data={**fields, "action": action})
+
+
 async def login_admin(client):
     """POST /auth/login as the seeded admin user from `seed_admin`."""
     return await login_session(client, username="admin_rfc", password="password123")
