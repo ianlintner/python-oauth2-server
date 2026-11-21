@@ -107,19 +107,40 @@ async def device_authorization(request: Request) -> ORJSONResponse:
     return response
 
 
-def _render_device_verify_page(user_code: str) -> str:
+def _render_device_verify_page(
+    user_code: str,
+    *,
+    client_id: str = "",
+    client_name: str = "",
+    scope: str = "",
+    account: str = "",
+) -> str:
     """Ported from `render_device_verify_page` (device.rs): `user_code` is
     html-escaped before being embedded as the input's `value` attribute so a
     crafted `?user_code=` query value can't break out of the attribute and
     inject markup (reflected-XSS hardening — see the ported unit tests
-    `user_code_is_html_escaped` / `normal_user_code_is_preserved`)."""
+    `user_code_is_html_escaped` / `normal_user_code_is_preserved`).
+
+    When a pending device authorization is found for the code, the page names
+    the client, requested scopes and signed-in account so the approving user
+    can see what the POST will authorize.
+    """
     escaped = html.escape(user_code, quote=True)
+    details = ""
+    if client_id or scope or account:
+        details = (
+            "<dl>\n"
+            f"  <dt>Client</dt><dd>{html.escape(client_name or client_id, quote=True)}</dd>\n"
+            f"  <dt>Scopes</dt><dd>{html.escape(scope, quote=True)}</dd>\n"
+            f"  <dt>Account</dt><dd>{html.escape(account, quote=True)}</dd>\n"
+            "</dl>\n"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Authorize Device</title></head>
 <body>
 <h1>Authorize Device</h1>
-<form method="post" action="/oauth/device/verify">
+{details}<form method="post" action="/oauth/device/verify">
   <label for="user_code">Code</label>
   <input type="text" id="user_code" name="user_code" value="{escaped}" autocomplete="off" required>
   <button type="submit" name="action" value="approve">Approve</button>
@@ -146,7 +167,22 @@ async def device_verify_page(request: Request):
         return RedirectResponse("/auth/login", status_code=302)
 
     user_code = request.query_params.get("user_code", "")
-    return HTMLResponse(_render_device_verify_page(user_code))
+    details: dict[str, str] = {}
+    if user_code:
+        storage = request.app.state.storage
+        device = await storage.get_device_authorization_by_user_code(
+            _normalize_user_code(user_code)
+        )
+        if device is not None and not device.used and device.expires_at > clock.now():
+            client = await storage.get_client(device.client_id)
+            user = await storage.get_user_by_id(user_id)
+            details = {
+                "client_id": device.client_id,
+                "client_name": client.name if client is not None else "",
+                "scope": device.scope,
+                "account": user.username if user is not None else "",
+            }
+    return HTMLResponse(_render_device_verify_page(user_code, **details))
 
 
 @router.post("/device/verify")
