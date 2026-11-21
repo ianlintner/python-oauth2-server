@@ -743,13 +743,20 @@ async def token(request: Request) -> ORJSONResponse:
                 )
 
         family = old_token.token_family or uuid.uuid4().hex
-        await storage.revoke_token(old_token.access_token)
-
         # RFC 9396 details are DROPPED on refresh (Rust parity,
         # research-rar-token-exchange.md `endpoints`: "authorization_details:
         # None on the rotated token") — unlike `cnf` above, there is no
         # carry-over from the old access token's JWT claim; `authorization_details`
         # is deliberately left unset here.
+        #
+        # Ordering is load-bearing: the successor is persisted BEFORE the old
+        # token is claimed. A losing request revokes the family only after
+        # its claim returned 0, i.e. after the winner's claim succeeded, and
+        # the winner's claim happens after its successor row exists. So the
+        # family revocation always covers the winner's successor — there is
+        # no window where a revoke finishes first and a valid successor is
+        # saved afterwards. A loser's own (never returned) successor sits in
+        # the same family and is revoked with it.
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             old_token.user_id,
@@ -760,6 +767,14 @@ async def token(request: Request) -> ORJSONResponse:
             resource=resource,
             audience=carried_audience,
         )
+
+        # Atomic claim: exactly one concurrent request can transition the
+        # row to revoked (this also revokes the paired access token). A
+        # loser presented an already-consumed token: revoke the family
+        # (including the successor it just persisted).
+        if await storage.claim_refresh_token(refresh_token_value) == 0:
+            await storage.revoke_token_family(family)
+            return oauth_error("invalid_grant", "refresh token has been revoked")
         request.app.state.metrics.oauth_token_issued_total.inc()
         emit_event(
             event_bus,

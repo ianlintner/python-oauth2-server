@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import secrets
@@ -6,8 +7,20 @@ from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
 import jwt
+from httpx import ASGITransport, AsyncClient
 
-from tests.helpers import login_session, post_token, reseed_client, seed_client, trust_client
+from oauth2_server.app import create_app
+from oauth2_server.config import Config
+from oauth2_server.storage.sql import SqlStorage
+from tests.helpers import (
+    MIGRATIONS,
+    login_session,
+    post_token,
+    reseed_client,
+    seed_client,
+    seed_user,
+    trust_client,
+)
 
 JWT_SECRET = "unit-test-secret-not-for-production-0123456789abcdef"
 
@@ -362,6 +375,142 @@ async def test_refresh_rotation_and_reuse_revokes_family(client_app):
     )
     assert resp4.status_code == 400
     assert resp4.json()["error"] == "invalid_grant"
+
+
+async def test_concurrent_refresh_only_one_wins(tmp_path):
+    # File-backed SQLite: the in-memory test backend shares ONE connection
+    # across tasks, so concurrent transactions there can roll each other
+    # back and say nothing about real (per-connection) isolation.
+    storage = SqlStorage(f"sqlite+aiosqlite:///{tmp_path / 'race.db'}", MIGRATIONS)
+    await storage.init()
+    await seed_client(storage)
+    await seed_user(storage)
+    config = Config(
+        jwt_secret=JWT_SECRET,
+        issuer="https://auth.example.com",
+        dynamic_registration_enabled=True,
+        # Same as the shared fixture: the code flow here is only plumbing for
+        # a refresh token, so skip the consent prompt for the seeded client.
+        consent_trusted_client_ids=["client1"],
+    )
+    app = create_app(config, storage)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://auth.example.com"
+    ) as client_app:
+        client_app.storage = storage
+        client_app.app = app
+        await _concurrent_refresh_only_one_wins(client_app)
+
+
+async def _concurrent_refresh_only_one_wins(client_app):
+    resp1, _code = await run_code_flow(client_app)
+    assert resp1.status_code == 200, resp1.text
+    refresh_token = resp1.json()["refresh_token"]
+
+    results = await asyncio.gather(
+        *(
+            post_token(
+                client_app,
+                {"grant_type": "refresh_token", "refresh_token": refresh_token},
+                basic_auth=("client1", "s3cret"),
+            )
+            for _ in range(5)
+        )
+    )
+    winners = [r for r in results if r.status_code == 200]
+    losers = [r for r in results if r.status_code != 200]
+    assert len(winners) == 1, [r.status_code for r in results]
+    for r in losers:
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_grant"
+
+    # Losers revoke the family, so the winner's successor is no longer usable.
+    follow = await post_token(
+        client_app,
+        {"grant_type": "refresh_token", "refresh_token": winners[0].json()["refresh_token"]},
+        basic_auth=("client1", "s3cret"),
+    )
+    assert follow.status_code == 400
+    assert follow.json()["error"] == "invalid_grant"
+
+
+async def test_refresh_reuse_revocation_covers_late_successor_insert(tmp_path):
+    """Deterministic ordering: a loser's family revocation must not be able to
+    finish BEFORE the winner's successor row is persisted (a revoke only
+    touches existing rows, so a successor saved after it would stay valid
+    despite detected reuse).
+
+    Every successor insert is held until the first family revocation has
+    completed (bounded wait). With claim-then-issue ordering the winner's
+    insert is released only after the revoke ran, leaving a live successor;
+    with issue-then-claim ordering the revoke can only run after the
+    winner's insert, so the wait simply times out and the revoke covers it.
+    """
+    storage = SqlStorage(f"sqlite+aiosqlite:///{tmp_path / 'order.db'}", MIGRATIONS)
+    await storage.init()
+    await seed_client(storage)
+    await seed_user(storage)
+    config = Config(
+        jwt_secret=JWT_SECRET,
+        issuer="https://auth.example.com",
+        dynamic_registration_enabled=True,
+        consent_trusted_client_ids=["client1"],
+    )
+    app = create_app(config, storage)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://auth.example.com"
+    ) as client_app:
+        client_app.storage = storage
+        client_app.app = app
+        resp1, _code = await run_code_flow(client_app)
+        assert resp1.status_code == 200, resp1.text
+        refresh_token = resp1.json()["refresh_token"]
+        family = (await storage.get_token_by_refresh_token(refresh_token)).token_family
+        assert family
+
+        revoked_once = asyncio.Event()
+        real_revoke = storage.revoke_token_family
+        real_save = storage.save_token
+
+        async def revoke_family(fam: str) -> int:
+            try:
+                return await real_revoke(fam)
+            finally:
+                revoked_once.set()
+
+        async def save_token(token):
+            if token.token_family == family:
+                try:
+                    await asyncio.wait_for(revoked_once.wait(), timeout=1.0)
+                except TimeoutError:
+                    pass
+            await real_save(token)
+
+        storage.revoke_token_family = revoke_family
+        storage.save_token = save_token
+
+        results = await asyncio.gather(
+            *(
+                post_token(
+                    client_app,
+                    {"grant_type": "refresh_token", "refresh_token": refresh_token},
+                    basic_auth=("client1", "s3cret"),
+                )
+                for _ in range(2)
+            )
+        )
+        assert sorted(r.status_code for r in results) == [200, 400], [
+            r.status_code for r in results
+        ]
+
+        # Reuse was detected, so no token in the family may remain live —
+        # including the winner's successor, however the operations interleaved.
+        storage.revoke_token_family = real_revoke
+        storage.save_token = real_save
+        live = [
+            t for t in await storage.list_all_tokens() if t.token_family == family and not t.revoked
+        ]
+        assert live == []
 
 
 async def test_id_token_includes_email_and_preferred_username(client_app):
