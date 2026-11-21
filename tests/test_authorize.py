@@ -1,3 +1,4 @@
+import time
 import json
 import secrets
 from urllib.parse import parse_qs, urlparse
@@ -186,9 +187,9 @@ async def test_stale_return_to_is_not_replayed_after_login(app_with_session, mon
     assert resp.status_code == 302
 
     # Advance the clock past the freshness window, as seen by the login route.
-    real_time = login_routes.time.time
+    real_time = time.time
     monkeypatch.setattr(
-        login_routes.time,
+        time,
         "time",
         lambda: real_time() + login_routes.RETURN_TO_MAX_AGE_SECS + 1,
     )
@@ -490,3 +491,24 @@ async def test_loopback_wildcard_does_not_relax_a_registered_port_or_host(app_wi
     )
     assert resp.status_code == 400
     assert resp.json()["error"] == "invalid_request"
+
+
+async def test_authorize_does_not_grant_admin_scope_to_non_admin_user(app_with_session):
+    await reseed_client(app_with_session, scope="read admin")
+    await login_session(app_with_session)
+    resp = await app_with_session.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": "client1",
+            "redirect_uri": "https://a.example/cb",
+            "scope": "admin",
+            "state": "s",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+        },
+    )
+    assert resp.status_code == 302
+    q = parse_qs(urlparse(resp.headers["location"]).query)
+    assert q["error"] == ["invalid_scope"]
+    assert "code" not in q

@@ -15,6 +15,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
+from oauth2_server import clock, conformance_sut
 from oauth2_server.conformance import apply_seed, seed_from_env
 from oauth2_server.keys import seed_keyset
 from oauth2_server.middleware import _SECURITY_HEADERS, DenylistGuard, MetricsMiddleware
@@ -283,6 +284,10 @@ def build() -> FastAPI:
     async def lifespan(app: FastAPI):
         await storage.init()
         if conformance_seed is not None:
+            # Process-local conformance state starts clean on every (re)start
+            # (contract 7.4): the test clock offset and the DPoP nonce toggle.
+            clock.reset()
+            app.state.dpop_nonce_issuer.require_all = False
             # The seed replaces the default admin: only seeded identities
             # exist. Any failure aborts startup, so the server never serves
             # (or reports ready) with a partially applied seed.
@@ -299,6 +304,9 @@ def build() -> FastAPI:
         await app.state.http_client.aclose()
 
     app = create_app(config, storage, lifespan=lifespan)
+    if conformance_seed is not None:
+        # SUT interface v2 (/conformance/*): never mounted outside the mode.
+        app.include_router(conformance_sut.router)
     if tracing:
         instrument_app(app)
     return app

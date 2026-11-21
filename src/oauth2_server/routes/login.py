@@ -6,13 +6,13 @@ disabled-account rejection, and the safe `return_to` redirect).
 
 Rate limiting mirrors Rust's `LoginRateLimiter`: before any credential
 lookup, `app.state.login_limiter` (`services/ratelimit.py::FixedWindowLimiter`)
-is checked for both `login:ip:{ip}` and `login:user:{username}` — either key
-being over its limit short-circuits straight to the `too_many_attempts`
+is checked for both `login:ip:{address}` and a per-(address, username) key —
+either key being over its limit short-circuits straight to the `too_many_attempts`
 redirect (with `Retry-After`) without touching storage or Argon2 at all. Both
 keys are checked (and thus recorded) on *every* attempt, matching the Rust
 comment "Check on every attempt — not just failures — to prevent evasion via
 unknown usernames"; unlike Rust (whose token bucket has no reset), a
-*successful* login resets the per-username key here so a user who mistypes
+*successful* login resets the (address, username) key here so a user who mistypes
 their password a few times isn't left throttled after finally getting it
 right — the per-IP key deliberately survives success (see
 services/ratelimit.py for the credential-stuffing rationale).
@@ -23,15 +23,16 @@ from __future__ import annotations
 import html
 import importlib.resources
 import logging
-import time
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from oauth2_server.client_address import client_address
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.security import verify_password_async
 from oauth2_server.services.auth import is_safe_redirect
 from oauth2_server.sessions import set_login
+from oauth2_server import clock
 
 logger = logging.getLogger(__name__)
 
@@ -109,14 +110,17 @@ async def login(request: Request):
     username = form.get("username", "")
     password = form.get("password", "")
 
-    # Rate-limit by IP and by username to block credential-stuffing, before
-    # ever touching storage. Checked in this order (IP first) so an
-    # already-exhausted IP short-circuits without also recording an attempt
-    # against the username key.
+    # Throttle per client address and per (client address, username) pair,
+    # before ever touching storage. The address comes from the shared
+    # `client_address` helper, so it honours `trust_proxy_headers` the same
+    # way the global limiter does. Neither key is shared across addresses
+    # for a given username, so attempts from other addresses never consume
+    # this caller's budget. Checked address-first so an already-exhausted
+    # address short-circuits without recording an attempt on the pair key.
     limiter = request.app.state.login_limiter
-    client_host = request.client.host if request.client else "unknown"
+    client_host = client_address(request, request.app.state.config.trust_proxy_headers)
     ip_key = f"login:ip:{client_host}"
-    user_key = f"login:user:{username}"
+    user_key = f"login:addr-user:{client_host}|{username}"
 
     retry_after = limiter.check(ip_key)
     if retry_after is None:
@@ -170,7 +174,7 @@ async def login(request: Request):
         request.app.state.metrics.oauth_failed_authentications.inc()
         return RedirectResponse("/auth/login?error=invalid_credentials", status_code=303)
 
-    # Successful login — clear only the per-username key. The user proved
+    # Successful login — clear only the (address, username) key. The user proved
     # themselves for their own account, so their earlier typos shouldn't keep
     # throttling them; the per-IP window must expire naturally, or an attacker
     # holding one valid credential could reset the IP throttle at will and
@@ -192,7 +196,7 @@ async def login(request: Request):
     # Only honor return_to when it was stamped by a recent redirect. A stale
     # (or unstamped) value from an abandoned request must not be replayed on
     # a later unrelated login (login-CSRF hardening).
-    fresh = isinstance(return_to_ts, int) and time.time() - return_to_ts <= RETURN_TO_MAX_AGE_SECS
+    fresh = isinstance(return_to_ts, int) and clock.time() - return_to_ts <= RETURN_TO_MAX_AGE_SECS
 
     target = return_to if fresh and is_safe_redirect(return_to) else "/"
     # RFC 9700 §4.11: 303 See Other for a POST-triggered redirect, so a

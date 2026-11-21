@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import math
-import time
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
@@ -28,6 +27,7 @@ from jwt.algorithms import RSAAlgorithm
 
 from oauth2_server.errors import OAuthError
 from oauth2_server.models import Client
+from oauth2_server import clock
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class JtiReplayGuard:
     """In-memory `(client_id, jti)` -> monotonic-expiry map guarding against
     client-assertion replay (RFC 7523 §3 / RFC 9700 §2.5).
 
-    Mirrors `DpopReplayStore` (services/dpop.py): `time.monotonic()` clock,
+    Mirrors `DpopReplayStore` (services/dpop.py): `clock.monotonic()` clock,
     a full sweep of expired entries on every call, and no external
     dependencies. **Single-process only** — see the module docstring.
     """
@@ -84,7 +84,7 @@ class JtiReplayGuard:
         `MAX_JTI_TTL_SECS`). Returns True when the pair is fresh, False when
         it has already been seen within its validity window."""
         ttl = min(max(float(ttl_secs), 0.0), float(MAX_JTI_TTL_SECS))
-        now = time.monotonic()
+        now = clock.monotonic()
         self._sweep_expired(now)
 
         key = f"{client_id}\0{jti}"
@@ -261,7 +261,7 @@ def _enforce_max_lifetime(claims: dict) -> None:
     `exp - now` bound. An `iat` more than `IAT_SKEW_SECS` in the future is
     rejected.
     """
-    now = time.time()
+    now = clock.time()
     exp = _claim_number(claims, "exp")
     too_long = OAuthError(
         "invalid_client",
@@ -295,7 +295,7 @@ def _enforce_jti_replay(client_id: str, claims: dict, guard: JtiReplayGuard) -> 
     if not isinstance(exp, (int, float)) or isinstance(exp, bool):
         raise OAuthError("invalid_client", "client_assertion missing exp claim")
 
-    ttl = max(float(exp) - time.time(), 0.0)
+    ttl = max(float(exp) - clock.time(), 0.0)
     try:
         fresh = guard.observe(client_id, jti, ttl)
     except JtiGuardFull as exc:

@@ -14,7 +14,7 @@ request).
 from __future__ import annotations
 
 import secrets
-import time
+from oauth2_server import clock
 from dataclasses import dataclass, field
 
 CONSENT_TTL_SECS = 600
@@ -55,7 +55,7 @@ class PendingConsent:
     dpop_jkt: str | None
     acr_values: str | None = None
     csrf_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
-    created_at: float = field(default_factory=time.monotonic)
+    created_at: float = field(default_factory=clock.monotonic)
 
 
 class ConsentStore:
@@ -63,7 +63,7 @@ class ConsentStore:
         self._entries: dict[str, PendingConsent] = {}
 
     def _sweep_expired(self) -> None:
-        now = time.monotonic()
+        now = clock.monotonic()
         for handle in [
             h for h, e in self._entries.items() if now - e.created_at >= CONSENT_TTL_SECS
         ]:

@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from oauth2_server.config import Config
 from oauth2_server.keys import KeySet
 from oauth2_server.models import Claims, Client, Token, TokenResponse
 from oauth2_server.security import decode_unverified_claims, encode_access_token
 from oauth2_server.storage.base import Storage
+from oauth2_server import clock
 
 
 class TokenService:
@@ -111,7 +112,7 @@ class TokenService:
                 access_token = encode_access_token(claims, config.jwt_secret)
 
         refresh_token = secrets.token_urlsafe(32) if with_refresh else None
-        expires_at = datetime.now(UTC) + timedelta(seconds=config.access_token_ttl_secs)
+        expires_at = clock.now() + timedelta(seconds=config.access_token_ttl_secs)
 
         issued_claims = decode_unverified_claims(access_token)
         issued_cnf = issued_claims.get("cnf")

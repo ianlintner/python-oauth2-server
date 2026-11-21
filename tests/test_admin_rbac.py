@@ -27,6 +27,7 @@ async def _seed_token(
     *,
     expires_at: datetime | None = None,
     revoked: bool = False,
+    user_id: str | None = None,
 ) -> Token:
     token = Token(
         id=uuid.uuid4().hex,
@@ -35,6 +36,7 @@ async def _seed_token(
         scope=scope,
         expires_at=expires_at or _future(),
         revoked=revoked,
+        user_id=user_id,
     )
     await storage.save_token(token)
     return token
@@ -108,6 +110,37 @@ async def test_bearer_with_admin_scope_and_allowlist_passes():
         assert resp.status_code == 200
         # migration-seeded "testuser" + default seeded user_rfc.
         assert resp.json()["total"] == 2
+
+
+async def test_bearer_user_token_from_allowlisted_client_is_not_admin():
+    async with build_client_app({"admin_client_ids": ["client1"]}) as client:
+        token = await _seed_token(client.storage, "client1", "admin", user_id="u1")
+        resp = await client.get(
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "insufficient_permissions"
+
+
+async def test_bearer_admin_user_token_from_allowlisted_client_passes():
+    async with build_client_app({"admin_client_ids": ["client1"]}) as client:
+        await seed_admin(client.storage)
+        token = await _seed_token(client.storage, "client1", "admin", user_id="admin1")
+        resp = await client.get(
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
+        )
+        assert resp.status_code == 200
+
+
+async def test_bearer_disabled_admin_user_token_403():
+    async with build_client_app({"admin_client_ids": ["client1"]}) as client:
+        admin = await seed_admin(client.storage)
+        await client.storage.update_user(admin.model_copy(update={"enabled": False}))
+        token = await _seed_token(client.storage, "client1", "admin", user_id="admin1")
+        resp = await client.get(
+            "/admin/api/users", headers={"Authorization": f"Bearer {token.access_token}"}
+        )
+        assert resp.status_code == 403
 
 
 async def test_bearer_admin_scope_non_allowlisted_client_403():
@@ -235,3 +268,25 @@ async def test_admin_email_update_marks_verified():
         assert resp.status_code == 200
         after = await client.storage.get_user_by_id(user.id)
         assert after.email_verified is True
+
+
+def test_user_is_admin_allowlist_requires_verified_email():
+    from oauth2_server.models import User
+    from oauth2_server.routes.admin.guard import user_is_admin
+
+    class _Cfg:
+        admin_emails = ["boss@example.test"]
+
+    def _user(**kw):
+        return User(
+            id="u1",
+            username="boss",
+            password_hash="x",
+            email="boss@example.test",
+            **kw,
+        )
+
+    assert user_is_admin(_user(email_verified=True), _Cfg()) is True
+    assert user_is_admin(_user(email_verified=False), _Cfg()) is False
+    assert user_is_admin(_user(email_verified=False, role="admin"), _Cfg()) is True
+    assert user_is_admin(_user(email_verified=True, enabled=False), _Cfg()) is False

@@ -22,6 +22,19 @@ class Config(BaseSettings):
     allowed_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
     access_tokens_opaque: bool = False
     dynamic_registration_enabled: bool = False
+    # RFC 7591 §3 intake policy for `POST /connect/register`. Registration is
+    # fail-closed: with the endpoint enabled, a caller must present the
+    # configured initial access token as a Bearer credential, unless the
+    # operator has explicitly opted in to anonymous registration. A token
+    # holder may also register the non-self-service grant types; anonymous
+    # callers are limited to `services/clients.py::SELF_REGISTRABLE_GRANT_TYPES`.
+    dynamic_registration_initial_access_token: str | None = None
+    dynamic_registration_anonymous: bool = False
+    # Scope values a registering client may request. Empty means "no scope
+    # may be requested", never "any scope".
+    self_registration_scopes: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["openid", "profile", "email", "offline_access", "read"]
+    )
     access_token_ttl_secs: int = 3600
     refresh_token_ttl_secs: int = 86400
     authorization_code_ttl_secs: int = 600
@@ -183,6 +196,13 @@ class Config(BaseSettings):
         # degenerate always-current window, so it's clamped to >= 1 rather
         # than rejected outright.
         return max(1, v)
+
+    @field_validator("self_registration_scopes", mode="before")
+    @classmethod
+    def _split_self_registration_scopes(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [t for t in v.replace(",", " ").split() if t]
+        return v
 
     @field_validator("allowed_origins", mode="before")
     @classmethod
