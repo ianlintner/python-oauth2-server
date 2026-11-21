@@ -52,6 +52,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 from oauth2_server.errors import OAuthError  # noqa: E402
+from oauth2_server.services.credential_storage import digest  # noqa: E402
 from oauth2_server.models import AuthorizationCode, Client, DeviceAuthorization, Token, User  # noqa: E402
 
 
@@ -259,7 +260,7 @@ async def test_token_save_fetch_revoke(storage):
     got = await storage.get_token_by_access_token("at-1")
     assert got is not None
     assert got.revoked is False
-    assert got.refresh_token == "rt"
+    assert got.refresh_token == digest("rt", "refresh")
 
     await storage.revoke_token("at-1")
     got = await storage.get_token_by_access_token("at-1")
@@ -271,7 +272,7 @@ async def test_get_token_by_refresh_token(storage):
     await storage.save_token(_token("at-refresh", refresh_token="rt-refresh"))
     got = await storage.get_token_by_refresh_token("rt-refresh")
     assert got is not None
-    assert got.access_token == "at-refresh"
+    assert got.access_token == digest("at-refresh", "access")
 
 
 async def test_get_token_by_id_round_trips(storage):
@@ -280,7 +281,7 @@ async def test_get_token_by_id_round_trips(storage):
     await storage.save_token(t)
     got = await storage.get_token_by_id(t.id)
     assert got is not None
-    assert got.access_token == "at-byid"
+    assert got.access_token == digest("at-byid", "access")
 
 
 async def test_two_tokens_with_null_refresh_token_both_save(storage):
@@ -392,7 +393,7 @@ async def test_authorization_code_round_trips_rar_details_and_dpop_bound_access_
     await storage.save_token(_token(dpop_bound_jwt))
     got_token = await storage.get_token_by_access_token(dpop_bound_jwt)
     assert got_token is not None
-    assert got_token.access_token == dpop_bound_jwt
+    assert got_token.access_token == digest(dpop_bound_jwt, "access")
 
 
 async def test_mark_authorization_code_used_is_atomic_single_claim(storage):
@@ -416,7 +417,7 @@ async def test_device_authorization_round_trip(storage):
 
     by_dc = await storage.get_device_authorization_by_device_code("dc1")
     by_uc = await storage.get_device_authorization_by_user_code("UC1")
-    assert by_dc is not None and by_dc.device_code == "dc1"
+    assert by_dc is not None and by_dc.device_code == digest("dc1", "device")
     assert by_uc is not None and by_uc.user_code == "UC1"
     assert by_dc.user_id is None
 

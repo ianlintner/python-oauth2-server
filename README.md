@@ -753,6 +753,10 @@ certificate: the binding check fails and the response is `{"active": false}`. Fo
 give the resource server an introspection client that authenticates with a secret or a JWT
 assertion, so the thumbprint header is free to carry the token's binding.
 
+## Credentials hashed at rest (breaking cutover)
+
+Access/refresh tokens, authorization and device codes and registration access tokens are stored as domain-separated SHA-256 digests; client secrets as Argon2id verifiers, with sealed (AES-256-GCM) key material kept only for the HMAC uses (`client_secret_jwt`, HS256 JAR/introspection). Existing databases must be converted by the operator with `python -m oauth2_server.cutover` — never at startup. See `docs/credential-cutover.md` for the procedure, rotation, already-issued JWT behaviour and rollback.
+
 ## Running
 
 ```bash

@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from oauth2_server.models import AuditLogEntry, DenylistEntry, Token
+from oauth2_server.services.credential_storage import digest
 from oauth2_server.storage.paging import ListQuery
 from tests.helpers import make_storage, seed_client, seed_user
 
@@ -258,7 +259,7 @@ async def test_get_token_by_id_round_trip():
 
     got = await storage.get_token_by_id(token.id)
     assert got is not None
-    assert got.access_token == token.access_token
+    assert got.access_token == digest(token.access_token, "access")  # digest at rest
 
 
 async def test_get_token_by_id_miss_returns_none():

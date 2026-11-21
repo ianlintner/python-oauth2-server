@@ -6,9 +6,13 @@ SQLAlchemy's `text()` uses named `:param` placeholders for both dialects, so
 query string works for both backends here.
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import column as sa_column
+from sqlalchemy import select as sa_select
+from sqlalchemy import table as sa_table
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -24,10 +28,20 @@ from oauth2_server.models import (
     TrustedIssuer,
     User,
 )
+from oauth2_server.services.credential_storage import (
+    SealError,
+    at_rest,
+    derive_seal_key,
+    digest,
+    unseal,
+)
 from oauth2_server.storage.migrations import run_migrations
 from oauth2_server.storage.paging import ListQuery, whitelist_col
 
+logger = logging.getLogger(__name__)
+
 _CLIENT_COLS = ", ".join(Client.model_fields.keys())
+_CLIENTS_TABLE = sa_table("clients", *(sa_column(c) for c in Client.model_fields))
 _USER_COLS = ", ".join(User.model_fields.keys())
 _TOKEN_COLS = ", ".join(Token.model_fields.keys())
 _AUTH_CODE_COLS = ", ".join(AuthorizationCode.model_fields.keys())
@@ -98,6 +112,7 @@ _CLIENT_UPDATE_COLS = [
     "enabled",
     "dpop_nonce_required",
     "resources",
+    "client_secret_key",
 ]
 
 
@@ -133,6 +148,24 @@ class SqlStorage:
             engine_kwargs["pool_pre_ping"] = True
         self._engine: AsyncEngine = create_async_engine(database_url, **engine_kwargs)
         self._migrations_dir = migrations_dir
+        self._seal_key: bytes | None = None
+
+    def configure_secret_key(self, master: str) -> None:
+        """Set the server key used to unseal HMAC client-secret key material
+        when a client row is loaded (see `services/credential_storage.py`)."""
+        self._seal_key = derive_seal_key(master)
+
+    def _unsealed(self, client: Client | None) -> Client | None:
+        if client is not None and client.client_secret_key and self._seal_key is not None:
+            try:
+                client.set_hmac_secret(
+                    unseal(client.client_secret_key, self._seal_key, client.client_id)
+                )
+            except SealError:
+                # Wrong server key or tampering: leave the HMAC secret empty
+                # so every HMAC use fails closed. Never log the value.
+                logger.warning("client %s: sealed key material not openable", client.client_id)
+        return client
 
     def _dump(self, model) -> dict:
         # mode="json" turns datetimes into ISO strings, which SQLite's TEXT
@@ -174,9 +207,17 @@ class SqlStorage:
 
     # --- Clients ---
 
+    def _dump_client(self, client: Client) -> dict:
+        data = self._dump(client)
+        if data.get("registration_access_token"):
+            data["registration_access_token"] = at_rest(data["registration_access_token"], "rat")
+        return data
+
     async def save_client(self, client: Client) -> None:
         async with self._engine.begin() as conn:
-            await conn.execute(text(_insert_stmt("clients", _CLIENT_COLS)), self._dump(client))
+            await conn.execute(
+                text(_insert_stmt("clients", _CLIENT_COLS)), self._dump_client(client)
+            )
 
     async def get_client(self, client_id: str) -> Client | None:
         async with self._engine.connect() as conn:
@@ -190,14 +231,14 @@ class SqlStorage:
                 .mappings()
                 .first()
             )
-        return Client(**row) if row else None
+        return self._unsealed(Client(**row)) if row else None
 
     async def update_client(self, client: Client) -> None:
         set_clause = ", ".join(f"{c} = :{c}" for c in _CLIENT_UPDATE_COLS)
         async with self._engine.begin() as conn:
             await conn.execute(
                 text(f"UPDATE clients SET {set_clause} WHERE client_id = :client_id"),
-                self._dump(client),
+                self._dump_client(client),
             )
 
     async def delete_client(self, client_id: str) -> None:
@@ -213,12 +254,44 @@ class SqlStorage:
                 {"e": enabled, "cid": client_id},
             )
 
-    async def set_client_secret(self, client_id: str, client_secret: str) -> None:
+    async def set_client_secret(
+        self, client_id: str, client_secret: str, client_secret_key: str = ""
+    ) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(
-                text("UPDATE clients SET client_secret = :s WHERE client_id = :cid"),
-                {"s": client_secret, "cid": client_id},
+                text(
+                    "UPDATE clients SET client_secret = :s, client_secret_key = :k "
+                    "WHERE client_id = :cid"
+                ),
+                {"s": client_secret, "k": client_secret_key, "cid": client_id},
             )
+
+    async def set_client_registration_access_token(
+        self, client_id: str, registration_access_token: str
+    ) -> None:
+        stored = at_rest(registration_access_token, "rat") if registration_access_token else ""
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE clients SET registration_access_token = :r WHERE client_id = :cid"),
+                {"r": stored, "cid": client_id},
+            )
+
+    async def resolve_registration_access_token(self, presented: str) -> Client | None:
+        if not presented:
+            return None
+        async with self._engine.connect() as conn:
+            row = (
+                (
+                    await conn.execute(
+                        sa_select(_CLIENTS_TABLE).where(
+                            _CLIENTS_TABLE.c.registration_access_token == digest(presented, "rat")
+                        )
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return self._unsealed(Client(**row)) if row else None
 
     async def list_all_clients(self) -> list[Client]:
         async with self._engine.connect() as conn:
@@ -231,7 +304,7 @@ class SqlStorage:
                 .mappings()
                 .all()
             )
-        return [Client(**r) for r in rows]
+        return [self._unsealed(Client(**r)) for r in rows]
 
     async def list_clients_page(self, q: ListQuery) -> tuple[list[Client], int]:
         col = whitelist_col(q.sort_by, _CLIENT_SORT_COLS)
@@ -262,7 +335,7 @@ class SqlStorage:
                 .mappings()
                 .all()
             )
-        return [Client(**r) for r in rows], total
+        return [self._unsealed(Client(**r)) for r in rows], total
 
     # --- Users ---
 
@@ -416,8 +489,12 @@ class SqlStorage:
     # --- Tokens ---
 
     async def save_token(self, token: Token) -> None:
+        data = self._dump(token)
+        data["access_token"] = at_rest(data["access_token"], "access")
+        if data.get("refresh_token"):
+            data["refresh_token"] = at_rest(data["refresh_token"], "refresh")
         async with self._engine.begin() as conn:
-            await conn.execute(text(_insert_stmt("tokens", _TOKEN_COLS)), self._dump(token))
+            await conn.execute(text(_insert_stmt("tokens", _TOKEN_COLS)), data)
 
     async def get_token_by_access_token(self, access_token: str) -> Token | None:
         async with self._engine.connect() as conn:
@@ -425,7 +502,7 @@ class SqlStorage:
                 (
                     await conn.execute(
                         text(f"SELECT {_TOKEN_COLS} FROM tokens WHERE access_token = :t"),
-                        {"t": access_token},
+                        {"t": digest(access_token, "access")},
                     )
                 )
                 .mappings()
@@ -439,7 +516,7 @@ class SqlStorage:
                 (
                     await conn.execute(
                         text(f"SELECT {_TOKEN_COLS} FROM tokens WHERE refresh_token = :t"),
-                        {"t": refresh_token},
+                        {"t": digest(refresh_token, "refresh")},
                     )
                 )
                 .mappings()
@@ -461,13 +538,20 @@ class SqlStorage:
             )
         return Token(**row) if row else None
 
+    async def revoke_token_by_id(self, token_id: str) -> None:
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE tokens SET revoked = :r WHERE id = :id"),
+                {"r": True, "id": token_id},
+            )
+
     async def revoke_token(self, token: str) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(
                 text(
-                    "UPDATE tokens SET revoked = :r WHERE access_token = :t OR refresh_token = :t"
+                    "UPDATE tokens SET revoked = :r WHERE access_token = :a OR refresh_token = :f"
                 ),
-                {"r": True, "t": token},
+                {"r": True, "a": digest(token, "access"), "f": digest(token, "refresh")},
             )
 
     async def revoke_token_family(self, family: str) -> int:
@@ -555,11 +639,10 @@ class SqlStorage:
     # --- Authorization codes ---
 
     async def save_authorization_code(self, code: AuthorizationCode) -> None:
+        data = self._dump(code)
+        data["code"] = at_rest(data["code"], "authcode")
         async with self._engine.begin() as conn:
-            await conn.execute(
-                text(_insert_stmt("authorization_codes", _AUTH_CODE_COLS)),
-                self._dump(code),
-            )
+            await conn.execute(text(_insert_stmt("authorization_codes", _AUTH_CODE_COLS)), data)
 
     async def get_authorization_code(self, code: str) -> AuthorizationCode | None:
         async with self._engine.connect() as conn:
@@ -567,7 +650,7 @@ class SqlStorage:
                 (
                     await conn.execute(
                         text(f"SELECT {_AUTH_CODE_COLS} FROM authorization_codes WHERE code = :c"),
-                        {"c": code},
+                        {"c": digest(code, "authcode")},
                     )
                 )
                 .mappings()
@@ -596,18 +679,17 @@ class SqlStorage:
         async with self._engine.begin() as conn:
             result = await conn.execute(
                 text("UPDATE authorization_codes SET used = :u WHERE code = :c AND used = :f"),
-                {"u": True, "c": code, "f": False},
+                {"u": True, "c": digest(code, "authcode"), "f": False},
             )
         return result.rowcount
 
     # --- Device authorizations (RFC 8628) ---
 
     async def save_device_authorization(self, d: DeviceAuthorization) -> None:
+        data = self._dump(d)
+        data["device_code"] = at_rest(data["device_code"], "device")
         async with self._engine.begin() as conn:
-            await conn.execute(
-                text(_insert_stmt("device_authorizations", _DEVICE_AUTH_COLS)),
-                self._dump(d),
-            )
+            await conn.execute(text(_insert_stmt("device_authorizations", _DEVICE_AUTH_COLS)), data)
 
     async def get_device_authorization_by_device_code(
         self, device_code: str
@@ -620,7 +702,7 @@ class SqlStorage:
                             f"SELECT {_DEVICE_AUTH_COLS} FROM device_authorizations "
                             "WHERE device_code = :dc"
                         ),
-                        {"dc": device_code},
+                        {"dc": digest(device_code, "device")},
                     )
                 )
                 .mappings()
@@ -680,16 +762,18 @@ class SqlStorage:
                     "UPDATE device_authorizations SET used = :u "
                     "WHERE device_code = :dc AND used = :f"
                 ),
-                {"u": True, "dc": device_code, "f": False},
+                {"u": True, "dc": digest(device_code, "device"), "f": False},
             )
         return result.rowcount
 
     async def expire_device_authorization(self, device_code: str) -> None:
+        # Admin action, not a redemption: accepts the plaintext code OR the
+        # stored digest the admin list displays (`at_rest` is idempotent).
         now_minus_1s = datetime.now(UTC) - timedelta(seconds=1)
         async with self._engine.begin() as conn:
             await conn.execute(
                 text("UPDATE device_authorizations SET expires_at = :e WHERE device_code = :dc"),
-                {"e": self._dt(now_minus_1s), "dc": device_code},
+                {"e": self._dt(now_minus_1s), "dc": at_rest(device_code, "device")},
             )
 
     async def list_all_device_authorizations(self) -> list[DeviceAuthorization]:
