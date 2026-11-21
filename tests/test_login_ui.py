@@ -176,6 +176,8 @@ async def test_device_verify_page_preserves_normal_user_code(client_app):
     resp = await client_app.get("/oauth/device/verify", params={"user_code": "WDJB-MJHT"})
     assert resp.status_code == 200
     assert 'value="WDJB-MJHT"' in resp.text
+
+
 async def test_login_post_without_origin_rejected(client_app):
     cross = await client_app.post(
         "/auth/login",
@@ -190,6 +192,8 @@ async def test_login_post_without_origin_rejected(client_app):
     )
     assert ok.status_code == 303
     assert ok.headers["location"] == "/"
+
+
 async def test_login_page_has_anti_framing_headers(client_app):
     resp = await client_app.get("/auth/login")
     assert resp.status_code == 200
@@ -204,22 +208,3 @@ async def test_global_security_headers_preserve_cacheable_metadata(client_app):
     assert jwks.status_code == 200
     assert jwks.headers["cache-control"] == "public, max-age=3600"
     assert jwks.headers["x-frame-options"] == "DENY"
-
-
-# --- Same-origin proof on POST /auth/login ---
-
-
-async def test_login_post_without_origin_rejected(client_app):
-    cross = await client_app.post(
-        "/auth/login",
-        data={"username": "user_rfc", "password": "password123"},
-        headers={"Origin": "https://evil.example"},
-    )
-    assert cross.status_code == 403, cross.text
-    ok = await client_app.post(
-        "/auth/login",
-        data={"username": "user_rfc", "password": "password123"},
-        headers={"Origin": "https://auth.example.com"},
-    )
-    assert ok.status_code == 303
-    assert ok.headers["location"] == "/"

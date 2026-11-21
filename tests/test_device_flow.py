@@ -356,6 +356,8 @@ def test_device_poll_tracker_sweeps_expired_entries(monkeypatch):
     # Entry swept: after 24h+1s of inactivity, a poll is treated as brand
     # new (allowed), not as a violation of stale state.
     assert tracker.observe("dev1", 5) is None
+
+
 async def test_device_verify_rejects_cross_origin_approve(client_app):
     resp = await start_device_flow(client_app)
     body = resp.json()
@@ -369,6 +371,8 @@ async def test_device_verify_rejects_cross_origin_approve(client_app):
     pending = await poll_device_token(client_app, body["device_code"])
     assert pending.status_code == 400
     assert pending.json()["error"] == "authorization_pending"
+
+
 async def test_device_verify_page_shows_client_scope_and_account(client_app):
     resp = await start_device_flow(client_app, scope="read")
     user_code = resp.json()["user_code"]
@@ -382,18 +386,3 @@ async def test_device_verify_page_shows_client_scope_and_account(client_app):
     assert "read" in body
     assert "<dt>Account</dt>" in body
     assert "user_rfc" in body
-
-
-async def test_device_verify_rejects_cross_origin_approve(client_app):
-    resp = await start_device_flow(client_app)
-    body = resp.json()
-    await login_session(client_app)
-    denied = await client_app.post(
-        "/oauth/device/verify",
-        data={"user_code": body["user_code"], "action": "approve"},
-        headers={"Origin": "https://evil.example"},
-    )
-    assert denied.status_code == 403, denied.text
-    pending = await poll_device_token(client_app, body["device_code"])
-    assert pending.status_code == 400
-    assert pending.json()["error"] == "authorization_pending"
