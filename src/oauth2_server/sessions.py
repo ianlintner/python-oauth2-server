@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from starlette.requests import Request
 from oauth2_server import clock
+from oauth2_server.csrf import session_csrf_token
 
 if TYPE_CHECKING:
     from oauth2_server.models import User
@@ -52,6 +53,11 @@ def set_login(
     request.session["email"] = user.email
     request.session["email_verified"] = user.email_verified
     request.session["username"] = user.username
+    # Mint the CSRF token with the login itself. Sessions live in the cookie,
+    # so a token first created while rendering a page would only exist in the
+    # cookie that response sets; a caller that keeps the login cookie would
+    # then submit a form whose token its session does not hold.
+    session_csrf_token(request)
     # RFC 9470 / OIDC Core §2: what this authentication event can attest to.
     # `acr` comes from `config.acr_values_supported[0]` and `amr` from the
     # route that authenticated the user — both server-chosen, never client

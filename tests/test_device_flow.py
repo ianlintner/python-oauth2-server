@@ -374,6 +374,23 @@ async def test_device_verify_post_requires_csrf(client_app):
     assert poll.json()["error"] == "authorization_pending"
 
 
+async def test_device_verify_token_is_held_by_the_login_cookie(client_app):
+    """A caller that keeps only the cookie from login (and never adopts cookies
+    set by the page response) must still be able to submit the rendered form."""
+    body = (await start_device_flow(client_app)).json()
+    await login_session(client_app)
+    login_cookies = dict(client_app.cookies)
+
+    page = await client_app.get("/oauth/device/verify", params={"user_code": body["user_code"]})
+    data = {**dict(_HIDDEN_RE.findall(page.text)), "action": "approve"}
+
+    client_app.cookies.clear()
+    for name, value in login_cookies.items():
+        client_app.cookies.set(name, value)
+    resp = await client_app.post("/oauth/device/verify", data=data)
+    assert resp.status_code == 200, resp.text
+
+
 async def test_device_verify_post_rejects_cross_origin_headers(client_app):
     body = (await start_device_flow(client_app)).json()
     await login_session(client_app)
