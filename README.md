@@ -24,7 +24,9 @@ remaining Rust feature set:
 - **Admin JSON API + RBAC** (`/admin/api/*`) — clients/users/tokens/devices CRUD, dashboard
   summary, capabilities, and a recent-events feed, all behind a dual-mode guard that accepts
   either an authenticated admin session (`role=admin` or an allowlisted email) or a bearer
-  token with `admin` scope from an allowlisted `client_id`.
+  token with `admin` scope from an allowlisted `client_id` (a user-delegated token additionally
+  requires its user to be a currently enabled admin, and `scope=admin` at `/oauth/authorize` is
+  refused with `invalid_scope` for non-admin users).
 - **Denylist + audit log** — a global `DenylistGuard` ASGI middleware blocks requests by
   source IP (fail-open on storage errors); every admin mutation and revocation writes a
   best-effort `audit_log` entry.
