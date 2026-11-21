@@ -18,7 +18,7 @@ from oauth2_server.config import Config
 from oauth2_server import clock, conformance_sut
 from oauth2_server.conformance import apply_seed, seed_from_env
 from oauth2_server.keys import seed_keyset
-from oauth2_server.middleware import _SECURITY_HEADERS, DenylistGuard, MetricsMiddleware
+from oauth2_server.middleware import apply_security_headers, DenylistGuard, MetricsMiddleware
 from oauth2_server.middleware_ratelimit import RateLimitMiddleware, ResilienceMiddleware
 from oauth2_server.routes.admin import admin_router
 from oauth2_server.routes.admin._util import UnsupportedMediaTypeError
@@ -184,9 +184,10 @@ def create_app(
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
-        path = request.url.path
-        if path.startswith(("/oauth", "/admin/api")):
-            response.headers.update(_SECURITY_HEADERS)
+        # Browser-facing headers apply to every response, including error
+        # paths and session/login pages. Route-specific values (e.g. the
+        # cacheable JWKS/discovery documents) are preserved.
+        apply_security_headers(response.headers)
         return response
 
     if config.allowed_origins:

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import MutableMapping
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -61,7 +62,25 @@ _SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": (
+        "default-src 'none'; frame-ancestors 'none'; form-action 'self'; "
+        "base-uri 'none'; style-src 'unsafe-inline'"
+    ),
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
 }
+
+
+def apply_security_headers(headers: MutableMapping[str, str]) -> None:
+    """Stamp the shared browser-facing headers without clobbering route values.
+
+    Some endpoints deliberately set their own `Cache-Control` (JWKS and
+    discovery metadata are cacheable) or their own `Content-Security-Policy`
+    (the authorize form_post builder uses a tighter policy). Only add headers
+    that are not already present.
+    """
+    for name, value in _SECURITY_HEADERS.items():
+        if name.lower() not in {key.lower() for key in headers}:
+            headers[name] = value
 
 
 class DenylistGuard:
@@ -101,10 +120,12 @@ class DenylistGuard:
                 logger.warning("denylist lookup failed for ip=%s", address, exc_info=True)
                 entry = None
             if entry is not None:
-                path = request.url.path
-                is_oauth_or_admin_api = path.startswith(("/oauth", "/admin/api"))
-                headers = _SECURITY_HEADERS if is_oauth_or_admin_api else None
-                response = JSONResponse(_ACCESS_DENIED_BODY, status_code=403, headers=headers)
+                # Browser-facing responses all carry the shared header set;
+                # a short-circuited 403 never reaches the app-level
+                # `security_headers` middleware, so stamp it here.
+                response = JSONResponse(
+                    _ACCESS_DENIED_BODY, status_code=403, headers=dict(_SECURITY_HEADERS)
+                )
                 await response(scope, receive, send)
                 return
 
