@@ -36,7 +36,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from sqlalchemy import column, select, table, text, update
+from sqlalchemy import column, inspect, select, table, text, update
 
 from oauth2_server.security import decode_unverified_claims
 from oauth2_server.services.credential_storage import (
@@ -151,14 +151,26 @@ def _tbl(name: str, *cols: str):
     return table(name, *(column(c) for c in cols))
 
 
+async def _sql_has_table(conn, name: str) -> bool:
+    return name in await conn.run_sync(lambda sc: inspect(sc).get_table_names())
+
+
 async def _sql_rows(conn, table: str, cols: str) -> list[dict]:
+    # A table missing from an unmigrated database has no rows to convert;
+    # reading must never create it.
+    if not await _sql_has_table(conn, table):
+        return []
     tbl = _tbl(table, *(c.strip() for c in cols.split(",")))
     stmt = select(*tbl.c)
     return [dict(r) for r in (await conn.execute(stmt)).mappings()]
 
 
-async def _sql_marker(conn) -> str | None:
-    await conn.execute(text(_STATE_DDL))
+async def _sql_marker(conn, *, create: bool = False) -> str | None:
+    """Cutover marker. Read-only unless ``create`` (confirmed convert only)."""
+    if create:
+        await conn.execute(text(_STATE_DDL))
+    elif not await _sql_has_table(conn, "cutover_state"):
+        return None
     row = (
         await conn.execute(
             text("SELECT version FROM cutover_state WHERE version = :v"), {"v": CUTOVER_VERSION}
@@ -184,7 +196,7 @@ async def sql_convert(storage, master: str, *, revoke_issued: bool) -> Report:
     """Convert every legacy SQL row in ONE transaction (all or nothing)."""
     key = derive_seal_key(master)
     async with storage._engine.begin() as conn:
-        await _sql_marker(conn)
+        await _sql_marker(conn, create=True)
         before = classify(
             await _sql_rows(conn, "clients", "client_secret, registration_access_token"),
             await _sql_rows(conn, "tokens", "access_token, refresh_token"),
@@ -354,8 +366,9 @@ async def _run(args: argparse.Namespace) -> int:
 
     config = Config()
     storage = create_storage(config)
-    await storage.init()
     try:
+        # `status` and an unconfirmed `convert` are strictly read-only: no
+        # init() (it runs SQL migrations / rewrites legacy Mongo timestamps).
         if args.command == "status":
             for line in (await status(storage)).lines():
                 print(line)
@@ -370,6 +383,9 @@ async def _run(args: argparse.Namespace) -> int:
                 + ". Back up the database first (see `rollback-plan`). Re-run with --yes."
             )
             return 2
+        # Confirmed by the operator: only now may pending migrations (the
+        # additive columns conversion writes to) be applied.
+        await storage.init()
         await convert(storage, config.jwt_secret, revoke_issued=args.revoke_issued)
         print("\nconverted. verify with `status` (expect 0 legacy).")
         return 0

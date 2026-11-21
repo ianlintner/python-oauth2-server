@@ -365,9 +365,72 @@ async def test_convert_keeps_cnf_and_audience_for_refresh_continuity():
     assert json.loads(row.audience) == ["https://rs"]
 
 
-def test_rollback_plan_and_cli_refuse_without_confirmation(capsys):
+def test_rollback_plan_prints_restore_guidance(capsys):
     assert cutover.main(["rollback-plan"]) == 0
     assert "RESTORING" in capsys.readouterr().out
+
+
+def _cli_env(monkeypatch, db_path):
+    monkeypatch.setenv("OAUTH2_DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("OAUTH2_JWT_SECRET", TEST_JWT_SECRET)
+
+
+def _tables(db_path) -> list[str]:
+    import sqlite3
+
+    con = sqlite3.connect(db_path)
+    try:
+        return [r[0] for r in con.execute("SELECT name FROM sqlite_master")]
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("argv", [["status"], ["convert"], ["convert", "--revoke-issued"]])
+def test_status_and_unconfirmed_convert_do_not_write(monkeypatch, tmp_path, capsys, argv):
+    # Unmigrated database: neither status nor a convert preview may run
+    # migrations or create cutover_state.
+    db = tmp_path / "unmigrated.db"
+    db.touch()
+    _cli_env(monkeypatch, db)
+    rc = cutover.main(argv)
+    assert rc == (0 if argv == ["status"] else 2)
+    assert "cutover marker: not applied" in capsys.readouterr().out
+    assert _tables(db) == []
+
+
+def test_confirmed_convert_migrates_then_marks(monkeypatch, tmp_path):
+    db = tmp_path / "fresh.db"
+    db.touch()
+    _cli_env(monkeypatch, db)
+    assert cutover.main(["convert", "--yes"]) == 0
+    assert "cutover_state" in _tables(db)
+
+
+def test_secret_verifier_requires_a_parseable_encoding():
+    real = secret_verifier("synthetic-secret")
+    assert is_secret_verifier(real)
+    # Prefix collisions are legacy plaintext, never "already converted".
+    assert not is_secret_verifier("argon2id-v1$plaintext-that-looks-tagged")
+    assert not is_secret_verifier("argon2id-v1$")
+    assert not is_secret_verifier("argon2id-v1$$argon2i$v=19$m=8,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2g")
+
+
+async def test_prefix_colliding_plaintext_secret_is_converted_not_skipped():
+    s = await _legacy_db()
+    colliding = "argon2id-v1$synthetic-plaintext-secret"
+    async with s._engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE clients SET client_secret = :v WHERE client_id = 'legacy'"),
+            {"v": colliding},
+        )
+    before = await cutover.status(s)
+    assert before.legacy["clients.client_secret"] >= 1
+    await cutover.convert(s, TEST_JWT_SECRET)
+    client = await s.get_client("legacy")
+    assert is_secret_verifier(client.client_secret)
+    assert verify_client_secret(client.client_secret, colliding)
+    assert client.hmac_secret() == colliding
+    assert (await cutover.status(s)).total_legacy == 0
 
 
 async def test_client_model_unchanged_columns(storage):

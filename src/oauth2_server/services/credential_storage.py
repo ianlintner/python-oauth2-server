@@ -38,7 +38,7 @@ import hashlib
 import hmac
 import os
 
-from argon2 import PasswordHasher
+from argon2 import PasswordHasher, Type, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -118,7 +118,17 @@ def secret_verifier(value: str) -> str:
 
 
 def is_secret_verifier(stored: str | None) -> bool:
-    return bool(stored) and stored.startswith(_SECRET_TAG)
+    """Whether ``stored`` is a well-formed verifier: the tag followed by a
+    parseable Argon2id encoding. A bare prefix is NOT enough: a legacy
+    plaintext secret that merely starts with the tag must still be classed
+    (and converted) as legacy rather than silently counted as converted."""
+    if not stored or not stored.startswith(_SECRET_TAG):
+        return False
+    try:
+        params = extract_parameters(stored[len(_SECRET_TAG) :])
+    except (InvalidHashError, ValueError):
+        return False
+    return params.type == Type.ID
 
 
 def is_legacy_secret(stored: str | None) -> bool:
