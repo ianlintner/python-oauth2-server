@@ -128,7 +128,7 @@ async def login(request: Request):
     if not isinstance(username, str):
         username = ""
     if not isinstance(password, str):
-        password = ""
+        password = ""  # nosec B105 - blanking a non-text form part, not a credential
 
     # Throttle per client address and per (client address, username) pair,
     # before ever touching storage. The address comes from the shared
