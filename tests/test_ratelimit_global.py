@@ -279,7 +279,7 @@ async def test_denylisted_ip_does_not_consume_quota():
             assert resp.json()["error"] == "access_denied"
 
 
-async def test_trust_proxy_headers_uses_xff_first_entry():
+async def test_trust_proxy_headers_uses_xff_last_entry():
     async with _build_client(
         {
             "rate_limit_enabled": True,
@@ -289,12 +289,31 @@ async def test_trust_proxy_headers_uses_xff_first_entry():
     ) as c:
         resp = await c.get("/oauth/nonexistent", headers={"X-Forwarded-For": "1.2.3.4, 5.6.7.8"})
         assert resp.status_code == 404
-        # Same underlying peer, different XFF first-entry -> independent bucket.
+        # Different address appended by the proxy -> independent bucket.
         resp = await c.get("/oauth/nonexistent", headers={"X-Forwarded-For": "9.9.9.9"})
         assert resp.status_code == 404
-        # Reusing the first XFF value again now hits the exhausted bucket.
-        resp = await c.get("/oauth/nonexistent", headers={"X-Forwarded-For": "1.2.3.4, 5.6.7.8"})
+        # Same right-most entry again hits the exhausted bucket.
+        resp = await c.get("/oauth/nonexistent", headers={"X-Forwarded-For": "7.7.7.7, 5.6.7.8"})
         assert resp.status_code == 429
+
+
+async def test_xff_leftmost_spoof_does_not_split_buckets():
+    async with _build_client(
+        {
+            "rate_limit_enabled": True,
+            "rate_limit_max_requests": 5,
+            "trust_proxy_headers": True,
+        }
+    ) as c:
+        statuses = []
+        for i in range(30):
+            resp = await c.get(
+                "/oauth/nonexistent",
+                headers={"X-Forwarded-For": f"198.51.100.{i}, 203.0.113.50"},
+            )
+            statuses.append(resp.status_code)
+        assert statuses[:5] == [404] * 5
+        assert statuses[5:] == [429] * 25
 
 
 async def test_ignores_xff_when_trust_proxy_headers_disabled():
@@ -425,3 +444,17 @@ async def test_invalid_client_penalty_from_public_client_check():
         )
         assert resp.status_code == 429
         assert resp.json()["error"] == "too_many_requests"
+
+
+async def test_invalid_client_penalty_applies_to_introspect_and_revoke():
+    async with build_client_app({"rate_limit_invalid_client_max_requests": 3}) as c:
+        for path in ("/oauth/introspect", "/oauth/revoke"):
+            statuses = []
+            for _ in range(6):
+                resp = await c.post(
+                    path,
+                    data={"token": "t"},
+                    auth=("penalty_" + path[-5:], "wrong"),
+                )
+                statuses.append(resp.status_code)
+            assert 429 in statuses, (path, statuses)

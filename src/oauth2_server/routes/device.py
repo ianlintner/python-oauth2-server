@@ -15,16 +15,17 @@ from __future__ import annotations
 
 import html
 import secrets
-import time
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
 
+from oauth2_server import clock
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.models import DeviceAuthorization
+from oauth2_server.routes.token import client_auth_failure_response
 from oauth2_server.services.clients import ClientService
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.sessions import load_session_user
@@ -63,7 +64,7 @@ async def device_authorization(request: Request) -> ORJSONResponse:
             form, request.headers.get("authorization"), mtls=mtls_headers(request, config)
         )
     except OAuthError as exc:
-        return oauth_error(exc.error, exc.description, exc.status)
+        return client_auth_failure_response(request, form, exc)
 
     if _DEVICE_GRANT_TYPE not in client.grant_type_list():
         return oauth_error("unauthorized_client", "client is not authorized for this grant type")
@@ -77,7 +78,7 @@ async def device_authorization(request: Request) -> ORJSONResponse:
     else:
         scope = client.scope
 
-    now = datetime.now(UTC)
+    now = clock.now()
     device = DeviceAuthorization(
         id=uuid.uuid4().hex,
         device_code=secrets.token_urlsafe(32),
@@ -140,7 +141,7 @@ async def device_verify_page(request: Request):
         # Timestamped identically to GET /oauth/authorize's pending redirect
         # (routes/authorize.py) so POST /auth/login's shared freshness check
         # (RETURN_TO_MAX_AGE_SECS) applies uniformly to both replay targets.
-        request.session["return_to_ts"] = int(time.time())
+        request.session["return_to_ts"] = int(clock.time())
         return RedirectResponse("/auth/login", status_code=302)
 
     user_code = request.query_params.get("user_code", "")
@@ -169,7 +170,7 @@ async def device_verify(request: Request) -> ORJSONResponse:
         or device.used
         or device.approved
         or device.denied
-        or device.expires_at <= datetime.now(UTC)
+        or device.expires_at <= clock.now()
     ):
         return ORJSONResponse({"error": "invalid_user_code"}, status_code=400)
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
+from oauth2_server import clock
 
 from oauth2_server.services.users import load_active_user
 
@@ -67,7 +67,7 @@ def set_login(
     # discarded rather than reused post-authentication.
     request.session.clear()
     request.session["user_id"] = user.id
-    request.session["auth_time"] = int(time.time())
+    request.session["auth_time"] = int(clock.time())
     # role/email/username feed the admin guard (routes/admin/guard.py) and
     # future admin-surface actor attribution — mirrors the Rust session,
     # which stores the same fields at login.

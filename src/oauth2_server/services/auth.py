@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from oauth2_server.config import Config
 from oauth2_server.models import AuthorizationCode, Client
 from oauth2_server.storage.base import Storage
+from oauth2_server import clock
 
 
 def is_safe_redirect(url: str | None) -> bool:
@@ -53,7 +54,7 @@ class AuthorizeService:
         claims_request: str | None = None,
         dpop_jkt: str | None = None,
     ) -> AuthorizationCode:
-        now = datetime.now(UTC)
+        now = clock.now()
         auth_code = AuthorizationCode(
             id=uuid.uuid4().hex,
             code=secrets.token_urlsafe(32),

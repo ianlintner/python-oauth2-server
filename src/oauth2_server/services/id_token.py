@@ -22,13 +22,13 @@ can attest to. They are omitted from the encoded JWT when `None`
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from oauth2_server.keys import KeySet
 from oauth2_server.models import Client, IdTokenClaims, User
 from oauth2_server.security import encode_id_token, half_hash
 from oauth2_server.services.claims_request import ClaimsSelection
+from oauth2_server import clock
 
 if TYPE_CHECKING:
     from oauth2_server.config import Config
@@ -74,7 +74,7 @@ def mint_id_token(
     is why it is applied last, over the scope-gated assignments above.
     """
     scope_set = set(scope.split())
-    now = int(datetime.now(UTC).timestamp())
+    now = int(clock.now().timestamp())
     claims = IdTokenClaims(
         iss=config.issuer,
         sub=user_id,

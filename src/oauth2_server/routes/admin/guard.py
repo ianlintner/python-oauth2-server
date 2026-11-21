@@ -22,6 +22,8 @@ from datetime import UTC, datetime
 from fastapi import Depends, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse, Response
 
+from oauth2_server.config import Config
+from oauth2_server.models import User
 from oauth2_server.sessions import load_session_user
 
 logger = logging.getLogger(__name__)
@@ -30,7 +32,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AdminActor:
     """The authenticated admin caller. Bearer callers have no session
-    identity, so both fields are empty strings — Rust parity."""
+    identity (client-only tokens), so both fields are empty strings — Rust
+    parity. User-delegated tokens carry the user's id and email."""
 
     actor_id: str
     actor_email: str
@@ -61,6 +64,18 @@ def client_id_in_allowlist(client_id: str, allowlist: list[str]) -> bool:
         return False
     allowed = {entry.strip() for entry in allowlist if entry.strip()}
     return trimmed in allowed
+
+
+def user_is_admin(user: User | None, config: Config) -> bool:
+    """True iff `user` exists, is enabled, and is an admin by role or by the
+    (already normalised) `admin_emails` allowlist. As on the session path, an
+    allow-list match only counts for an email the server established as
+    verified."""
+    if user is None or not user.enabled:
+        return False
+    if user.role == "admin":
+        return True
+    return user.email_verified and user.email.lower() in config.admin_emails
 
 
 def _invalid_token_error() -> AdminAuthError:
@@ -116,7 +131,17 @@ async def _authenticate_bearer(request: Request, token_value: str) -> AdminActor
     if not has_admin_scope or not allowlisted:
         raise _insufficient_scope_error()
 
-    return AdminActor(actor_id="", actor_email="")
+    # Client-only token (no resource owner): the allow-listed client itself is
+    # the caller. A user-delegated token additionally requires that the user
+    # is an enabled admin according to current storage state.
+    if token.user_id is None:
+        return AdminActor(actor_id="", actor_email="")
+
+    user = await storage.get_user_by_id(token.user_id)
+    if user is None or not user_is_admin(user, config):
+        raise _insufficient_permissions_error()
+
+    return AdminActor(actor_id=user.id, actor_email=user.email)
 
 
 async def _authenticate_session(request: Request) -> AdminActor:

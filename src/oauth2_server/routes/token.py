@@ -38,7 +38,7 @@ import hmac
 import logging
 import secrets
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from urllib.parse import unquote_plus
 
 from fastapi import APIRouter, Request
@@ -71,6 +71,7 @@ from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource_for_client
 from oauth2_server.services.tokens import TokenService
+from oauth2_server import clock
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ def _extract_client_id_for_penalty(form: dict, authorization_header: str | None)
 
 
 def _invalid_client_response(
-    request: Request, client_id: str | None, description: str
+    request: Request, client_id: str | None, description: str | None
 ) -> ORJSONResponse:
     """Build the `401 invalid_client` response for `client_id`, first
     consuming a token from the invalid_client penalty bucket (RFC 9700
@@ -169,6 +170,27 @@ def _invalid_client_response(
             }
             return ORJSONResponse(body, status_code=429, headers={"Cache-Control": "no-store"})
     return oauth_error("invalid_client", description)
+
+
+def client_auth_failure_response(
+    request: Request, form: dict, exc: OAuthError, *, authorization_header: str | None = None
+) -> ORJSONResponse:
+    """Error response for a failed `ClientService.authenticate` call.
+
+    Shared by every endpoint that authenticates a client (token,
+    introspection, revocation, PAR, device authorization) so they all spend
+    from the same per-`client_id` invalid_client penalty bucket — one budget
+    per client, not one per endpoint. Other errors pass through unchanged.
+    """
+    if exc.error == "invalid_client":
+        header = (
+            authorization_header
+            if authorization_header is not None
+            else request.headers.get("authorization")
+        )
+        client_id = _extract_client_id_for_penalty(form, header)
+        return _invalid_client_response(request, client_id, exc.description)
+    return oauth_error(exc.error, exc.description, exc.status)
 
 
 def _pkce_challenge(verifier: str) -> str:
@@ -248,7 +270,7 @@ def _with_dpop_nonce(
     meaningless to a request that was not proof-of-possession, and handing
     one to a client that never has to send one would only invite it to start.
     """
-    if client.dpop_nonce_required and dpop_validated is not None:
+    if issuer.required_for(client) and dpop_validated is not None:
         response.headers["DPoP-Nonce"] = issuer.issue()
     return response
 
@@ -363,7 +385,7 @@ async def token(request: Request) -> ORJSONResponse:
         except DpopError as exc:
             return oauth_error(exc.error, exc.description)
 
-        if client.dpop_nonce_required:
+        if request.app.state.dpop_nonce_issuer.required_for(client):
             try:
                 nonce_response = enforce_dpop_nonce(
                     dpop_validated, request.app.state.dpop_nonce_issuer
@@ -464,7 +486,7 @@ async def token(request: Request) -> ORJSONResponse:
         if auth_code.client_id != client.client_id:
             return oauth_error("invalid_grant", "authorization code was not issued to this client")
 
-        if auth_code.expires_at < datetime.now(UTC):
+        if auth_code.expires_at < clock.now():
             emit_event(
                 event_bus,
                 "authorization_code_expired",
@@ -652,7 +674,7 @@ async def token(request: Request) -> ORJSONResponse:
             return oauth_error("invalid_grant", "refresh token has been revoked")
 
         refresh_deadline = old_token.created_at + timedelta(seconds=config.refresh_token_ttl_secs)
-        if datetime.now(UTC) >= refresh_deadline:
+        if clock.now() >= refresh_deadline:
             return oauth_error("invalid_grant", "refresh token has expired")
 
         requested_scope = form.get("scope")
@@ -817,7 +839,7 @@ async def token(request: Request) -> ORJSONResponse:
                 headers={"Cache-Control": "no-store"},
             )
 
-        if device.expires_at <= datetime.now(UTC):
+        if device.expires_at <= clock.now():
             return oauth_error("expired_token", "device_code has expired")
 
         if device.denied:
@@ -942,7 +964,7 @@ async def token(request: Request) -> ORJSONResponse:
         if subject_row is None:
             return oauth_error("invalid_grant", "subject_token not found or expired")
 
-        if subject_row.revoked or subject_row.expires_at <= datetime.now(UTC):
+        if subject_row.revoked or subject_row.expires_at <= clock.now():
             return oauth_error("invalid_grant", "subject_token is expired or revoked")
 
         requested_scope = form.get("scope")

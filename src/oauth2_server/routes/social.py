@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import ORJSONResponse, PlainTextResponse, RedirectResponse
 
+from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import User
 from oauth2_server.security import hash_password_async
 from oauth2_server.services.auth import is_safe_redirect
@@ -67,6 +68,15 @@ router = APIRouter()
 
 def _error(error: str, description: str, status: int) -> ORJSONResponse:
     return ORJSONResponse({"error": error, "error_description": description}, status_code=status)
+
+
+async def _subject_denylisted(storage, subjects: tuple[tuple[str, str | None], ...]) -> bool:
+    for kind, value in subjects:
+        reason = await check_subject_denylisted(storage, kind, value or "")
+        if reason is not None:
+            logger.warning("social login blocked: %s is denylisted (reason=%s)", kind, reason)
+            return True
+    return False
 
 
 def _state_matches(presented: str, expected: str) -> bool:
@@ -263,6 +273,10 @@ async def social_callback(provider: str, request: Request):
 
     storage = request.app.state.storage
     username = f"{provider}:{userinfo.provider_user_id}"
+    # Same subject denylist as password login, checked on the identity the
+    # provider asserted before any account is looked up, linked or created.
+    if await _subject_denylisted(storage, (("username", username), ("email", userinfo.email))):
+        return _error("access_denied", "account is blocked", 403)
     user = await storage.get_user_by_username(username)
     if user is None:
         user = await _link_by_verified_email(config, storage, userinfo)
@@ -286,6 +300,11 @@ async def social_callback(provider: str, request: Request):
             role="user",
         )
         await storage.save_user(user)
+    elif await _subject_denylisted(
+        storage, (("user_id", user.id), ("username", user.username), ("email", user.email))
+    ):
+        # Linked/existing local account: check the account's own identifiers.
+        return _error("access_denied", "account is blocked", 403)
 
     # Read before set_login() clears the session (mirrors routes/login.py).
     return_to = request.session.get("return_to")

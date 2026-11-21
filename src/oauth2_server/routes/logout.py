@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import html
 import json
-import time
 import uuid
 from urllib.parse import quote, urlparse
 
@@ -28,6 +27,7 @@ from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
 
 from oauth2_server.keys import KeySet, rsa_public_key
 from oauth2_server.models import Client
+from oauth2_server import clock
 from oauth2_server.sessions import current_user_id
 
 router = APIRouter()
@@ -186,7 +186,7 @@ async def _dispatch_backchannel_logout(
     sub: str | None,
     sid: str | None,
 ) -> None:
-    now = int(time.time())
+    now = int(clock.time())
     claims: dict = {
         "iss": config.issuer,
         "aud": client.client_id,

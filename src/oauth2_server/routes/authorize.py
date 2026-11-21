@@ -73,10 +73,9 @@ import json
 import logging
 import re
 import secrets
-import time
 import uuid
-from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode
+from oauth2_server import clock
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
@@ -86,6 +85,7 @@ from oauth2_server.errors import OAuthError
 from oauth2_server.models import Grant
 from oauth2_server.services.consent import PendingConsent, scope_label
 from oauth2_server.services.clients import redirect_uri_matches
+from oauth2_server.routes.admin.guard import user_is_admin
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.services.auth import AuthorizeService, scope_is_subset
 from oauth2_server.services.authorize_response import (
@@ -508,7 +508,7 @@ async def authorize(request: Request):
             max_age_secs = None
         if max_age_secs is not None:
             auth_time = request.session.get("auth_time")
-            auth_expired = auth_time is None or (time.time() - auth_time) >= max_age_secs
+            auth_expired = auth_time is None or (clock.time() - auth_time) >= max_age_secs
 
     # prompt=none: the AS must not display any UI. If the caller isn't
     # authenticated, re-authentication would be forced, or the existing
@@ -532,8 +532,21 @@ async def authorize(request: Request):
         # Timestamp the pending redirect so POST /auth/login can reject a stale
         # return_to left over from an abandoned (possibly attacker-initiated)
         # authorization request instead of silently replaying it.
-        request.session["return_to_ts"] = int(time.time())
+        request.session["return_to_ts"] = int(clock.time())
         return RedirectResponse("/auth/login", status_code=302)
+
+    # --- 5a. `admin` scope requires the user to currently be an admin ---
+    if "admin" in scope.split():
+        authed_user = await storage.get_user_by_id(user_id)
+        if not user_is_admin(authed_user, config):
+            return _deliver_error(
+                response_mode,
+                redirect_uri,
+                "invalid_scope",
+                "requested scope exceeds the user's entitlement",
+                state,
+                config.issuer,
+            )
 
     # --- 5b. RFC 9470 step-up: `acr_values` must be satisfied by the session ---
     # Deliberately after the login gate above: an unauthenticated caller is
@@ -758,7 +771,7 @@ async def consent(request: Request):
         )
 
     # Approve: record the union of what was previously approved and this request.
-    now = datetime.now(UTC)
+    now = clock.now()
     existing = await storage.get_grant(user_id, client.client_id)
     merged_scope = set(entry.scope.split())
     if existing is not None:

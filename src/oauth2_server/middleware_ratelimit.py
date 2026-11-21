@@ -46,6 +46,7 @@ from fastapi.responses import ORJSONResponse
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from oauth2_server.client_address import client_address
 from oauth2_server.middleware import _SECURITY_HEADERS
 from oauth2_server.services.limiter import RateLimitResult
 from oauth2_server.services.resilience import CircuitBreaker, CircuitState, ConcurrencyLimiter
@@ -146,24 +147,15 @@ async def _send_rate_limit_rejected(
 
 
 def _rate_limit_key(request: Request, trust_proxy_headers: bool) -> str:
-    """Client IP is a spoofable proxy header (`X-Forwarded-For`, first
-    entry) only when `trust_proxy_headers` is enabled — otherwise the raw
-    ASGI peer address, falling back to the literal string `"unknown"` when
-    there is no peer at all (Rust parity: research doc `endpoints`, "fallback
-    'unknown'"). Unlike `DenylistGuard` (which always uses `request.client.
-    host` and never consults `X-Forwarded-For` at all — a deliberate,
-    documented divergence from Rust's unconditionally-XFF-trusting denylist
-    guard, see `middleware.py`), this mirrors Rust's OWN conditional gate on
-    `server.trust_proxy_headers` for rate limiting specifically.
+    """Global limiter key: the shared client address (`client_address.py`).
+
+    Gated on `server.trust_proxy_headers` like Rust. Deliberate divergence
+    from Rust: with the gate on, the right-most `X-Forwarded-For` entry (the
+    one the trusted proxy appended) is used rather than the left-most one,
+    which the client can set itself. Falls back to the peer address, then
+    to `"unknown"`.
     """
-    if trust_proxy_headers:
-        forwarded_for = request.headers.get("x-forwarded-for")
-        if forwarded_for:
-            first = forwarded_for.split(",")[0].strip()
-            if first:
-                return first
-    client = request.client
-    return client.host if client is not None else "unknown"
+    return client_address(request, trust_proxy_headers)
 
 
 class RateLimitMiddleware:
