@@ -325,6 +325,16 @@ class MongoStorage:
             },
         )
 
+    async def update_user_fields(
+        self, user_id: str, fields: dict, *, bump_session_epoch: bool = False
+    ) -> None:
+        if not set(fields) <= {"email", "email_verified", "enabled", "role"}:
+            raise ValueError("unsupported user field")
+        update: dict = {"$set": {**fields, "updated_at": _now_iso()}}
+        if bump_session_epoch:
+            update["$inc"] = {"session_epoch": 1}
+        await self.users.update_one({"id": user_id}, update)
+
     async def delete_user(self, user_id: str) -> None:
         # Rust's Mongo backend has no FK to a `users` row, so (unlike
         # SqlStorage) it never revokes/unlinks the user's tokens first —

@@ -428,17 +428,79 @@ async def test_admin_mutation_fans_out_to_events():
         assert event["metadata"]["username"] == "fanout"
 
 
-async def test_best_effort_revoke_failure_does_not_log_user_supplied_id(caplog) -> None:
+async def test_best_effort_revoke_failure_logs_nothing_user_or_exception_derived() -> None:
+    import io
+    import logging
+
     from oauth2_server.routes.admin.users import _best_effort_revoke_by_user
+
+    marker = "evil\nINJECTED-marker"
 
     class _Boom:
         async def revoke_tokens_by_user_id(self, user_id: str) -> None:
-            raise RuntimeError("storage down")
+            # A storage error that echoes the id / bound parameters.
+            raise RuntimeError(f"UPDATE tokens ... WHERE user_id = {user_id!r}")
 
-    marker = "evil\nINJECTED-user-id"
-    with caplog.at_level("ERROR"):
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    target = logging.getLogger("oauth2_server.routes.admin.users")
+    target.addHandler(handler)
+    try:
         await _best_effort_revoke_by_user(_Boom(), marker)
+    finally:
+        target.removeHandler(handler)
 
-    assert caplog.records
-    assert "INJECTED" not in caplog.text.split("Traceback")[0]
-    assert all(marker not in r.getMessage() for r in caplog.records)
+    output = stream.getvalue()  # includes any traceback the formatter appends
+    assert output.strip() == "best-effort user token revocation failed"
+    assert "INJECTED" not in output
+    assert "Traceback" not in output
+
+
+class _EpochRaceStorage:
+    """Proxy that runs `racer()` right after the first `get_user_by_id`."""
+
+    def __init__(self, inner, racer) -> None:
+        self._inner = inner
+        self._racer = racer
+        self._fired = False
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name != "get_user_by_id":
+            return attr
+
+        async def wrapped(user_id):
+            user = await attr(user_id)
+            if not self._fired:
+                self._fired = True
+                await self._racer()
+            return user
+
+        return wrapped
+
+
+async def test_put_does_not_overwrite_concurrent_epoch_or_password_change() -> None:
+    from tests.conftest import build_client_app
+    from tests.helpers import login_admin, seed_admin
+
+    async with build_client_app() as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+        storage = client.storage
+        before = await storage.get_user_by_id("admin1")
+
+        async def reset_password() -> None:
+            await storage.set_user_password_hash("admin1", "new-hash-from-reset")
+
+        # The reset lands between the PUT's read and its write.
+        client.app.state.storage = _EpochRaceStorage(storage, reset_password)
+        resp = await client.put("/admin/api/users/admin1", json={"email": "new@example.test"})
+        client.app.state.storage = storage
+        assert resp.status_code == 200
+
+        after = await storage.get_user_by_id("admin1")
+        # Both the reset and the PUT incremented the epoch; neither was lost.
+        assert after.session_epoch == before.session_epoch + 2
+        assert after.password_hash == "new-hash-from-reset"
+        assert after.email == "new@example.test"

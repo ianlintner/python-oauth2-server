@@ -57,6 +57,9 @@ _USER_UPDATE_COLS = [
     "updated_at",
 ]
 
+# Columns update_user_fields (the partial, epoch-safe admin update) may set.
+_USER_FIELD_UPDATE_COLS = frozenset({"email", "email_verified", "enabled", "role"})
+
 # Columns update_client is allowed to change — mirrors the Rust UPDATE query,
 # which deliberately excludes id/client_id/created_at/require_state.
 _CLIENT_UPDATE_COLS = [
@@ -324,6 +327,22 @@ class SqlStorage:
             await conn.execute(
                 text(f"UPDATE users SET {set_clause} WHERE id = :id"),
                 self._dump(user),
+            )
+
+    async def update_user_fields(
+        self, user_id: str, fields: dict, *, bump_session_epoch: bool = False
+    ) -> None:
+        cols = [c for c in fields if c in _USER_FIELD_UPDATE_COLS]
+        if len(cols) != len(fields):
+            raise ValueError("unsupported user field")
+        parts = [f"{c} = :{c}" for c in cols] + ["updated_at = :updated_at"]
+        if bump_session_epoch:
+            parts.append("session_epoch = session_epoch + 1")
+        params = {**fields, "updated_at": self._dt(datetime.now(UTC)), "uid": user_id}
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text(f"UPDATE users SET {', '.join(parts)} WHERE id = :uid"),
+                params,
             )
 
     async def delete_user(self, user_id: str) -> None:

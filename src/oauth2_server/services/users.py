@@ -8,16 +8,16 @@ propagates (the request fails closed) rather than being treated as "allowed".
 
 from __future__ import annotations
 
-from oauth2_server.middleware import check_subject_denylisted
+from oauth2_server.middleware import check_subject_denylisted_strict
 from oauth2_server.models import User
 
 
 async def ensure_user_active(storage, user: User | None) -> User | None:
     if user is None or not user.enabled:
         return None
-    if await check_subject_denylisted(storage, "username", user.username) is not None:
+    if await check_subject_denylisted_strict(storage, "username", user.username) is not None:
         return None
-    if await check_subject_denylisted(storage, "email", user.email) is not None:
+    if await check_subject_denylisted_strict(storage, "email", user.email) is not None:
         return None
     return user
 

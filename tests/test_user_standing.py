@@ -193,3 +193,106 @@ async def test_social_callback_rejects_disabled_linked_user():
         assert second.status_code == 403
         assert second.json()["error"] == "access_denied"
         assert "oauth2_session" not in second.headers.get("set-cookie", "")
+
+
+# --- Denylist lookup failure fails closed ---
+
+
+def _break_denylist_lookup(storage) -> None:
+    async def _broken(kind, value):
+        raise RuntimeError("storage is down")
+
+    storage.find_denylist_entry = _broken
+
+
+async def test_code_redemption_fails_closed_when_denylist_lookup_errors(client_app):
+    import pytest
+
+    code, verifier = await issue_code(client_app)
+    _break_denylist_lookup(client_app.storage)
+
+    with pytest.raises(RuntimeError):
+        await post_token(
+            client_app,
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": "https://a.example/cb",
+                "client_id": "client1",
+                "code_verifier": verifier,
+            },
+            basic_auth=("client1", "s3cret"),
+        )
+    assert await client_app.storage.list_all_tokens() == []
+
+
+async def test_session_validation_fails_closed_when_denylist_lookup_errors():
+    import pytest
+
+    async with build_client_app() as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+        _break_denylist_lookup(client.storage)
+
+        with pytest.raises(RuntimeError):
+            await client.get("/admin/api/users")
+
+
+# --- First social sign-in ---
+
+
+def _google_transport(client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "oauth2.googleapis.com":
+            return httpx.Response(200, json={"access_token": "tok"})
+        if request.url.host == "www.googleapis.com":
+            return httpx.Response(
+                200,
+                json={"id": "777", "email": "newbie@example.com", "verified_email": True},
+            )
+        return httpx.Response(404)
+
+    client.app.state.http_client = _mock_transport(handler)
+
+
+async def _social_callback(client):
+    login_resp = await client.get("/auth/login/google", follow_redirects=False)
+    state = _state_from_location(login_resp.headers["location"])
+    return await client.get(
+        "/auth/callback/google", params={"state": state, "code": "c"}, follow_redirects=False
+    )
+
+
+async def test_first_social_signin_denylisted_creates_no_account_or_session():
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as client:
+        _google_transport(client)
+        await client.storage.add_denylist_entry(
+            DenylistEntry(
+                id="d2",
+                kind="email",
+                value="newbie@example.com",
+                reason="test",
+                created_at=datetime.now(UTC),
+            )
+        )
+
+        resp = await _social_callback(client)
+        assert resp.status_code == 403
+        assert "oauth2_session" not in resp.headers.get("set-cookie", "")
+        assert await client.storage.get_user_by_username("google:777") is None
+
+
+async def test_first_social_signin_fails_closed_when_denylist_lookup_errors():
+    import pytest
+
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as client:
+        _google_transport(client)
+        _break_denylist_lookup(client.storage)
+
+        with pytest.raises(RuntimeError):
+            await _social_callback(client)
+        assert await client.storage.get_user_by_username("google:777") is None
