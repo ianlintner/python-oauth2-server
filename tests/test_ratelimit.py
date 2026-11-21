@@ -184,6 +184,60 @@ async def test_failed_login_response_is_unchanged(client_app):
         assert "set-cookie" not in resp.headers
 
 
+def _spy_denylist(monkeypatch, hit_kinds=()):
+    calls = []
+    real = login_routes.check_subject_denylisted
+
+    async def spy(storage, kind, value):
+        calls.append(kind)
+        if kind in hit_kinds:
+            return "test-reason"
+        return await real(storage, kind, value)
+
+    monkeypatch.setattr(login_routes, "check_subject_denylisted", spy)
+    return calls
+
+
+async def test_login_runs_both_denylist_lookups_for_unknown_user(client_app, monkeypatch):
+    calls = _spy_denylist(monkeypatch)
+    resp = await client_app.post("/auth/login", data={"username": "no_such_user", "password": "x"})
+    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+    assert calls == ["username", "email"]
+
+
+async def test_login_runs_both_denylist_lookups_after_username_hit(client_app, monkeypatch):
+    calls = _spy_denylist(monkeypatch, hit_kinds=("username",))
+    verify_calls = _spy_verify(monkeypatch)
+    resp = await client_app.post(
+        "/auth/login", data={"username": "user_rfc", "password": "password123"}
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+    assert calls == ["username", "email"]
+    assert len(verify_calls) == 1
+
+
+async def test_login_non_text_form_fields_fail_generically(client_app, monkeypatch):
+    calls = _spy_verify(monkeypatch)
+    files = {"username": ("u.txt", b"user_rfc"), "password": ("p.txt", b"password123")}
+    resp = await client_app.post("/auth/login", files=files)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+    assert "set-cookie" not in resp.headers
+
+    # Non-text password for a real username: still generic, never a success.
+    resp = await client_app.post(
+        "/auth/login",
+        data={"username": "user_rfc"},
+        files={"password": ("p.txt", b"password123")},
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+    assert "set-cookie" not in resp.headers
+    # Verification still ran once per attempt, on a string.
+    assert len(calls) == 2
+
+
 async def test_login_success_resets_user_key():
     """Success clears the per-username window (proven from a fresh IP, so the
     surviving per-IP window can't confound the assertion)."""

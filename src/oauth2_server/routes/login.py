@@ -120,6 +120,16 @@ async def login(request: Request):
     username = form.get("username", "")
     password = form.get("password", "")
 
+    # A multipart submission can carry a file part instead of text. Treat any
+    # non-text credential as an empty one that can never succeed, so it takes
+    # the same throttled, generic-failure path as any other bad attempt rather
+    # than reaching storage or the hasher as a non-string.
+    credentials_are_text = isinstance(username, str) and isinstance(password, str)
+    if not isinstance(username, str):
+        username = ""
+    if not isinstance(password, str):
+        password = ""
+
     # Throttle per client address and per (client address, username) pair,
     # before ever touching storage. The address comes from the shared
     # `client_address` helper, so it honours `trust_proxy_headers` the same
@@ -176,7 +186,13 @@ async def login(request: Request):
     # Generic error for unknown username, disabled account, bad password, and
     # a denylisted username/email alike, to avoid leaking account
     # existence/state. All operands are already computed (no short-circuit).
-    if user is None or not user.enabled or not password_ok or denylist_reason is not None:
+    if (
+        user is None
+        or not user.enabled
+        or not password_ok
+        or not credentials_are_text
+        or denylist_reason is not None
+    ):
         if denylist_reason is not None:
             logger.warning(
                 "login blocked: %s is denylisted (reason=%s)", denylist_kind, denylist_reason
