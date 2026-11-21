@@ -985,6 +985,15 @@ async def token(request: Request) -> ORJSONResponse:
                     "invalid_grant",
                     "subject_token is sender-constrained; present proof of the same key",
                 )
+            # Opaque access tokens cannot carry a `cnf` claim and no binding
+            # is persisted, so the exchanged token would silently be an
+            # unbound bearer token. Refuse rather than downgrade.
+            if config.access_tokens_opaque:
+                return oauth_error(
+                    "invalid_grant",
+                    "subject_token is sender-constrained and the issued token "
+                    "cannot preserve the binding",
+                )
             issue_cnf = subject_cnf
 
         # Audience: never wider than the subject token's. When the subject

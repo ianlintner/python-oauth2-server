@@ -475,6 +475,27 @@ async def test_exchange_drops_unbound_on_bound_subject_token(client_app):
     assert claims["cnf"]["jkt"] == jkt
 
 
+async def test_bound_subject_not_exchanged_for_unbound_opaque_token():
+    # A sender-constrained JWT still valid after a switch to opaque issuance
+    # must not be downgraded to an unbound bearer token.
+    async with build_client_app({"access_tokens_opaque": True}) as app:
+        await _seed_exchange_client(app)
+        proof, pub_jwk = make_dpop_proof(TOKEN_URL, "POST")
+        jkt = jwk_thumbprint(pub_jwk)
+        subject = _claims_jwt(cnf={"jkt": jkt}, aud=["tx_client"])
+        await _seed_subject_token(app, access_token=subject, client_id="tx_client")
+
+        resp = await _exchange_with_proof(app, subject, proof)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_grant"
+        assert "access_token" not in resp.json()
+
+        # An unbound subject token still exchanges fine in opaque mode.
+        await _seed_subject_token(app, access_token="plain", client_id="tx_client")
+        resp = await _exchange(app, "plain")
+        assert resp.status_code == 200, resp.text
+
+
 async def test_resource_outside_subject_audience_rejected(client_app):
     await _seed_exchange_client(client_app)
     subject = _claims_jwt(aud=["https://api.one.example"])
