@@ -3,9 +3,12 @@
 Ephemeral in-memory SQLite and synthetic values only.
 """
 
+import asyncio
 import json
+import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -376,13 +379,52 @@ def _cli_env(monkeypatch, db_path):
 
 
 def _tables(db_path) -> list[str]:
-    import sqlite3
-
     con = sqlite3.connect(db_path)
     try:
         return [r[0] for r in con.execute("SELECT name FROM sqlite_master")]
     finally:
         con.close()
+
+
+def _pre_v13_db(path):
+    """Populated SQLite database with the V1-V12 schema: no registration_access_token."""
+    import shutil
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from oauth2_server.storage.migrations import run_migrations
+
+    src = Path(__file__).resolve().parents[1] / "migrations" / "sql"
+    old = path.parent / "v12-migrations"
+    old.mkdir(exist_ok=True)
+    for f in src.glob("V*.sql"):
+        version = int(f.name.split("__")[0][1:])
+        if version <= 12:
+            shutil.copy(f, old / f.name)
+
+    async def build():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+        try:
+            await run_migrations(engine, old)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(build())
+    con = sqlite3.connect(path)
+    try:
+        now = datetime.now(UTC).isoformat()
+        con.execute(
+            "INSERT INTO clients (id, client_id, client_secret, redirect_uris, grant_types, "
+            "scope, name, created_at, updated_at) VALUES "
+            "('i1','legacy','legacy-secret','[]','[\"authorization_code\"]','read','n',?,?)",
+            (now, now),
+        )
+        con.commit()
+        cols = [r[1] for r in con.execute("PRAGMA table_info(clients)")]
+        assert "registration_access_token" not in cols
+    finally:
+        con.close()
+    return path
 
 
 @pytest.mark.parametrize("argv", [["status"], ["convert"], ["convert", "--revoke-issued"]])
@@ -406,6 +448,40 @@ def test_confirmed_convert_migrates_then_marks(monkeypatch, tmp_path):
     assert "cutover_state" in _tables(db)
 
 
+@pytest.mark.parametrize("argv", [["status"], ["convert"], ["convert", "--revoke-issued"]])
+def test_pre_v13_inventory_is_read_only_and_tolerates_missing_column(
+    monkeypatch, tmp_path, capsys, argv
+):
+    db = _pre_v13_db(tmp_path / "pre-v13.db")
+    before = _tables(db)
+    _cli_env(monkeypatch, db)
+    rc = cutover.main(argv)
+    assert rc == (0 if argv == ["status"] else 2)
+    out = capsys.readouterr().out
+    assert "clients.client_secret: 2 legacy" in out
+    assert "cutover marker: not applied" in out
+    assert _tables(db) == before
+    assert "cutover_state" not in before
+
+
+def test_confirmed_convert_from_pre_v13_schema(monkeypatch, tmp_path):
+    db = _pre_v13_db(tmp_path / "pre-v13-convert.db")
+    _cli_env(monkeypatch, db)
+    assert cutover.main(["convert", "--yes"]) == 0
+    assert "cutover_state" in _tables(db)
+    con = sqlite3.connect(db)
+    try:
+        cols = [r[1] for r in con.execute("PRAGMA table_info(clients)")]
+        assert "registration_access_token" in cols
+        stored = con.execute(
+            "SELECT client_secret FROM clients WHERE client_id = 'legacy'"
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert "legacy-secret" not in stored
+    assert is_secret_verifier(stored)
+
+
 def test_secret_verifier_requires_a_parseable_encoding():
     real = secret_verifier("synthetic-secret")
     assert is_secret_verifier(real)
@@ -413,6 +489,14 @@ def test_secret_verifier_requires_a_parseable_encoding():
     assert not is_secret_verifier("argon2id-v1$plaintext-that-looks-tagged")
     assert not is_secret_verifier("argon2id-v1$")
     assert not is_secret_verifier("argon2id-v1$$argon2i$v=19$m=8,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2g")
+    # A complete-looking header with malformed base64 salt/hash encoding is
+    # still legacy: extract_parameters() alone would accept it.
+    assert not is_secret_verifier(
+        "argon2id-v1$$argon2id$v=19$m=19456,t=2,p=1$!!!!!!!!!!!!!!!!$aGFzaGhhc2g"
+    )
+    assert not is_secret_verifier(
+        "argon2id-v1$$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$!!!!!!!!!!!!!!!!"
+    )
 
 
 async def test_prefix_colliding_plaintext_secret_is_converted_not_skipped():
@@ -430,6 +514,24 @@ async def test_prefix_colliding_plaintext_secret_is_converted_not_skipped():
     assert is_secret_verifier(client.client_secret)
     assert verify_client_secret(client.client_secret, colliding)
     assert client.hmac_secret() == colliding
+    assert (await cutover.status(s)).total_legacy == 0
+
+
+async def test_malformed_verifier_shaped_plaintext_is_converted_not_skipped():
+    s = await _legacy_db()
+    malformed = "argon2id-v1$$argon2id$v=19$m=19456,t=2,p=1$!!!!!!!!!!!!!!!!$aGFzaGhhc2g"
+    async with s._engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE clients SET client_secret = :v WHERE client_id = 'legacy'"),
+            {"v": malformed},
+        )
+    assert not is_secret_verifier(malformed)
+    before = await cutover.status(s)
+    assert before.legacy["clients.client_secret"] >= 1
+    await cutover.convert(s, TEST_JWT_SECRET)
+    client = await s.get_client("legacy")
+    assert is_secret_verifier(client.client_secret)
+    assert verify_client_secret(client.client_secret, malformed)
     assert (await cutover.status(s)).total_legacy == 0
 
 

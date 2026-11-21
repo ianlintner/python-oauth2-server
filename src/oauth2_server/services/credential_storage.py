@@ -37,6 +37,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 
 from argon2 import PasswordHasher, Type, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
@@ -117,15 +118,38 @@ def secret_verifier(value: str) -> str:
     return _SECRET_TAG + _HASHER.hash(value)
 
 
+# ``extract_parameters`` only counts base64 characters and parses the numeric
+# fields; it does not reject malformed alphabet characters. Check the complete
+# canonical v1 encoding so a legacy plaintext secret that merely looks like an
+# Argon2id header can never be misclassified as already converted.
+_VERIFIER_BODY = re.compile(
+    r"^\$argon2id\$v=(\d+)\$m=(\d+),t=(\d+),p=(\d+)\$([A-Za-z0-9+/]+={0,2})\$([A-Za-z0-9+/]+={0,2})$"
+)
+
+
 def is_secret_verifier(stored: str | None) -> bool:
     """Whether ``stored`` is a well-formed verifier: the tag followed by a
-    parseable Argon2id encoding. A bare prefix is NOT enough: a legacy
-    plaintext secret that merely starts with the tag must still be classed
+    parseable Argon2id encoding. A bare prefix or a malformed salt/hash is NOT
+    enough: a legacy plaintext secret with that shape must still be classed
     (and converted) as legacy rather than silently counted as converted."""
     if not stored or not stored.startswith(_SECRET_TAG):
         return False
+    body = stored[len(_SECRET_TAG) :]
+    match = _VERIFIER_BODY.fullmatch(body)
+    if match is None:
+        return False
+    version, memory, time_cost, parallelism, salt, digest_b64 = match.groups()
+    if (
+        int(version) != 19
+        or int(memory) <= 0
+        or int(time_cost) <= 0
+        or int(parallelism) <= 0
+        or len(_unb64url(salt)) < 8
+        or len(_unb64url(digest_b64)) < 16
+    ):
+        return False
     try:
-        params = extract_parameters(stored[len(_SECRET_TAG) :])
+        params = extract_parameters(body)
     except (InvalidHashError, ValueError):
         return False
     return params.type == Type.ID

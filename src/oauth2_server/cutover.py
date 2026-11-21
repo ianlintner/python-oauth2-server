@@ -155,12 +155,24 @@ async def _sql_has_table(conn, name: str) -> bool:
     return name in await conn.run_sync(lambda sc: inspect(sc).get_table_names())
 
 
+async def _sql_columns(conn, table_name: str) -> set[str]:
+    return {
+        col["name"] for col in await conn.run_sync(lambda sc: inspect(sc).get_columns(table_name))
+    }
+
+
 async def _sql_rows(conn, table: str, cols: str) -> list[dict]:
     # A table missing from an unmigrated database has no rows to convert;
-    # reading must never create it.
+    # reading must never create it. A column introduced by a later migration
+    # (e.g. registration_access_token before V13) is likewise absent: reading
+    # pre-migration inventory must not fail on it.
     if not await _sql_has_table(conn, table):
         return []
-    tbl = _tbl(table, *(c.strip() for c in cols.split(",")))
+    present = await _sql_columns(conn, table)
+    names = [c.strip() for c in cols.split(",") if c.strip() in present]
+    if not names:
+        return []
+    tbl = _tbl(table, *names)
     stmt = select(*tbl.c)
     return [dict(r) for r in (await conn.execute(stmt)).mappings()]
 
