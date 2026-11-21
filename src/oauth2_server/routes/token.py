@@ -65,7 +65,6 @@ from oauth2_server.services.dpop_nonce import DpopNonceIssuer, enforce_dpop_nonc
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server.services.id_token import mint_id_token
 from oauth2_server.services.jwt_bearer_grant import JWT_BEARER_GRANT, redeem_jwt_bearer_assertion
-from oauth2_server.services.limits import LimitError, check_depth
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource_for_client
@@ -944,6 +943,11 @@ async def token(request: Request) -> ORJSONResponse:
                 f"unsupported requested_token_type: only '{_ACCESS_TOKEN_TYPE_URN}' is supported",
             )
 
+        # An actor_token cannot be validated by this server, so it is
+        # rejected rather than ignored (RFC 8693 §2.1).
+        if form.get("actor_token") is not None:
+            return oauth_error("invalid_request", "actor_token is not supported")
+
         # subject_token is resolved by STORAGE LOOKUP, not JWT signature
         # verification — only a token this server issued and still holds
         # can be exchanged (Rust parity, research doc `key_behaviors`).
@@ -954,66 +958,95 @@ async def token(request: Request) -> ORJSONResponse:
         if subject_row.revoked or subject_row.expires_at <= clock.now():
             return oauth_error("invalid_grant", "subject_token is expired or revoked")
 
+        # The caller must be entitled to the subject token: either it is the
+        # client the token was issued to, or the (caller, subject client)
+        # pair is configured in `token_exchange_allowed_pairs`.
+        if subject_row.client_id != client.client_id and (
+            f"{client.client_id}->{subject_row.client_id}"
+            not in config.token_exchange_allowed_pairs
+        ):
+            return oauth_error("invalid_grant", "subject_token was not issued to this client")
+
+        # Issued scope is bounded by BOTH the subject token and the caller's
+        # own registered scope.
+        client_scope = client.scope or ""
         requested_scope = form.get("scope")
         if requested_scope:
-            if not scope_is_subset(requested_scope, subject_row.scope):
+            if not scope_is_subset(requested_scope, subject_row.scope) or not scope_is_subset(
+                requested_scope, client_scope
+            ):
                 return oauth_error("invalid_scope", "requested scope exceeds client permissions")
             scope = requested_scope
         else:
-            scope = subject_row.scope
+            registered = set(client_scope.split())
+            scope = " ".join(s for s in subject_row.scope.split() if s in registered)
+            if not scope:
+                return oauth_error("invalid_scope", "requested scope exceeds client permissions")
 
-        # RFC 8693 §4.1 delegation: `act` is ALWAYS embedded in the issued
-        # JWT for an exchanged token — this is impersonation happening
-        # regardless of whether the caller declared an `actor_token` — a
-        # fixed gap vs Rust, which never puts `act` in the JWT at all (see
-        # models.Claims.act's docstring). The response-body `act` member
-        # below stays Rust-conditional: present only when `actor_token` was
-        # supplied on this request (`actor_token`'s VALUE is never
-        # validated, matching Rust — its mere presence triggers the
-        # response member).
-        #
-        # Nested chains (divergence 55): when the SUBJECT token itself
-        # carries a dict `act` (i.e. it was produced by a prior exchange),
-        # that prior `act` is nested under this hop's:
-        # `{"sub": <this client_id>, "act": <prior act>}`. The prior `act`
-        # is read via `decode_unverified_claims` — same "already gated by
-        # the storage lookup above, only reading claims back out" trust
-        # model as every other unverified-claims read in this module — and
-        # is simply absent (`{}`) for an opaque subject token, which has no
-        # JWT claims to read; nesting then can't trigger and `act` stays
-        # flat. If the SAME client re-exchanges a token it already stamped
-        # (`prior["sub"] == client.client_id`), the chain does NOT nest —
-        # re-exchanging your own token isn't a new delegation hop. A chain
-        # nested deeper than 10 levels is rejected as `invalid_request`
-        # rather than embedded, via the shared `check_depth` guard.
-        act: dict = {"sub": client.client_id}
-        prior_act = decode_unverified_claims(subject_token).get("act")
-        if isinstance(prior_act, dict) and prior_act.get("sub") != client.client_id:
-            act["act"] = prior_act
-        try:
-            check_depth(act, name="act", max_depth=10)
-        except LimitError as exc:
-            return oauth_error("invalid_request", exc.description)
-        actor_token_present = form.get("actor_token") is not None
+        # Sender constraint: a bound subject token stays bound, and the
+        # caller must prove possession of the same key / certificate.
+        subject_cnf = _salvage_old_cnf(subject_token)
+        issue_cnf = cnf
+        if subject_cnf:
+            bound_jkt = subject_cnf.get("jkt")
+            bound_x5t = subject_cnf.get("x5t#S256")
+            presented_jkt = cnf.get("jkt") if cnf else None
+            presented_x5t = cnf.get("x5t#S256") if cnf else None
+            if isinstance(bound_jkt, str) and bound_jkt:
+                matches = isinstance(presented_jkt, str) and hmac.compare_digest(
+                    presented_jkt.encode("utf-8"), bound_jkt.encode("utf-8")
+                )
+            elif isinstance(bound_x5t, str) and bound_x5t:
+                matches = isinstance(presented_x5t, str) and hmac.compare_digest(
+                    presented_x5t.encode("utf-8"), bound_x5t.encode("utf-8")
+                )
+            else:
+                matches = False
+            if not matches:
+                return oauth_error(
+                    "invalid_grant",
+                    "subject_token is sender-constrained; present proof of the same key",
+                )
+            # Opaque access tokens cannot carry a `cnf` claim and no binding
+            # is persisted, so the exchanged token would silently be an
+            # unbound bearer token. Refuse rather than downgrade.
+            if config.access_tokens_opaque:
+                return oauth_error(
+                    "invalid_grant",
+                    "subject_token is sender-constrained and the issued token "
+                    "cannot preserve the binding",
+                )
+            issue_cnf = subject_cnf
 
-        # Impersonation model (Rust parity): issued token carries the
-        # SUBJECT token's user_id but the EXCHANGING client's client_id.
-        # Never a refresh token (`with_refresh=False`, no `token_family`).
-        # `cnf` binds THIS request's own DPoP proof (the shared pre-grant
-        # block above), not the subject token's binding.
+        # Audience: never wider than the subject token's. When the subject
+        # audience cannot be recovered (opaque token) no `resource` is
+        # accepted, since it cannot be checked.
         try:
             resource = validate_resource_for_client(client, config, form.get("resource"))
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
+        subject_audience = _salvage_old_aud(subject_token)
+        carried_audience: list[str] | None = None
+        if resource is not None:
+            if subject_audience is None or resource not in subject_audience:
+                return oauth_error(
+                    "invalid_target", "resource is not among the subject token's audiences"
+                )
+        elif subject_audience is not None:
+            carried_audience = subject_audience
 
+        # Impersonation model (Rust parity): issued token carries the
+        # SUBJECT token's user_id but the EXCHANGING client's client_id.
+        # Never a refresh token (`with_refresh=False`, no `token_family`).
+        # No `act` claim is issued: no actor is ever validated.
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             subject_row.user_id,
             scope,
             with_refresh=False,
-            cnf=cnf,
-            act=act,
+            cnf=issue_cnf,
             resource=resource,
+            audience=carried_audience,
         )
         request.app.state.metrics.oauth_token_issued_total.inc()
         emit_event(
@@ -1031,9 +1064,6 @@ async def token(request: Request) -> ORJSONResponse:
             "expires_in": token_response.expires_in,
             "scope": token_response.scope,
         }
-        if actor_token_present:
-            body["act"] = act
-
         response = ORJSONResponse(body)
         response.headers["Cache-Control"] = "no-store"
         return _with_dpop_nonce(

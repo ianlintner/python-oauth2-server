@@ -32,7 +32,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import jwt
-import pytest
 
 from oauth2_server.models import Token
 from oauth2_server.services.dpop import jwk_thumbprint
@@ -61,7 +60,7 @@ async def _seed_subject_token(
     access_token: str = "subject_token_value",
     scope: str = "read profile",
     user_id: str | None = "u1",
-    client_id: str = "other_client",
+    client_id: str = "tx_client",
     expires_in: int = 3600,
     revoked: bool = False,
 ) -> Token:
@@ -303,97 +302,6 @@ async def test_scope_narrowing_enforced(client_app):
     assert good_resp.json()["scope"] == "read"
 
 
-# --- act (delegation) semantics -------------------------------------------------
-
-
-async def test_act_embedded_when_actor_token_present(client_app):
-    await _seed_exchange_client(client_app)
-    await _seed_subject_token(client_app, access_token="subj_act_tok", scope="read")
-
-    resp = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": "subj_act_tok",
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-            "actor_token": "some-opaque-actor-token",
-            "actor_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client", "tx_secret"),
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-
-    # Response-body `act` mirrors Rust: present only when actor_token was
-    # supplied on this request.
-    assert body["act"] == {"sub": "tx_client"}
-
-    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
-    assert claims["act"] == {"sub": "tx_client"}
-
-
-async def test_act_embedded_in_jwt_even_without_actor_token(client_app):
-    """Fixed gap vs Rust (research doc gotchas): Rust's `act` claim never
-    enters any issued JWT — only the response body, and only when
-    `actor_token` was present. This port always embeds `act` in the JWT for
-    exchanged tokens (impersonation is happening regardless of whether the
-    caller declared an actor_token), while keeping the response-body `act`
-    member Rust-conditional (see `test_act_embedded_when_actor_token_present`
-    and `test_act_omitted_from_body_without_actor_token`)."""
-    await _seed_exchange_client(client_app)
-    await _seed_subject_token(client_app, access_token="subj_act_tok_2", scope="read")
-
-    resp = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": "subj_act_tok_2",
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client", "tx_secret"),
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert "act" not in body
-
-    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
-    assert claims["act"] == {"sub": "tx_client"}
-
-
-async def test_opaque_mode_response_body_act_survives_while_token_is_opaque():
-    # PHASE2-BACKLOG.md correction: opaque mode (`access_tokens_opaque`)
-    # drops `cnf`/`authorization_details` from BOTH the JWT and the response
-    # body, but `act` is the exception — `routes/token.py` computes `act`
-    # locally and sets `body["act"] = act` unconditionally (gated only on
-    # `actor_token` presence, not on opaque mode), so the response-body `act`
-    # member survives even though the access token itself is a bare opaque
-    # string with nowhere to carry the JWT claim.
-    async with build_client_app({"access_tokens_opaque": True}) as opaque_app:
-        await _seed_exchange_client(opaque_app)
-        await _seed_subject_token(opaque_app, access_token="subj_act_opaque_tok", scope="read")
-
-        resp = await post_token(
-            opaque_app,
-            {
-                "grant_type": EXCHANGE_URN,
-                "subject_token": "subj_act_opaque_tok",
-                "subject_token_type": ACCESS_TOKEN_TYPE,
-                "actor_token": "some-opaque-actor-token",
-                "actor_token_type": ACCESS_TOKEN_TYPE,
-            },
-            basic_auth=_basic("tx_client", "tx_secret"),
-        )
-
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["act"] == {"sub": "tx_client"}
-
-        # An opaque access token is a bare random string, not a JWT — so
-        # there is no JWT claim for `act` to have survived into.
-        with pytest.raises(jwt.PyJWTError):
-            jwt.decode(body["access_token"], options={"verify_signature": False})
-
-
 # --- DPoP binding on an exchanged token (review carry-over) --------------------
 
 
@@ -425,7 +333,7 @@ async def test_token_exchange_with_dpop_proof_binds_and_reports_dpop(client_app)
 
     claims = jwt.decode(body["access_token"], options={"verify_signature": False})
     assert claims["cnf"]["jkt"] == jwk_thumbprint(pub_jwk)
-    assert claims["act"] == {"sub": "tx_client"}
+    assert "act" not in claims
 
 
 # --- Cross-client introspection (Rust parity) -----------------------------------
@@ -437,7 +345,7 @@ async def test_exchanged_token_introspects_for_exchanging_client_only(client_app
         client_app,
         access_token="subj_introspect_tok",
         scope="read",
-        client_id="other_client",
+        client_id="tx_client",
     )
 
     exchange_resp = await post_token(
@@ -472,266 +380,173 @@ async def test_exchanged_token_introspects_for_exchanging_client_only(client_app
     assert cross_introspect.json()["active"] is False
 
 
-# --- Nested act delegation chains (RFC 8693 §4.1, divergence 55) --------------
+# --- Entitlement, scope, audience, sender constraint, actor_token ---------------
 
 
-async def test_two_hop_exchange_nests_act(client_app):
-    """Exchanging a token that was ITSELF produced by a prior exchange (by a
-    DIFFERENT client) nests the prior `act` under the new one: `{"sub": <new
-    client_id>, "act": {"sub": <prior client_id>}}`."""
+def _claims_jwt(**claims) -> str:
+    return jwt.encode(claims, "unused-test-key", algorithm="HS256")
+
+
+async def _exchange(client_app, subject_token: str, **extra):
+    return await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": subject_token,
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+            **extra,
+        },
+        basic_auth=_basic("tx_client", "tx_secret"),
+    )
+
+
+async def _exchange_with_proof(client_app, subject_token: str, proof: str):
+    return await post_token(
+        client_app,
+        {
+            "grant_type": EXCHANGE_URN,
+            "subject_token": subject_token,
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+        },
+        basic_auth=_basic("tx_client", "tx_secret"),
+        headers={"DPoP": proof},
+    )
+
+
+async def test_exchange_rejected_for_other_clients_subject_token(client_app):
     await _seed_exchange_client(client_app)
-    await seed_client(
-        client_app.storage,
-        client_id="tx_client2",
-        client_secret="tx_secret2",
-        grant_types=json.dumps([EXCHANGE_URN]),
-        scope="read profile openid",
-    )
-    await _seed_subject_token(client_app, access_token="subj_hop1", scope="read")
+    await _seed_subject_token(client_app, client_id="other_client")
 
-    first = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": "subj_hop1",
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client", "tx_secret"),
-    )
-    assert first.status_code == 200, first.text
-    first_token = first.json()["access_token"]
-
-    second = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": first_token,
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client2", "tx_secret2"),
-    )
-    assert second.status_code == 200, second.text
-    claims = jwt.decode(second.json()["access_token"], options={"verify_signature": False})
-    assert claims["act"] == {"sub": "tx_client2", "act": {"sub": "tx_client"}}
+    resp = await _exchange(client_app, "subject_token_value")
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_grant"
 
 
-async def test_three_hop_exchange_nests_twice(client_app):
-    """A third hop (by a third client) nests one level deeper still."""
+async def test_exchange_allowed_for_configured_pair():
+    async with build_client_app({"token_exchange_allowed_pairs": "tx_client->other_client"}) as app:
+        await _seed_exchange_client(app)
+        await _seed_subject_token(app, client_id="other_client")
+        resp = await _exchange(app, "subject_token_value")
+        assert resp.status_code == 200, resp.text
+
+        # The relation is exact: another issuing client is still refused.
+        await _seed_subject_token(app, access_token="third", client_id="other_client2")
+        resp = await _exchange(app, "third")
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_grant"
+
+
+async def test_exchange_scope_bound_by_caller_client_scope(client_app):
+    await _seed_exchange_client(client_app, scope="read")
+    await _seed_subject_token(client_app, client_id="tx_client", scope="read profile admin")
+
+    resp = await _exchange(client_app, "subject_token_value", scope="admin")
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_scope"
+
+    # Without an explicit scope the result is intersected with the caller's.
+    resp = await _exchange(client_app, "subject_token_value")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["scope"] == "read"
+
+
+async def test_exchange_drops_unbound_on_bound_subject_token(client_app):
     await _seed_exchange_client(client_app)
-    await seed_client(
-        client_app.storage,
-        client_id="tx_client2",
-        client_secret="tx_secret2",
-        grant_types=json.dumps([EXCHANGE_URN]),
-        scope="read profile openid",
-    )
-    await seed_client(
-        client_app.storage,
-        client_id="tx_client3",
-        client_secret="tx_secret3",
-        grant_types=json.dumps([EXCHANGE_URN]),
-        scope="read profile openid",
-    )
-    await _seed_subject_token(client_app, access_token="subj_hop2", scope="read")
+    proof, pub_jwk = make_dpop_proof(TOKEN_URL, "POST")
+    jkt = jwk_thumbprint(pub_jwk)
+    subject = _claims_jwt(cnf={"jkt": jkt}, aud=["tx_client"])
+    await _seed_subject_token(client_app, access_token=subject, client_id="tx_client")
 
-    first = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": "subj_hop2",
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client", "tx_secret"),
-    )
-    assert first.status_code == 200, first.text
+    # No proof at all.
+    resp = await _exchange(client_app, subject)
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_grant"
 
-    second = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": first.json()["access_token"],
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client2", "tx_secret2"),
-    )
-    assert second.status_code == 200, second.text
+    # A proof for a different key.
+    other_proof, _ = make_dpop_proof(TOKEN_URL, "POST")
+    resp = await _exchange_with_proof(client_app, subject, other_proof)
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_grant"
 
-    third = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": second.json()["access_token"],
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client3", "tx_secret3"),
-    )
-    assert third.status_code == 200, third.text
-    claims = jwt.decode(third.json()["access_token"], options={"verify_signature": False})
-    assert claims["act"] == {
-        "sub": "tx_client3",
-        "act": {"sub": "tx_client2", "act": {"sub": "tx_client"}},
-    }
+    # A proof for the bound key.
+    resp = await _exchange_with_proof(client_app, subject, proof)
+    assert resp.status_code == 200, resp.text
+    claims = jwt.decode(resp.json()["access_token"], options={"verify_signature": False})
+    assert claims["cnf"]["jkt"] == jkt
 
 
-async def test_same_client_reexchange_collapses(client_app):
-    """When the SAME client re-exchanges a token it already holds `act` for
-    (`prior["sub"] == client.client_id`), the chain does NOT nest — it stays
-    flat `{"sub": client_id}`."""
+async def test_bound_subject_not_exchanged_for_unbound_opaque_token():
+    # A sender-constrained JWT still valid after a switch to opaque issuance
+    # must not be downgraded to an unbound bearer token.
+    async with build_client_app({"access_tokens_opaque": True}) as app:
+        await _seed_exchange_client(app)
+        proof, pub_jwk = make_dpop_proof(TOKEN_URL, "POST")
+        jkt = jwk_thumbprint(pub_jwk)
+        subject = _claims_jwt(cnf={"jkt": jkt}, aud=["tx_client"])
+        await _seed_subject_token(app, access_token=subject, client_id="tx_client")
+
+        resp = await _exchange_with_proof(app, subject, proof)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"] == "invalid_grant"
+        assert "access_token" not in resp.json()
+
+        # An unbound subject token still exchanges fine in opaque mode.
+        await _seed_subject_token(app, access_token="plain", client_id="tx_client")
+        resp = await _exchange(app, "plain")
+        assert resp.status_code == 200, resp.text
+
+
+async def test_resource_outside_subject_audience_rejected(client_app):
     await _seed_exchange_client(client_app)
-    await _seed_subject_token(client_app, access_token="subj_same_client", scope="read")
+    subject = _claims_jwt(aud=["https://api.one.example"])
+    await _seed_subject_token(client_app, access_token=subject, client_id="tx_client")
 
-    first = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": "subj_same_client",
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client", "tx_secret"),
+    resp = await _exchange(client_app, subject, resource="https://api.evil.example")
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_target"
+
+    resp = await _exchange(client_app, subject, resource="https://api.one.example")
+    assert resp.status_code == 200, resp.text
+    claims = jwt.decode(
+        resp.json()["access_token"], options={"verify_signature": False, "verify_aud": False}
     )
-    assert first.status_code == 200, first.text
-
-    second = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": first.json()["access_token"],
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client", "tx_secret"),
-    )
-    assert second.status_code == 200, second.text
-    claims = jwt.decode(second.json()["access_token"], options={"verify_signature": False})
-    assert claims["act"] == {"sub": "tx_client"}
+    assert claims["aud"] in ("https://api.one.example", ["https://api.one.example"])
 
 
-async def test_over_depth_act_chain_rejected(client_app, monkeypatch):
-    """A subject token whose `act` claim already nests deeper than the
-    10-level limit is rejected with `invalid_request`, per
-    `services/limits.py::check_depth`. Crafting a genuinely 11-deep chain via
-    real exchanges would take 11 real hops/clients, so this test instead
-    monkeypatches `decode_unverified_claims` (as used by
-    `routes/token.py`'s token-exchange branch) to return a pre-built 11-deep
-    `act` for the subject token under test — an acceptable unit-ish
-    shortcut for a route-level depth-limit test."""
-    from oauth2_server.routes import token as token_route
-
+async def test_resource_rejected_when_subject_audience_unknown(client_app):
     await _seed_exchange_client(client_app)
-    await _seed_subject_token(client_app, access_token="subj_over_depth", scope="read")
+    await _seed_subject_token(client_app, client_id="tx_client")
 
-    deep_act: dict = {"sub": "client_0"}
-    for i in range(1, 11):
-        deep_act = {"sub": f"client_{i}", "act": deep_act}
+    resp = await _exchange(client_app, "subject_token_value", resource="https://api.one.example")
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_target"
 
-    real_decode = token_route.decode_unverified_claims
 
-    def fake_decode(token: str) -> dict:
-        if token == "subj_over_depth":
-            return {"act": deep_act}
-        return real_decode(token)
+async def test_actor_token_is_not_claimed_unverified(client_app):
+    await _seed_exchange_client(client_app)
+    await _seed_subject_token(client_app, client_id="tx_client")
 
-    monkeypatch.setattr(token_route, "decode_unverified_claims", fake_decode)
-
-    resp = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": "subj_over_depth",
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client", "tx_secret"),
-    )
+    resp = await _exchange(client_app, "subject_token_value", actor_token="garbage")
     assert resp.status_code == 400, resp.text
     assert resp.json()["error"] == "invalid_request"
 
 
-async def test_response_body_act_matches_jwt_claim(client_app):
-    """The response-body `act` (still conditional on `actor_token`) is the
-    SAME nested object as the JWT `act` claim, not just a flat `{"sub":
-    ...}`."""
+async def test_exchanged_token_carries_no_act_claim(client_app):
     await _seed_exchange_client(client_app)
-    await seed_client(
-        client_app.storage,
-        client_id="tx_client2",
-        client_secret="tx_secret2",
-        grant_types=json.dumps([EXCHANGE_URN]),
-        scope="read profile openid",
-    )
-    await _seed_subject_token(client_app, access_token="subj_body_match", scope="read")
+    await _seed_subject_token(client_app, client_id="tx_client", scope="read")
 
-    first = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": "subj_body_match",
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client", "tx_secret"),
-    )
+    resp = await _exchange(client_app, "subject_token_value")
+    assert resp.status_code == 200, resp.text
+    assert "act" not in resp.json()
+    claims = jwt.decode(resp.json()["access_token"], options={"verify_signature": False})
+    assert "act" not in claims
+
+
+async def test_reexchange_of_own_exchanged_token(client_app):
+    await _seed_exchange_client(client_app)
+    await _seed_subject_token(client_app, client_id="tx_client", scope="read")
+
+    first = await _exchange(client_app, "subject_token_value")
     assert first.status_code == 200, first.text
-
-    second = await post_token(
-        client_app,
-        {
-            "grant_type": EXCHANGE_URN,
-            "subject_token": first.json()["access_token"],
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-            "actor_token": "some-opaque-actor-token",
-            "actor_token_type": ACCESS_TOKEN_TYPE,
-        },
-        basic_auth=_basic("tx_client2", "tx_secret2"),
-    )
+    second = await _exchange(client_app, first.json()["access_token"])
     assert second.status_code == 200, second.text
-    body = second.json()
-    claims = jwt.decode(body["access_token"], options={"verify_signature": False})
-    assert body["act"] == claims["act"] == {"sub": "tx_client2", "act": {"sub": "tx_client"}}
-
-
-async def test_opaque_mode_act_split_unchanged():
-    """Opaque mode's documented body-survives/JWT-claim-dropped split
-    (`test_opaque_mode_response_body_act_survives_while_token_is_opaque`)
-    still holds now that nesting logic is present. An opaque access token is
-    a bare random string, so a SECOND exchange of it cannot recover a prior
-    `act` via `decode_unverified_claims` (it isn't a JWT — no claims to
-    read) — nesting simply doesn't trigger, and `act` stays the flat
-    `{"sub": <exchanging client_id>}` for the second hop too, exactly as for
-    a first hop."""
-    async with build_client_app({"access_tokens_opaque": True}) as opaque_app:
-        await _seed_exchange_client(opaque_app)
-        await seed_client(
-            opaque_app.storage,
-            client_id="tx_client2",
-            client_secret="tx_secret2",
-            grant_types=json.dumps([EXCHANGE_URN]),
-            scope="read profile openid",
-        )
-        await _seed_subject_token(opaque_app, access_token="subj_opaque_nest", scope="read")
-
-        first = await post_token(
-            opaque_app,
-            {
-                "grant_type": EXCHANGE_URN,
-                "subject_token": "subj_opaque_nest",
-                "subject_token_type": ACCESS_TOKEN_TYPE,
-            },
-            basic_auth=_basic("tx_client", "tx_secret"),
-        )
-        assert first.status_code == 200, first.text
-
-        second = await post_token(
-            opaque_app,
-            {
-                "grant_type": EXCHANGE_URN,
-                "subject_token": first.json()["access_token"],
-                "subject_token_type": ACCESS_TOKEN_TYPE,
-                "actor_token": "some-opaque-actor-token",
-                "actor_token_type": ACCESS_TOKEN_TYPE,
-            },
-            basic_auth=_basic("tx_client2", "tx_secret2"),
-        )
-        assert second.status_code == 200, second.text
-        body = second.json()
-        assert body["act"] == {"sub": "tx_client2"}
-
-        with pytest.raises(jwt.PyJWTError):
-            jwt.decode(body["access_token"], options={"verify_signature": False})
