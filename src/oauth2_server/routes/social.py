@@ -40,7 +40,7 @@ from fastapi.responses import ORJSONResponse, PlainTextResponse, RedirectRespons
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import User
 from oauth2_server.security import hash_password_async
-from oauth2_server.services.auth import is_safe_redirect
+from oauth2_server.services.auth import fresh_return_to
 from oauth2_server.services.social import (
     ALL_PROVIDERS,
     DISPLAY_NAMES,
@@ -55,6 +55,7 @@ from oauth2_server.services.social import (
     resolve_provider_config,
 )
 from oauth2_server.sessions import set_login
+from oauth2_server import clock
 
 if TYPE_CHECKING:
     from oauth2_server.config import Config
@@ -251,6 +252,8 @@ async def social_callback(provider: str, request: Request):
             http_client, rc, code, pkce_verifier if rc.pkce else None
         )
     except ProviderError as exc:
+        # `exc` no longer carries a provider response body — the service
+        # strips it. Its own diagnostic messages are safe to surface.
         logger.warning("social login token exchange failed for %s: %s", provider, exc)
         return _error("token_exchange_failed", str(exc), 400)
 
@@ -302,7 +305,7 @@ async def social_callback(provider: str, request: Request):
         return _error("access_denied", "account is blocked", 403)
 
     # Read before set_login() clears the session (mirrors routes/login.py).
-    return_to = request.session.get("return_to")
+    return_to_data = dict(request.session)
     # `amr=["fed"]`: the user was authenticated by an external identity
     # provider, not by a password presented here (OIDC Core §2 / RFC 8176).
     set_login(
@@ -312,5 +315,5 @@ async def social_callback(provider: str, request: Request):
         amr=["fed"],
     )
 
-    target = return_to if is_safe_redirect(return_to) else "/profile"
+    target = fresh_return_to(return_to_data, "/profile", now=clock.time())
     return RedirectResponse(target, status_code=302)
