@@ -16,11 +16,13 @@ import pytest
 
 from oauth2_server.models import Token
 from oauth2_server.services.client_assertion import JWT_BEARER_ASSERTION_TYPE
+from oauth2_server.services.credential_storage import verify_client_secret
 from tests.conftest import build_client_app
 from tests.helpers import (
     generate_rsa_keypair,
     login_admin,
     make_client_assertion,
+    reseed_client,
     seed_admin,
     seed_client,
 )
@@ -207,7 +209,8 @@ async def test_create_client_confidential_returns_secret_once():
         assert body["redirect_uris"] == []
 
         stored = await client.storage.get_client(body["client_id"])
-        assert stored.client_secret == body["client_secret"]
+        assert stored.client_secret != body["client_secret"]  # stored as a verifier
+        assert verify_client_secret(stored.client_secret, body["client_secret"])
 
 
 async def test_create_client_rejects_short_secret():
@@ -491,7 +494,8 @@ async def test_regenerate_client_secret_replaces_secret():
         assert body["client_secret"] != "s3cret"
 
         reloaded = await client.storage.get_client("client1")
-        assert reloaded.client_secret == body["client_secret"]
+        assert verify_client_secret(reloaded.client_secret, body["client_secret"])
+        assert reloaded.hmac_secret() == body["client_secret"]
 
 
 # --- private_key_jwt / key material ---
@@ -774,6 +778,78 @@ async def test_admin_update_rejects_blank_subject_dn():
         assert reloaded.tls_client_certificate_subject_dn == "CN=svc,O=Example"
 
 
+@pytest.mark.parametrize("dn_fields", [{"tls_client_certificate_subject_dn": ""}, {}])
+async def test_admin_rejects_tls_client_auth_without_subject_dn(dn_fields):
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "No DN",
+                "token_endpoint_auth_method": "tls_client_auth",
+                **dn_fields,
+            },
+        )
+        assert resp.status_code == 400, resp.text
+
+
+async def test_admin_update_cannot_leave_tls_client_auth_without_subject_dn():
+    async with build_client_app() as client:
+        await _login(client)
+        # Clearing the DN of a tls_client_auth client is refused.
+        create = await client.post(
+            "/admin/api/clients",
+            json={
+                "name": "mTLS Client",
+                "client_id": "admin-mtls-clear",
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_certificate_subject_dn": "CN=svc,O=Example",
+            },
+        )
+        assert create.status_code == 201, create.text
+        stored = await client.storage.get_client("admin-mtls-clear")
+        resp = await client.put(
+            f"/admin/api/clients/{stored.id}",
+            json={"tls_client_certificate_subject_dn": ""},
+        )
+        assert resp.status_code == 400, resp.text
+
+        # Switching a DN-less client to tls_client_auth is refused too.
+        other = await client.post(
+            "/admin/api/clients", json={"name": "Plain", "client_id": "admin-plain"}
+        )
+        assert other.status_code == 201, other.text
+        plain = await client.storage.get_client("admin-plain")
+        resp = await client.put(
+            f"/admin/api/clients/{plain.id}",
+            json={"token_endpoint_auth_method": "tls_client_auth"},
+        )
+        assert resp.status_code == 400, resp.text
+        # ...unless a DN is supplied in the same update.
+        resp = await client.put(
+            f"/admin/api/clients/{plain.id}",
+            json={
+                "token_endpoint_auth_method": "tls_client_auth",
+                "tls_client_certificate_subject_dn": "CN=svc,O=Example",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+
+async def test_admin_can_disable_legacy_tls_client_without_subject_dn():
+    async with build_client_app() as client:
+        await _login(client)
+        await reseed_client(
+            client,
+            token_endpoint_auth_method="tls_client_auth",
+            tls_client_certificate_subject_dn="",
+            client_secret="",
+        )
+        stored = await client.storage.get_client("client1")
+        resp = await client.put(f"/admin/api/clients/{stored.id}", json={"enabled": False})
+        assert resp.status_code == 200, resp.text
+
+
 async def test_admin_create_self_signed_without_keys_rejected():
     async with build_client_app() as client:
         await _login(client)
@@ -966,3 +1042,35 @@ async def test_client_resources_rejects_invalid_values():
             resp = await client.post("/admin/api/clients", json={"name": "R", "resources": bad})
             assert resp.status_code == 400, (bad, resp.text)
             assert resp.json()["error"] == "invalid_request"
+
+
+# --- Same-origin proof and JSON Content-Type ---
+
+
+async def test_admin_post_with_cross_origin_rejected():
+    async with build_client_app() as client:
+        await _login(client)
+        cross = await client.post(
+            "/admin/api/clients",
+            json={"name": "Cross"},
+            headers={"Origin": "https://evil.example"},
+        )
+        assert cross.status_code == 403, cross.text
+        ok = await client.post(
+            "/admin/api/clients",
+            json={"name": "Same"},
+            headers={"Origin": "https://auth.example.com"},
+        )
+        assert ok.status_code == 201, ok.text
+
+
+async def test_admin_json_body_requires_json_content_type():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            content='{"name":"x"}',
+            headers={"Content-Type": "text/plain", "Origin": "https://auth.example.com"},
+        )
+        assert resp.status_code == 415, resp.text
+        assert resp.json()["error"] == "invalid_request"

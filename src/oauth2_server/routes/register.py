@@ -24,7 +24,9 @@ from oauth2_server.services.clients import (
     is_valid_backchannel_logout_uri,
     is_valid_jwks_uri,
     is_valid_redirect_uri,
+    validate_subject_dn,
 )
+from oauth2_server.services.client_secrets import protect_client_secret
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server import clock
 
@@ -174,14 +176,14 @@ async def register_client(request: Request) -> ORJSONResponse:
     if reg.jwks is not None and reg.jwks_uri:
         return _registration_error("jwks and jwks_uri are mutually exclusive")
 
-    # An EXACTLY empty registered Subject DN is the RFC 8705 "any certificate
-    # the proxy vouched for" wildcard (`services/clients.py`). A
-    # whitespace-only one is a registrant mistake that reads like a real DN,
-    # so refuse it rather than storing a row one stray `.strip()` away from
-    # authenticating every certificate.
-    subject_dn = reg.tls_client_certificate_subject_dn
-    if subject_dn and not subject_dn.strip():
-        return _registration_error("tls_client_certificate_subject_dn must not be blank")
+    # RFC 8705 §2.1: a `tls_client_auth` client is identified by its
+    # registered Subject DN, so one must be supplied. Shape rules shared with
+    # the admin API live in `services/clients.py::validate_subject_dn`.
+    dn_error = validate_subject_dn(
+        reg.token_endpoint_auth_method, reg.tls_client_certificate_subject_dn
+    )
+    if dn_error is not None:
+        return _registration_error(dn_error)
 
     # `jwks_uri` is the one registrant-supplied URL this server dereferences
     # itself, so it gets a stricter rule than the redirect URIs above — see
@@ -200,11 +202,18 @@ async def register_client(request: Request) -> ORJSONResponse:
     client_id = secrets.token_urlsafe(16)
     client_secret = "" if is_public else secrets.token_urlsafe(32)
     registration_access_token = secrets.token_urlsafe(32)
+    # Persist only the verifier + sealed HMAC key; the plaintext secret and
+    # registration access token go back in this response once and are never
+    # stored (storage digests the registration access token on save).
+    secret_verifier_value, sealed_secret_key = await protect_client_secret(
+        client_secret, client_id, config.jwt_secret
+    )
 
     client = Client(
         id=uuid.uuid4().hex,
         client_id=client_id,
-        client_secret=client_secret,
+        client_secret=secret_verifier_value,
+        client_secret_key=sealed_secret_key,
         redirect_uris=json.dumps(reg.redirect_uris),
         grant_types=json.dumps(reg.grant_types),
         response_types=json.dumps(reg.response_types),

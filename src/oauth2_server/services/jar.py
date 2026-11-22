@@ -228,7 +228,7 @@ async def _decode_signed_jar(
 
     key: object
     if expected_alg == "HS256":
-        if not client.client_secret:
+        if not client.hmac_secret():
             # A confidential auth method with no stored secret would hand
             # `jwt.decode` an empty HMAC key, i.e. a signature anyone can
             # forge. Rust has the same hole; refuse instead of verifying
@@ -236,7 +236,7 @@ async def _decode_signed_jar(
             raise OAuthError(
                 "invalid_request", f"Client has no client_secret registered for {method} JAR"
             )
-        key = client.client_secret
+        key = client.hmac_secret()
     else:
         jwks = await resolve_client_jwks(client, jwks_cache)
         try:

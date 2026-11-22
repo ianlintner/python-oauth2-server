@@ -142,6 +142,9 @@ Phase 3a (see `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` and `docs/P
 |---|---|---|
 | `OAUTH2_LOGIN_RATE_LIMIT_ATTEMPTS` | `10` | Max `POST /auth/login` attempts allowed per window, per IP and per username (either exhausted → blocked). |
 | `OAUTH2_LOGIN_RATE_LIMIT_WINDOW_SECS` | `900` | Fixed-window duration (seconds) for the login rate limiter. |
+| `OAUTH2_SESSION_MAX_AGE_SECS` | `28800` | Lifetime of the session cookie. Sessions are also re-checked against the stored user on each request. |
+
+SQL deployments must apply migration `V27` (adds `users.session_epoch`). Sessions issued before this change carry no epoch, so users sign in once more after upgrading.
 
 ## Phase 3b: DPoP, RAR, Token Exchange
 
@@ -652,8 +655,11 @@ input-validation gaps the Phase 3b/4a/4b backlogs recorded:
   once. TLS terminates at the proxy: the certificate reaches the app as
   `X-Client-Cert-Thumbprint` (base64url SHA-256 of the DER certificate) and `X-SSL-Client-S-DN`.
   `tls_client_auth` compares the presented Subject DN byte-exactly against the client's registered
-  `tls_client_certificate_subject_dn` (an empty registered DN accepts any certificate the proxy
-  vouched for); `self_signed_tls_client_auth` requires the thumbprint to match a key in the
+  `tls_client_certificate_subject_dn`. A client with no registered DN does NOT authenticate
+  (divergence 66 — Rust accepts any certificate in that case; **breaking change** for existing
+  `tls_client_auth` rows with an empty DN: set one via `PUT /admin/api/clients/{id}`; affected
+  clients are logged at startup). `tls_client_auth_san_dns`, `_san_uri` and multiple DNs are not
+  supported; `self_signed_tls_client_auth` requires the thumbprint to match a key in the
   client's registered JWKS — a JWK whose `x5t#S256` member equals the header value (divergence 48;
   Rust accepts any thumbprint, which makes that method authenticate nothing). Both methods are
   settable through dynamic registration and the admin API, and discovery advertises
@@ -728,6 +734,15 @@ otherwise (divergence 47 — Rust reads them unconditionally, so anyone who can 
 directly could forge client authentication and a `cnf` binding). Set it only when a
 terminating proxy strips both headers from inbound requests and re-adds them itself.
 
+`OAUTH2_TRUSTED_PROXY_CIDRS` (comma-separated CIDRs, default empty) additionally restricts which
+TCP peers those headers are believed from: when set, a request from any other address has both
+headers ignored (divergence 67). Empty keeps the previous behavior, so set it to the proxy's
+address range whenever the app is reachable by anything other than the proxy. The check is made
+against the real socket peer: `python -m oauth2_server` starts uvicorn with `proxy_headers=False`
+so uvicorn does not replace the peer address with a forwarded one (forwarded addresses are
+derived by the app itself). If you run the app under your own uvicorn invocation, pass
+`--no-proxy-headers` as well.
+
 ### Phase 4d additions
 
 - `OAUTH2_MTLS_ENDPOINT_BASE_URL` — optional base URL of an mTLS-terminating host. With
@@ -751,6 +766,10 @@ authenticating with its OWN certificate cannot introspect a token bound to a DIF
 certificate: the binding check fails and the response is `{"active": false}`. For that topology,
 give the resource server an introspection client that authenticates with a secret or a JWT
 assertion, so the thumbprint header is free to carry the token's binding.
+
+## Credentials hashed at rest (breaking cutover)
+
+Access/refresh tokens, authorization and device codes and registration access tokens are stored as domain-separated SHA-256 digests; client secrets as Argon2id verifiers, with sealed (AES-256-GCM) key material kept only for the HMAC uses (`client_secret_jwt`, HS256 JAR/introspection). Existing databases must be converted by the operator with `python -m oauth2_server.cutover` — never at startup. See `docs/credential-cutover.md` for the procedure, rotation, already-issued JWT behaviour and rollback.
 
 ## Running
 

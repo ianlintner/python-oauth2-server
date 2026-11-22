@@ -35,6 +35,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import json
 import logging
 import secrets
 import uuid
@@ -47,9 +48,10 @@ from fastapi.responses import ORJSONResponse
 from oauth2_server.config import Config
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.keys import KeySet
-from oauth2_server.models import Client, User
+from oauth2_server.models import Client, Token, User
 from oauth2_server.security import decode_unverified_claims
 from oauth2_server.services.auth import scope_is_subset
+from oauth2_server.services.users import load_active_user
 from oauth2_server.services.claims_request import ClaimsSelection, select_id_token_claims
 from oauth2_server.services.client_assertion import unverified_assertion_subject
 from oauth2_server.services.clients import ClientService
@@ -215,40 +217,39 @@ def _pkce_matches(computed_challenge: str, stored_challenge: str) -> bool:
     )
 
 
-def _salvage_old_cnf(access_token: str) -> dict | None:
+def _salvage_old_cnf(old_token: Token) -> dict | None:
     """Refresh-grant cnf carry-over (RFC 9449 parity gap, documented in
     research-dpop.md `key_behaviors`: the refresh grant "does not demand or
-    verify a fresh DPoP proof on the refresh request"). Decodes the OLD
-    access token WITHOUT verifying its signature and returns its `cnf` claim
-    verbatim, so a DPoP-bound token stays bound across a refresh with no
-    fresh proof required. Returns `None` for an opaque old access token (not
-    a JWT — it decodes to no claims) or a JWT with no (or non-dict) `cnf`
-    claim.
+    verify a fresh DPoP proof on the refresh request"). Returns the `cnf`
+    claim recorded on the OLD token row at issuance (`Token.cnf`; the stored
+    access token is only a digest, so it can no longer be decoded), so a
+    DPoP-bound token stays bound across a refresh with no fresh proof
+    required. Returns `None` for an opaque old access token or a token with
+    no (or non-dict) `cnf`, including rows predating the column.
     """
-    old_claims = decode_unverified_claims(access_token)
-    cnf = old_claims.get("cnf")
+    try:
+        cnf = json.loads(old_token.cnf) if old_token.cnf else None
+    except ValueError:
+        return None
     return cnf if isinstance(cnf, dict) else None
 
 
-def _salvage_old_aud(access_token: str) -> list[str] | None:
+def _salvage_old_aud(old_token: Token) -> list[str] | None:
     """The audience the OLD access token was issued for, or `None`.
 
     Divergence 60 needs the originally granted audience set to enforce
-    RFC 8707 §2.2 on refresh. It is read out of the old access token's `aud`
-    claim WITHOUT verifying the signature — the token came straight out of
-    this server's own storage row, and the alternative (a dedicated column)
-    would be a schema change this repo does not own.
+    RFC 8707 §2.2 on refresh. It is the `Token.audience` list recorded on the
+    row at issuance (the stored access token is only a digest).
 
-    `None` means "unknown", which is the honest answer for an opaque access
-    token (a bare random string with no claims at all) and for a JWT with no
-    usable `aud`; callers then keep the pre-divergence behavior. A bare
-    string `aud` — how a single audience is serialized, Rust serde parity —
-    is normalized to a one-element list.
+    `None` means "unknown" (an opaque access token, a JWT with no usable
+    `aud`, a row predating the column); callers then keep the pre-divergence
+    behavior.
     """
-    aud = decode_unverified_claims(access_token).get("aud")
-    if isinstance(aud, str):
-        return [aud]
-    if isinstance(aud, list) and all(isinstance(entry, str) for entry in aud) and aud:
+    try:
+        aud = json.loads(old_token.audience) if old_token.audience else None
+    except ValueError:
+        return None
+    if isinstance(aud, list) and aud and all(isinstance(entry, str) for entry in aud):
         return list(aud)
     return None
 
@@ -551,7 +552,7 @@ async def token(request: Request) -> ORJSONResponse:
             except RarError as exc:
                 return oauth_error(exc.error, exc.description)
 
-        claimed = await storage.mark_authorization_code_used(auth_code.code)
+        claimed = await storage.mark_authorization_code_used(code_value)
         if claimed == 0:
             # Lost the race to a concurrent request that already claimed this code.
             if auth_code.token_family:
@@ -595,6 +596,9 @@ async def token(request: Request) -> ORJSONResponse:
         # validated at /oauth/authorize) — a `resource` form value on this
         # request is deliberately ignored rather than allowed to narrow it
         # (Rust parity; RFC 8707 §2.2 would permit narrowing).
+        if await load_active_user(storage, auth_code.user_id) is None:
+            return oauth_error("invalid_grant", "authorization code is no longer valid")
+
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             auth_code.user_id,
@@ -627,7 +631,7 @@ async def token(request: Request) -> ORJSONResponse:
                     token_response.access_token,
                     keyset,
                     nonce=auth_code.nonce,
-                    code=auth_code.code,
+                    code=code_value,
                     claims_selection=select_id_token_claims(
                         auth_code.claims_request, scope=auth_code.scope
                     ),
@@ -700,7 +704,7 @@ async def token(request: Request) -> ORJSONResponse:
         # pass-through is kept. Like the `resource` validation above, this
         # runs BEFORE `revoke_token` so a rejected request leaves the refresh
         # token — and its family — usable for the corrected retry.
-        old_audience = _salvage_old_aud(old_token.access_token)
+        old_audience = _salvage_old_aud(old_token)
         carried_audience: list[str] | None = None
         if old_audience is not None:
             if resource is not None:
@@ -719,7 +723,7 @@ async def token(request: Request) -> ORJSONResponse:
         # `_salvage_old_cnf` and the module docstring. Salvaged HERE, before
         # the revocation below, because divergence 54 gates that revocation on
         # what the old binding turns out to be.
-        refresh_cnf = _salvage_old_cnf(old_token.access_token)
+        refresh_cnf = _salvage_old_cnf(old_token)
 
         # RFC 9449 §5 / divergence 54: a PUBLIC client refreshing a
         # `jkt`-bound token must present a fresh proof from the SAME key.
@@ -742,8 +746,14 @@ async def token(request: Request) -> ORJSONResponse:
                     "refresh token is bound to a DPoP key; present a proof with the same key",
                 )
 
+        if (
+            old_token.user_id is not None
+            and await load_active_user(storage, old_token.user_id) is None
+        ):
+            return oauth_error("invalid_grant", "refresh token is no longer valid")
+
         family = old_token.token_family or uuid.uuid4().hex
-        await storage.revoke_token(old_token.access_token)
+        await storage.revoke_token_by_id(old_token.id)
 
         # RFC 9396 details are DROPPED on refresh (Rust parity,
         # research-rar-token-exchange.md `endpoints`: "authorization_details:
@@ -815,9 +825,7 @@ async def token(request: Request) -> ORJSONResponse:
         # so an over-fast poller is throttled regardless of the device
         # code's current state, and reset via `forget()` once the code is
         # actually redeemed further down.
-        new_interval = request.app.state.device_poll.observe(
-            device.device_code, device.interval_seconds
-        )
+        new_interval = request.app.state.device_poll.observe(device_code, device.interval_seconds)
         if new_interval is not None:
             return ORJSONResponse(
                 {
@@ -846,14 +854,14 @@ async def token(request: Request) -> ORJSONResponse:
         except OAuthError as exc:
             return oauth_error(exc.error, exc.description, exc.status)
 
-        claimed = await storage.mark_device_authorization_used(device.device_code)
+        claimed = await storage.mark_device_authorization_used(device_code)
         if claimed == 0:
             # Lost the race to a concurrent request that already claimed this code.
             return oauth_error("invalid_grant", "device_code has already been redeemed")
 
         # Redeemed: no further polling of this code is legitimate, so drop
         # its slow_down tracking state.
-        request.app.state.device_poll.forget(device.device_code)
+        request.app.state.device_poll.forget(device_code)
 
         # Device grant never binds cnf, even when the client presented a
         # valid DPoP proof on this request (Rust parity, research-dpop.md
@@ -863,6 +871,9 @@ async def token(request: Request) -> ORJSONResponse:
         # research-rar-token-exchange.md `endpoints`: "Same for
         # device_code grant") — DeviceAuthorization has no
         # authorization_details field at all, so there's nothing to embed.
+        if await load_active_user(storage, device.user_id) is None:
+            return oauth_error("invalid_grant", "device authorization is no longer valid")
+
         token_response = await TokenService(storage, config, keyset).issue(
             client,
             device.user_id,

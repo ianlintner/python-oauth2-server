@@ -754,6 +754,17 @@ admin-session server-side revocation.
     instead of Rust's HS256(`jwt_secret`), and `backchannel_logout_uri` must be `https` with a
     public host, re-checked against the resolved address at dispatch (`services/outbound.py`).
     Without an RS256 key, back-channel logout is skipped.
+66. `tls_client_auth` requires a registered Subject DN (RFC 8705 §2.1.2). A client with an empty
+    `tls_client_certificate_subject_dn` fails `invalid_client` instead of authenticating on the
+    mere presence of a certificate (Rust still accepts it — this is a **deliberate divergence;
+    keep it when syncing the port**). Dynamic registration and the admin API refuse to create or
+    update a `tls_client_auth` client without a non-blank DN of at most 1024 characters and no
+    control characters; the DN is still compared byte-exactly. A startup warning lists legacy rows
+    with an empty DN. Not implemented (follow-up): `tls_client_auth_san_dns`, `_san_uri`, and
+    multiple DNs. `self_signed_tls_client_auth` is unchanged.
+67. `OAUTH2_TRUSTED_PROXY_CIDRS` (comma-separated CIDRs, default empty) narrows divergence 47: when
+    set, `X-Client-Cert-Thumbprint` / `X-SSL-Client-S-DN` are honored only from a TCP peer inside
+    one of the ranges. Empty keeps the previous behavior (any peer, given `trust_proxy_headers`).
 52 (amended). `dpop_jkt` is persisted on the code row — Rust migration `V22__add_dpop_jkt_to_auth_codes.sql`
     (vendored here; authored in the Rust repo, the schema owner). `app.state.dpop_code_bindings` and
     `services/dpop_bindings.py` are gone.

@@ -376,3 +376,19 @@ async def test_denylist_ip_ignores_xff_when_untrusted():
         await _add_denylisted_ip(c.storage, "198.51.100.5")
         resp = await c.get("/oauth/nonexistent", headers={"X-Forwarded-For": "198.51.100.5"})
         assert resp.status_code != 403
+
+
+async def test_check_subject_denylisted_strict_propagates_storage_error():
+    import pytest
+
+    from oauth2_server.middleware import check_subject_denylisted_strict
+
+    storage = await make_storage()
+
+    async def _broken_find_denylist_entry(kind, value):
+        raise RuntimeError("storage is down")
+
+    storage.find_denylist_entry = _broken_find_denylist_entry
+
+    with pytest.raises(RuntimeError):
+        await check_subject_denylisted_strict(storage, "username", "mallory")

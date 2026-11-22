@@ -13,6 +13,7 @@ import base64
 import json
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 
 from oauth2_server.config import Config
@@ -203,7 +204,10 @@ async def test_tls_client_auth_missing_certificate_rejected():
         )
 
 
-async def test_tls_client_auth_empty_dn_accepts_any_certificate():
+@pytest.mark.parametrize("dn", [None, "CN=whoever,O=Anywhere"])
+async def test_tls_client_auth_with_empty_registered_dn_is_rejected(dn):
+    """A client with no registered Subject DN never authenticates, whatever
+    certificate headers are presented (divergence from Rust)."""
     async with _trusting_app() as client_app:
         await reseed_client(
             client_app,
@@ -214,9 +218,103 @@ async def test_tls_client_auth_empty_dn_accepts_any_certificate():
         resp = await post_token(
             client_app,
             {**CLIENT_CREDENTIALS, "client_id": "client1"},
-            headers=_cert_headers(dn="CN=whoever,O=Anywhere"),
+            headers=_cert_headers(dn=dn),
         )
-        assert resp.status_code == 200, resp.text
+        assert resp.status_code == 401, resp.text
+        assert resp.json() == {
+            "error": "invalid_client",
+            "error_description": "tls_client_auth: client certificate Subject DN does not match",
+        }
+
+
+async def test_cert_headers_ignored_from_untrusted_peer():
+    async with build_client_app(
+        config_overrides={"trust_proxy_headers": True, "trusted_proxy_cidrs": ["10.0.0.0/8"]}
+    ) as client_app:
+        await reseed_client(
+            client_app,
+            token_endpoint_auth_method="tls_client_auth",
+            tls_client_certificate_subject_dn=CLIENT_DN,
+            client_secret="",
+        )
+        for peer, expected in (("192.0.2.5", 401), ("10.1.2.3", 200)):
+            async with AsyncClient(
+                transport=ASGITransport(app=client_app.app, client=(peer, 12345)),
+                base_url="https://auth.example.com",
+            ) as c:
+                resp = await post_token(
+                    c,
+                    {**CLIENT_CREDENTIALS, "client_id": "client1"},
+                    headers=_cert_headers(dn=CLIENT_DN),
+                )
+            assert resp.status_code == expected, (peer, resp.text)
+            if expected == 401:
+                assert resp.json()["error_description"].startswith(
+                    "tls_client_auth requires a TLS client certificate"
+                )
+
+
+def _request_from(peer: str | None, headers: dict[str, str]) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/oauth/token",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "client": (peer, 1234) if peer is not None else None,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("peer", "cidrs", "trusted"),
+    [
+        ("10.1.2.3", ["10.0.0.0/8"], True),
+        ("192.0.2.5", ["10.0.0.0/8"], False),
+        ("192.0.2.5", ["10.0.0.0/8", "192.0.2.0/24"], True),
+        ("::ffff:10.1.2.3", ["10.0.0.0/8"], True),
+        ("fd00::1", ["fd00::/8"], True),
+        ("fd00::1", ["10.0.0.0/8"], False),
+        ("not-an-ip", ["10.0.0.0/8"], False),
+        (None, ["10.0.0.0/8"], False),
+        # Empty allow-list = no allow-list (existing behavior).
+        ("192.0.2.5", [], True),
+        (None, [], True),
+    ],
+)
+def test_mtls_headers_peer_allow_list(peer, cidrs, trusted):
+    config = _config(trust_proxy_headers=True, trusted_proxy_cidrs=cidrs)
+    result = mtls_headers(_request_from(peer, MTLS_HEADERS), config)
+    assert result == (("abc123", "CN=client1,O=Example") if trusted else (None, None))
+
+
+def test_trusted_proxy_cidrs_parsed_from_env(monkeypatch):
+    monkeypatch.setenv("OAUTH2_TRUSTED_PROXY_CIDRS", "10.0.0.0/8, 192.0.2.0/24")
+    assert _config().trusted_proxy_cidrs == ["10.0.0.0/8", "192.0.2.0/24"]
+    assert _config().trusted_proxy_cidrs  # non-empty only when set
+    monkeypatch.delenv("OAUTH2_TRUSTED_PROXY_CIDRS")
+    assert _config().trusted_proxy_cidrs == []
+
+
+def test_trusted_proxy_cidrs_rejects_invalid_cidr():
+    with pytest.raises(ValueError):
+        _config(trusted_proxy_cidrs=["not-a-cidr"])
+
+
+async def test_warn_tls_clients_without_subject_dn(caplog):
+    from oauth2_server.bootstrap import warn_tls_clients_without_subject_dn
+
+    async with build_client_app() as client_app:
+        assert await warn_tls_clients_without_subject_dn(client_app.storage) == []
+        await reseed_client(
+            client_app,
+            token_endpoint_auth_method="tls_client_auth",
+            tls_client_certificate_subject_dn="",
+            client_secret="",
+        )
+        with caplog.at_level("WARNING"):
+            assert await warn_tls_clients_without_subject_dn(client_app.storage) == ["client1"]
+    assert "client1" in caplog.text
 
 
 async def test_tls_client_auth_dn_configured_header_missing_rejected():

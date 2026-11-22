@@ -529,3 +529,32 @@ def test_frontchannel_redirect_url_blocks_script_breakout():
 def test_no_redirect_script_when_absent():
     page = logout._render_frontchannel_page([], ISSUER, None, None)
     assert "window.location.href" not in page
+
+
+# --- Browser headers must not break the OIDC logout pages -------------------
+
+
+async def test_check_session_allows_inline_script_and_rp_framing(client_app):
+    resp = await client_app.get("/oauth/check_session")
+    assert resp.status_code == 200, resp.text
+    csp = resp.headers["content-security-policy"]
+    assert "script-src 'unsafe-inline'" in csp
+    assert "frame-ancestors *" in csp
+    # X-Frame-Options cannot express an RP allow-list: omit it here rather
+    # than block the OIDC Session Management iframe.
+    assert "x-frame-options" not in resp.headers
+
+
+async def test_frontchannel_logout_allows_inline_script_and_rp_iframes(client_app):
+    await reseed_client(
+        client_app,
+        frontchannel_logout_uri="https://example.com/frontchannel-logout",
+        frontchannel_logout_session_required=True,
+    )
+    await login_session(client_app)
+    resp = await client_app.get("/oauth/logout")
+    assert resp.status_code == 200, resp.text
+    assert "<iframe" in resp.text
+    csp = resp.headers["content-security-policy"]
+    assert "script-src 'unsafe-inline'" in csp
+    assert "frame-src https: http:" in csp

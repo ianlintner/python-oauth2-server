@@ -5,10 +5,30 @@ Mirrors `crates/oauth2-config/src/lib.rs::ServerConfig`.
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+def _is_exact_origin(value: str) -> bool:
+    """True only for an absolute http(s) origin (scheme://host[:port])."""
+    if "*" in value or any(c.isspace() for c in value):
+        return False
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    if parts.username is not None or parts.password is not None:
+        return False
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return False
+    return True
+
 
 _INSECURE_JWT_SECRETS = {"secret", "changeme", "your-256-bit-secret", "jwt_secret"}
 
@@ -39,6 +59,14 @@ class Config(BaseSettings):
     refresh_token_ttl_secs: int = 86400
     authorization_code_ttl_secs: int = 600
     allow_insecure_defaults: bool = False
+    # HSTS is opt-in per deployment: `includeSubDomains` affects every sibling
+    # subdomain of the issuer, which only the operator can decide. Default is
+    # a host-only max-age header on https issuers; set the explicit subdomain
+    # flag only when all subdomains are known to be https-ready.
+    hsts_include_subdomains: bool = False
+    hsts_max_age_secs: int = 31536000
+    # Lifetime of the signed session cookie (signature age and `Max-Age`).
+    session_max_age_secs: int = Field(default=28800, gt=0)
     host: str = "0.0.0.0"
     port: int = 8080
     max_connections: Annotated[int, Field(validation_alias="OAUTH2_DATABASE_MAX_CONNECTIONS")] = 10
@@ -110,6 +138,12 @@ class Config(BaseSettings):
     trust_proxy_headers: Annotated[
         bool, Field(validation_alias="OAUTH2_SERVER_TRUST_PROXY_HEADERS")
     ] = False
+    # Peer allow-list for the proxy-supplied mTLS certificate headers
+    # (`services/mtls.py::mtls_headers`), env `OAUTH2_TRUSTED_PROXY_CIDRS`
+    # (comma-separated CIDRs). Empty (default) = no allow-list: with
+    # `trust_proxy_headers` on, the headers are honored from any peer. When
+    # non-empty, they are honored only from a TCP peer inside one of the ranges.
+    trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     resilience_enabled: bool = False
     resilience_max_concurrent: int = 1000
     resilience_cb_failure_threshold: int = 5
@@ -187,6 +221,40 @@ class Config(BaseSettings):
         if isinstance(v, str):
             return [t.strip() for t in v.split(",") if t.strip()]
         return v
+
+    @field_validator("trusted_proxy_cidrs", mode="before")
+    @classmethod
+    def _split_trusted_proxy_cidrs(cls, v: object) -> object:
+        if isinstance(v, str):
+            v = v.split(",")
+        if isinstance(v, list):
+            cidrs = [str(c).strip() for c in v if str(c).strip()]
+            for cidr in cidrs:
+                # Fail at startup on a typo rather than silently trusting
+                # (or distrusting) the wrong range.
+                ipaddress.ip_network(cidr, strict=False)
+            return cidrs
+        return v
+
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def _validate_allowed_origins(cls, v: object) -> object:
+        """Accept only concrete http(s) origins, never wildcards or patterns.
+
+        `CORSMiddleware` is configured with `allow_credentials=True`, so an
+        accepted `*` (or a partially wild host) would echo any caller's
+        Origin with credential permission. Reject malformed entries here so
+        a deployment typo fails at startup, not silently at request time.
+        """
+        raw = [t.strip() for t in v.split(",") if t.strip()] if isinstance(v, str) else v
+        if not isinstance(raw, list):
+            return v
+        for origin in raw:
+            if not isinstance(origin, str) or not _is_exact_origin(origin):
+                raise ValueError(
+                    f"allowed_origins entry is not an exact http(s) origin: {origin!r}"
+                )
+        return raw
 
     @field_validator("dpop_nonce_lifetime_secs")
     @classmethod

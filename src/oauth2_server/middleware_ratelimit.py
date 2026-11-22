@@ -70,15 +70,6 @@ def _is_exempt(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in _EXEMPT_PREFIXES)
 
 
-def _is_oauth_or_admin_api(path: str) -> bool:
-    """Mirrors `DenylistGuard`'s `/oauth*`/`/admin/api*` gate (`middleware.py`)
-    so the 429/503 error responses below carry the same `_SECURITY_HEADERS`
-    (notably `Cache-Control: no-store`) as every other response on those
-    path prefixes, rather than only the ones the app-level `security_headers`
-    middleware happens to reach."""
-    return path.startswith(("/oauth", "/admin/api"))
-
-
 def _ip_prefix(key: str) -> str:
     """Coarsen a rate-limit key (an IP address, or "unknown") into a
     lower-cardinality Prometheus label value.
@@ -140,8 +131,10 @@ async def _send_rate_limit_rejected(
         (b"X-RateLimit-Remaining", b"0"),
         (b"X-RateLimit-Reset", str(result.reset_at).encode()),
     ]
-    if _is_oauth_or_admin_api(scope.get("path", "")):
-        headers.extend((key.encode(), value.encode()) for key, value in _SECURITY_HEADERS.items())
+    # These short-circuit responses never reach the app-level
+    # `security_headers` middleware, so stamp the shared browser-facing set
+    # onto every one of them regardless of path.
+    headers.extend((key.encode(), value.encode()) for key, value in _SECURITY_HEADERS.items())
     await send({"type": "http.response.start", "status": 429, "headers": headers})
     await send({"type": "http.response.body", "body": payload})
 
@@ -354,17 +347,13 @@ class ResilienceMiddleware:
         circuit: CircuitBreaker, scope: Scope, receive: Receive, send: Send
     ) -> None:
         body = {"error": "service_unavailable", "error_description": _CIRCUIT_OPEN_DESCRIPTION}
-        headers = {"Retry-After": str(circuit.open_secs)}
-        if _is_oauth_or_admin_api(scope.get("path", "")):
-            headers.update(_SECURITY_HEADERS)
+        headers = {"Retry-After": str(circuit.open_secs), **dict(_SECURITY_HEADERS)}
         response = ORJSONResponse(body, status_code=503, headers=headers)
         await response(scope, receive, send)
 
     @staticmethod
     async def _send_at_capacity(scope: Scope, receive: Receive, send: Send) -> None:
         body = {"error": "service_unavailable", "error_description": _AT_CAPACITY_DESCRIPTION}
-        headers = {"Retry-After": "1"}
-        if _is_oauth_or_admin_api(scope.get("path", "")):
-            headers.update(_SECURITY_HEADERS)
+        headers = {"Retry-After": "1", **dict(_SECURITY_HEADERS)}
         response = ORJSONResponse(body, status_code=503, headers=headers)
         await response(scope, receive, send)

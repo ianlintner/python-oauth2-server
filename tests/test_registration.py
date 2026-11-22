@@ -294,15 +294,41 @@ async def test_registration_rejects_blank_subject_dn(client, blank):
     }
 
 
-async def test_registration_allows_empty_subject_dn(client):
-    """The empty string stays legal — it is the RFC 8705 "any certificate the
-    proxy vouched for" registration."""
+@pytest.mark.parametrize("dn_fields", [{"tls_client_certificate_subject_dn": ""}, {}])
+async def test_registration_rejects_tls_client_auth_without_subject_dn(client, dn_fields):
     resp = await client.post(
         "/connect/register",
         json={
             "redirect_uris": ["https://app.example/cb"],
             "token_endpoint_auth_method": "tls_client_auth",
-            "tls_client_certificate_subject_dn": "",
+            **dn_fields,
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"] == "invalid_client_metadata"
+
+
+@pytest.mark.parametrize(
+    "dn", ["CN=" + "a" * 1100, "CN=svc\nO=Example", "CN=svc\x00,O=Example", "CN=svc\x7f"]
+)
+async def test_registration_rejects_malformed_subject_dn(client, dn):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "token_endpoint_auth_method": "tls_client_auth",
+            "tls_client_certificate_subject_dn": dn,
+        },
+    )
+    assert resp.status_code == 400, resp.text
+
+
+async def test_registration_allows_missing_subject_dn_for_other_methods(client):
+    resp = await client.post(
+        "/connect/register",
+        json={
+            "redirect_uris": ["https://app.example/cb"],
+            "token_endpoint_auth_method": "client_secret_basic",
         },
     )
     assert resp.status_code == 201, resp.text
