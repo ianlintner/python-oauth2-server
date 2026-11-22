@@ -15,6 +15,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from oauth2_server.bootstrap import seed_admin_user
 from oauth2_server.config import Config
+from oauth2_server import clock, conformance_sut
 from oauth2_server.conformance import apply_seed, seed_from_env
 from oauth2_server.keys import seed_keyset
 from oauth2_server.middleware import _SECURITY_HEADERS, DenylistGuard, MetricsMiddleware
@@ -62,6 +63,11 @@ def create_app(
     app = FastAPI(default_response_class=ORJSONResponse, lifespan=lifespan)
     app.state.config = config
     app.state.storage = storage
+    # Server key for unsealing HMAC client-secret key material (clients.
+    # client_secret_key); derived from `jwt_secret`, so rotating it requires
+    # re-issuing HMAC clients' secrets — see docs/credential-cutover.md.
+    if storage is not None:  # some tests build the app shell without storage
+        storage.configure_secret_key(config.jwt_secret)
     app.state.events = RecentEventsStore()
     # Dedicated CollectorRegistry per app instance (services/metrics.py) —
     # never the prometheus_client global default — so tests building
@@ -278,10 +284,16 @@ def build() -> FastAPI:
     async def lifespan(app: FastAPI):
         await storage.init()
         if conformance_seed is not None:
+            # Process-local conformance state starts clean on every (re)start
+            # (contract 7.4): the test clock offset and the DPoP nonce toggle.
+            clock.reset()
+            app.state.dpop_nonce_issuer.require_all = False
             # The seed replaces the default admin: only seeded identities
             # exist. Any failure aborts startup, so the server never serves
             # (or reports ready) with a partially applied seed.
-            applied = await apply_seed(conformance_seed, storage, app.state.keyset)
+            applied = await apply_seed(
+                conformance_seed, storage, app.state.keyset, seal_master=config.jwt_secret
+            )
             app.state.conformance = applied.readiness()
             app.state.consent_auto_approve = {
                 u.username: frozenset(u.auto_approve_clients or []) for u in conformance_seed.users
@@ -292,6 +304,9 @@ def build() -> FastAPI:
         await app.state.http_client.aclose()
 
     app = create_app(config, storage, lifespan=lifespan)
+    if conformance_seed is not None:
+        # SUT interface v2 (/conformance/*): never mounted outside the mode.
+        app.include_router(conformance_sut.router)
     if tracing:
         instrument_app(app)
     return app

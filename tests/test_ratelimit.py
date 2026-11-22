@@ -236,3 +236,65 @@ async def test_login_rate_limit_keys_are_per_username():
 
     assert good.status_code == 303
     assert good.headers["location"] == "/"
+
+
+async def test_login_failures_from_other_addresses_do_not_lock_out_a_user():
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+    )
+    storage = await make_storage()
+    await seed_client(storage)
+    await seed_user(storage)
+    app = create_app(config, storage)
+
+    # Twelve different addresses each fail once against the same username.
+    for i in range(12):
+        async with _build_client_from_ip(app, f"10.1.0.{i}") as other:
+            resp = await other.post(
+                "/auth/login", data={"username": "user_rfc", "password": "wrong-password"}
+            )
+            assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+
+    async with _build_client_from_ip(app, "10.2.0.1") as owner:
+        good = await owner.post(
+            "/auth/login", data={"username": "user_rfc", "password": "password123"}
+        )
+    assert good.headers["location"] == "/"
+
+
+async def test_login_throttle_uses_proxy_appended_address_when_trusted():
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+        trust_proxy_headers=True,
+    )
+    storage = await make_storage()
+    await seed_client(storage)
+    await seed_user(storage)
+    app = create_app(config, storage)
+
+    async with _build_client_from_ip(app, "10.9.9.9") as proxy:
+        # Client A (appended by the proxy as the right-most entry) exhausts
+        # its budget, whatever it prepends on the left.
+        for i in range(10):
+            resp = await proxy.post(
+                "/auth/login",
+                data={"username": "user_rfc", "password": "wrong-password"},
+                headers={"X-Forwarded-For": f"192.0.2.{i}, 198.51.100.1"},
+            )
+            assert resp.headers["location"] == "/auth/login?error=invalid_credentials"
+        blocked = await proxy.post(
+            "/auth/login",
+            data={"username": "user_rfc", "password": "wrong-password"},
+            headers={"X-Forwarded-For": "203.0.113.77, 198.51.100.1"},
+        )
+        assert blocked.headers["location"] == "/auth/login?error=too_many_attempts"
+
+        # Client B behind the same proxy is unaffected.
+        good = await proxy.post(
+            "/auth/login",
+            data={"username": "user_rfc", "password": "password123"},
+            headers={"X-Forwarded-For": "198.51.100.2"},
+        )
+        assert good.headers["location"] == "/"

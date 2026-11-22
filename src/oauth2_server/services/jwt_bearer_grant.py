@@ -23,8 +23,6 @@ from __future__ import annotations
 import logging
 import math
 import secrets
-import time
-from datetime import UTC, datetime
 
 import jwt
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
@@ -42,6 +40,7 @@ from oauth2_server.services.client_assertion import (
 )
 from oauth2_server.services.jwks_cache import JwksCache
 from oauth2_server.storage.base import Storage
+from oauth2_server import clock
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +194,7 @@ def _enforce_replay(iss: str, claims: dict, guard: JtiReplayGuard) -> None:
     exp = _numeric_date(claims, "exp")
     # The replay guard retains a jti for at most MAX_JTI_TTL_SECS; a longer-lived
     # assertion could be redeemed again while still valid, so refuse it.
-    ttl = max(exp - time.time(), 0.0)
+    ttl = max(exp - clock.time(), 0.0)
     if ttl > MAX_JTI_TTL_SECS:
         raise _grant_error(f"assertion lifetime exceeds the maximum of {MAX_JTI_TTL_SECS} seconds")
     try:
@@ -274,7 +273,7 @@ async def _resolve_subject(storage: Storage, trusted: TrustedIssuer, claims: dic
     # Check both the raw subject and the qualified username against the denylist.
     await _reject_if_denylisted(storage, sub, verified_email)
     await _reject_if_denylisted(storage, local_id, "")
-    now = datetime.now(UTC)
+    now = clock.now()
     user = User(
         id=local_id,
         # Issuer-qualified, so it cannot collide with a local account's username.
@@ -346,7 +345,7 @@ async def redeem_jwt_bearer_assertion(
     )
 
     iat = _numeric_date(claims, "iat")
-    if iat > time.time() + _IAT_SKEW_SECS:
+    if iat > clock.time() + _IAT_SKEW_SECS:
         raise _grant_error("assertion iat is in the future")
 
     _enforce_replay(iss, claims, guard)

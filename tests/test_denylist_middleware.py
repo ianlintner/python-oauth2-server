@@ -345,3 +345,34 @@ async def test_denylisted_client_id_rejected_at_authorize(client_app):
     # (no oracle), and an unknown client is unredirectable -> 401.
     assert resp.status_code == 401
     assert resp.json()["error"] == "invalid_client"
+
+
+async def test_denylist_ip_matches_proxy_appended_address_when_trusted():
+    config = Config(
+        jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+        issuer="https://auth.example.com",
+        trust_proxy_headers=True,
+    )
+    storage = await make_storage()
+    app = create_app(config, storage)
+    await _add_denylisted_ip(storage, "198.51.100.5")
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("10.0.0.1", 123)),
+        base_url="https://auth.example.com",
+    ) as c:
+        denied = await c.get(
+            "/oauth/nonexistent", headers={"X-Forwarded-For": "1.1.1.1, 198.51.100.5"}
+        )
+        assert denied.status_code == 403
+        # A spoofed left-most value cannot evade or trigger the entry.
+        other = await c.get(
+            "/oauth/nonexistent", headers={"X-Forwarded-For": "198.51.100.5, 8.8.8.8"}
+        )
+        assert other.status_code != 403
+
+
+async def test_denylist_ip_ignores_xff_when_untrusted():
+    async with build_client_from_ip("10.0.0.1") as c:
+        await _add_denylisted_ip(c.storage, "198.51.100.5")
+        resp = await c.get("/oauth/nonexistent", headers={"X-Forwarded-For": "198.51.100.5"})
+        assert resp.status_code != 403

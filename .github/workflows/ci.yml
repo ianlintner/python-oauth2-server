@@ -95,7 +95,7 @@ jobs:
     env:
       # The contract's example seed advertises http://localhost:8080; driving
       # the runner on the host loopback leaves 8080 free on the runner VM.
-      CONFORMANCE_REF: b968cb19a2194268b819effae8b060b1e62d99df
+      CONFORMANCE_REF: b7620924068f32c8800cb23c8d47b6c1b2b6c583
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,25 +125,38 @@ jobs:
         run: |
           set -euo pipefail
           CONTRACT="$GITHUB_WORKSPACE/oauth2-conformance"
-          OAUTH2_CONFORMANCE_MODE=1 \
-          OAUTH2_CONFORMANCE_SEED="$CONTRACT/examples/seed.yaml" \
-          OAUTH2_ENV=test \
-          OAUTH2_JWT_SECRET=conformance-ci-secret-0123456789abcdef \
-          uv run python -m oauth2_server > sut.log 2>&1 &
-          SUT=$!
+          SUT=""
           trap 'kill $SUT 2>/dev/null || true' EXIT
-          ready=0
-          for i in $(seq 1 60); do
-            if curl -fsS http://localhost:8080/ready >/dev/null 2>&1; then ready=1; break; fi
-            sleep 0.5
-          done
-          if [ "$ready" != 1 ]; then
-            echo "SUT did not become ready; log follows" >&2
-            cat sut.log >&2
-            exit 1
-          fi
-          curl -fsS http://localhost:8080/ready
-          echo
+          # A fresh SUT per profile: the invalid-client limiter (5 failed
+          # client authentications per window) is process state, so sharing one
+          # process lets earlier profiles' deliberate bad-secret requests
+          # exhaust it and 429 later scenarios (token-lifecycle.revocation.
+          # wrong-secret). Each profile runs against a clean process seeded
+          # from the same contract seed.
+          start_sut() {
+            OAUTH2_CONFORMANCE_MODE=1 \
+            OAUTH2_CONFORMANCE_SEED="$CONTRACT/examples/seed.yaml" \
+            OAUTH2_ENV=test \
+            OAUTH2_JWT_SECRET=conformance-ci-secret-0123456789abcdef \
+            uv run python -m oauth2_server > "sut-$1.log" 2>&1 &
+            SUT=$!
+            ready=0
+            for i in $(seq 1 60); do
+              if curl -fsS http://localhost:8080/ready >/dev/null 2>&1; then ready=1; break; fi
+              sleep 0.5
+            done
+            if [ "$ready" != 1 ]; then
+              echo "SUT did not become ready for profile $1; log follows" >&2
+              cat "sut-$1.log" >&2
+              exit 1
+            fi
+            curl -fsS http://localhost:8080/ready
+            echo
+          }
+          stop_sut() {
+            kill "$SUT" 2>/dev/null || true
+            wait "$SUT" 2>/dev/null || true
+          }
           # The runner is all-or-nothing, so its exit status is ignored here;
           # `check_conformance_report.py` is the actual gate (see that script
           # and `conformance.yaml` for the declared deviations). Every profile
@@ -152,10 +165,12 @@ jobs:
           profiles="$(uv run python -c 'import yaml,sys; print(*yaml.safe_load(open("conformance.yaml"))["profiles"])')"
           contract="$(uv run python -c 'import yaml; print(yaml.safe_load(open("conformance.yaml"))["contract"])')"
           for profile in $profiles; do
+            start_sut "$profile"
             pnpm --dir "$CONTRACT/runner" -s conformance run --base-url http://localhost:8080 \
               --scenarios "$CONTRACT/scenarios" --profile "$profile" \
               --implementation python-oauth2-server --contract "$contract" \
               --report "$GITHUB_WORKSPACE/conformance-${profile}.json" || true
+            stop_sut
           done
       - name: Gate each report against declared deviations
         run: |

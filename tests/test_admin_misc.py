@@ -16,6 +16,7 @@ import pytest
 
 from oauth2_server import security
 from oauth2_server.models import DeviceAuthorization, Token, User
+from oauth2_server.services.credential_storage import digest
 from oauth2_server.storage.paging import ListQuery
 from tests.conftest import build_client_app
 from tests.helpers import login_admin, seed_admin, seed_client
@@ -85,7 +86,7 @@ async def test_list_devices_item_shape():
         item = next(i for i in resp.json()["items"] if i["id"] == device.id)
         assert item == {
             "id": device.id,
-            "device_code": device.device_code,
+            "device_code": digest(device.device_code, "device"),  # digest at rest
             "user_code": device.user_code,
             "client_id": "client1",
             "scope": "read",

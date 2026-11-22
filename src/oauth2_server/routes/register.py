@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import secrets
 import uuid
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import ORJSONResponse
@@ -14,12 +13,19 @@ from pydantic import ValidationError
 from oauth2_server.models import Client, ClientRegistration, ClientRegistrationResponse
 from oauth2_server.services.clients import (
     JWKS_URI_ERROR,
+    KNOWN_GRANT_TYPES,
+    RESERVED_REGISTRATION_SCOPES,
+    SELF_REGISTRABLE_GRANT_TYPES,
     SELF_SIGNED_REQUIRES_JWKS_ERROR,
+    SUPPORTED_RESPONSE_TYPES,
     VALID_AUTH_METHODS,
+    _secrets_equal,
     is_valid_jwks_uri,
     is_valid_redirect_uri,
 )
+from oauth2_server.services.client_secrets import protect_client_secret
 from oauth2_server.services.events_bus import emit_event
+from oauth2_server import clock
 
 router = APIRouter()
 
@@ -37,6 +43,32 @@ def _registration_error(description: str) -> ORJSONResponse:
 _is_valid_redirect_uri = is_valid_redirect_uri
 
 
+def _presented_bearer(request: Request) -> str | None:
+    header = request.headers.get("authorization") or ""
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    return token.strip()
+
+
+def _policy_error(reg: ClientRegistration, config, *, trusted: bool) -> str | None:
+    """Metadata policy (RFC 7591 §2): every unsupported or non-self-service
+    value is rejected, never dropped. Returns the error description or None."""
+    for grant in reg.grant_types:
+        if grant not in KNOWN_GRANT_TYPES:
+            return f"unsupported grant_type: {grant!r}"
+        if grant not in SELF_REGISTRABLE_GRANT_TYPES and not trusted:
+            return f"grant_type {grant!r} requires an initial access token"
+    for response_type in reg.response_types:
+        if response_type not in SUPPORTED_RESPONSE_TYPES:
+            return f"unsupported response_type: {response_type!r}"
+    allowed = {s.strip() for s in config.self_registration_scopes if s.strip()}
+    for scope in reg.scope.split():
+        if scope in RESERVED_REGISTRATION_SCOPES or scope not in allowed:
+            return f"scope {scope!r} is not available for registration"
+    return None
+
+
 @router.post("/register")
 async def register_client(request: Request) -> ORJSONResponse:
     config = request.app.state.config
@@ -45,6 +77,33 @@ async def register_client(request: Request) -> ORJSONResponse:
             {
                 "error": "access_denied",
                 "error_description": "dynamic client registration is disabled",
+            },
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # Intake authentication (RFC 7591 §3): a configured initial access token
+    # is always required; with none configured, anonymous registration must
+    # have been enabled explicitly.
+    initial_token = config.dynamic_registration_initial_access_token or ""
+    trusted = False
+    if initial_token:
+        presented = _presented_bearer(request)
+        if presented is None or not _secrets_equal(presented, initial_token):
+            return ORJSONResponse(
+                {
+                    "error": "invalid_token",
+                    "error_description": "a valid initial access token is required",
+                },
+                status_code=401,
+                headers={"Cache-Control": "no-store", "WWW-Authenticate": "Bearer"},
+            )
+        trusted = True
+    elif not config.dynamic_registration_anonymous:
+        return ORJSONResponse(
+            {
+                "error": "access_denied",
+                "error_description": "dynamic client registration is not open",
             },
             status_code=403,
             headers={"Cache-Control": "no-store"},
@@ -59,6 +118,10 @@ async def register_client(request: Request) -> ORJSONResponse:
         reg = ClientRegistration.model_validate(body)
     except ValidationError:
         return _registration_error("invalid registration request")
+
+    policy_error = _policy_error(reg, config, trusted=trusted)
+    if policy_error is not None:
+        return _registration_error(policy_error)
 
     storage = request.app.state.storage
 
@@ -132,15 +195,22 @@ async def register_client(request: Request) -> ORJSONResponse:
             "client_credentials grant"
         )
 
-    now = datetime.now(UTC)
+    now = clock.now()
     client_id = secrets.token_urlsafe(16)
     client_secret = "" if is_public else secrets.token_urlsafe(32)
     registration_access_token = secrets.token_urlsafe(32)
+    # Persist only the verifier + sealed HMAC key; the plaintext secret and
+    # registration access token go back in this response once and are never
+    # stored (storage digests the registration access token on save).
+    secret_verifier_value, sealed_secret_key = await protect_client_secret(
+        client_secret, client_id, config.jwt_secret
+    )
 
     client = Client(
         id=uuid.uuid4().hex,
         client_id=client_id,
-        client_secret=client_secret,
+        client_secret=secret_verifier_value,
+        client_secret_key=sealed_secret_key,
         redirect_uris=json.dumps(reg.redirect_uris),
         grant_types=json.dumps(reg.grant_types),
         response_types=json.dumps(reg.response_types),
