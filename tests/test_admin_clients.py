@@ -16,6 +16,7 @@ import pytest
 
 from oauth2_server.models import Token
 from oauth2_server.services.client_assertion import JWT_BEARER_ASSERTION_TYPE
+from oauth2_server.services.credential_storage import verify_client_secret
 from tests.conftest import build_client_app
 from tests.helpers import (
     generate_rsa_keypair,
@@ -207,7 +208,8 @@ async def test_create_client_confidential_returns_secret_once():
         assert body["redirect_uris"] == []
 
         stored = await client.storage.get_client(body["client_id"])
-        assert stored.client_secret == body["client_secret"]
+        assert stored.client_secret != body["client_secret"]  # stored as a verifier
+        assert verify_client_secret(stored.client_secret, body["client_secret"])
 
 
 async def test_create_client_rejects_short_secret():
@@ -491,7 +493,8 @@ async def test_regenerate_client_secret_replaces_secret():
         assert body["client_secret"] != "s3cret"
 
         reloaded = await client.storage.get_client("client1")
-        assert reloaded.client_secret == body["client_secret"]
+        assert verify_client_secret(reloaded.client_secret, body["client_secret"])
+        assert reloaded.hmac_secret() == body["client_secret"]
 
 
 # --- private_key_jwt / key material ---

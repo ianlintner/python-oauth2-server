@@ -1,4 +1,12 @@
-"""Storage Protocol — mirrors the Rust `DynStorage` trait (Phase-1 subset)."""
+"""Storage Protocol — mirrors the Rust `DynStorage` trait (Phase-1 subset).
+
+Credential columns hold at-rest digests/verifiers, not plaintext (see
+`services/credential_storage.py`). The lookup methods therefore take the
+PRESENTED value and digest it themselves; writes digest idempotently. Lookups
+always hash, so a stored digest presented as a credential matches nothing.
+Client secrets are the exception: `set_client_secret`/`save_client` store the
+verifier the caller already built, because hashing needs an off-thread Argon2.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +27,11 @@ from oauth2_server.storage.paging import ListQuery
 
 
 class Storage(Protocol):
+    def configure_secret_key(self, master: str) -> None:
+        """Set the server key backends use to unseal HMAC client-secret key
+        material on client load. Called once by `create_app`."""
+        ...
+
     async def init(self) -> None: ...
     async def healthcheck(self) -> None: ...
 
@@ -28,7 +41,25 @@ class Storage(Protocol):
     async def update_client(self, client: Client) -> None: ...
     async def delete_client(self, client_id: str) -> None: ...
     async def set_client_enabled(self, client_id: str, enabled: bool) -> None: ...
-    async def set_client_secret(self, client_id: str, client_secret: str) -> None: ...
+    async def set_client_secret(
+        self, client_id: str, client_secret: str, client_secret_key: str = ""
+    ) -> None:
+        """Store the verifier (`credential_storage.secret_verifier`) and the
+        sealed HMAC key material (`seal`) the caller already built."""
+        ...
+
+    async def set_client_registration_access_token(
+        self, client_id: str, registration_access_token: str
+    ) -> None:
+        """Store a registration access token (the backend digests it)."""
+        ...
+
+    async def resolve_registration_access_token(self, presented: str) -> Client | None:
+        """Find the client whose registration access token is `presented`.
+        The backend digests `presented` itself; presenting a stored digest
+        does NOT match (lookups always hash)."""
+        ...
+
     async def list_all_clients(self) -> list[Client]: ...
     async def list_clients_page(self, q: ListQuery) -> tuple[list[Client], int]: ...
 
@@ -58,7 +89,15 @@ class Storage(Protocol):
     async def get_token_by_access_token(self, access_token: str) -> Token | None: ...
     async def get_token_by_refresh_token(self, refresh_token: str) -> Token | None: ...
     async def get_token_by_id(self, token_id: str) -> Token | None: ...
-    async def revoke_token(self, token: str) -> None: ...
+    async def revoke_token(self, token: str) -> None:
+        """Revoke by PRESENTED access/refresh token value (digested here)."""
+        ...
+
+    async def revoke_token_by_id(self, token_id: str) -> None:
+        """Revoke a stored row by id — for callers holding a `Token` read
+        back from storage, whose credential fields are digests, not values."""
+        ...
+
     async def revoke_token_family(self, family: str) -> int: ...
     async def revoke_tokens_by_user_id(self, user_id: str) -> int: ...
     async def revoke_tokens_by_client_id(self, client_id: str) -> int: ...
