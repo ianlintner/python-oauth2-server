@@ -487,3 +487,34 @@ async def test_device_verify_late_approve_after_deny_is_uniform_error(client_app
     assert late.json() == {"error": "invalid_user_code"}
     row = await client_app.storage.get_device_authorization_by_user_code(body["user_code"])
     assert row.denied is True and row.approved is False
+
+
+async def test_device_verify_rejects_cross_origin_approve(client_app):
+    """Origin hardening on the POST still holds when CSRF fields are supplied."""
+    body = (await start_device_flow(client_app)).json()
+    await login_session(client_app)
+    page = await client_app.get("/oauth/device/verify", params={"user_code": body["user_code"]})
+    data = {**dict(_HIDDEN_RE.findall(page.text)), "action": "approve"}
+    denied = await client_app.post(
+        "/oauth/device/verify", data=data, headers={"Origin": "https://evil.example"}
+    )
+    assert denied.status_code == 403, denied.text
+    pending = await poll_device_token(client_app, body["device_code"])
+    assert pending.status_code == 400
+    assert pending.json()["error"] == "authorization_pending"
+
+
+async def test_device_verify_page_shows_client_scope_and_account(client_app):
+    """Informed-consent details from main survive the CSRF/hidden-fields merge."""
+    body = (await start_device_flow(client_app, scope="read")).json()
+    await login_session(client_app)
+    page = await client_app.get("/oauth/device/verify", params={"user_code": body["user_code"]})
+    assert page.status_code == 200
+    text = page.text
+    assert "<dt>Client</dt>" in text
+    assert "test-client" in text  # seeded client1's display name in tests
+    assert "<dt>Scopes</dt>" in text
+    assert "read" in text
+    assert "<dt>Account</dt>" in text
+    assert "user_rfc" in text
+    assert 'name="csrf_token"' in text

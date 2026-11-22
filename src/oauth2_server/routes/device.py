@@ -20,7 +20,7 @@ from datetime import timedelta
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse, Response
 
 from oauth2_server import clock
 from oauth2_server.csrf import FORM_FIELD, csrf_request_ok, session_csrf_token
@@ -28,6 +28,7 @@ from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.models import DeviceAuthorization
 from oauth2_server.routes.token import client_auth_failure_response
 from oauth2_server.services.clients import ClientService
+from oauth2_server.services.csrf import require_same_origin
 from oauth2_server.services.mtls import mtls_headers
 from oauth2_server.sessions import load_session_user
 
@@ -112,25 +113,27 @@ def _render_device_verify_page(
     *,
     device: DeviceAuthorization | None = None,
     client_name: str = "",
+    account: str = "",
     csrf_token: str = "",
 ) -> str:
     """Ported from `render_device_verify_page` (device.rs). Every dynamic value
     is html-escaped before being embedded (reflected-XSS hardening — see the
     ported unit tests `user_code_is_html_escaped` / `normal_user_code_is_preserved`).
 
-    With a resolved `device` the page names the requesting client and the
-    requested scopes and offers approve/deny; otherwise it only offers a code
-    lookup (a GET form), so the decision buttons never appear for a code the
-    server has not resolved."""
+    With a resolved `device` the page names the requesting client, requested
+    scopes and signed-in account and offers a CSRF-protected approve/deny form;
+    otherwise it only offers a code lookup (a GET form), so the decision
+    buttons never appear for a code the server has not resolved."""
     escaped = html.escape(user_code, quote=True)
-    if device is None:
-        body = f"""<form method="get" action="/oauth/device/verify">
-  <label for="user_code">Code</label>
-  <input type="text" id="user_code" name="user_code" value="{escaped}" autocomplete="off" required>
-  <button type="submit">Continue</button>
-</form>"""
-    else:
-        scopes = "".join(f"<li>{html.escape(s, quote=True)}</li>" for s in device.scope.split())
+    details = ""
+    if device is not None:
+        details = (
+            "<dl>\n"
+            f"  <dt>Client</dt><dd>{html.escape(client_name or device.client_id, quote=True)}</dd>\n"
+            f"  <dt>Scopes</dt><dd>{html.escape(device.scope, quote=True)}</dd>\n"
+            f"  <dt>Account</dt><dd>{html.escape(account, quote=True)}</dd>\n"
+            "</dl>\n"
+        )
         fields = {
             "user_code": user_code,
             "client_id": device.client_id,
@@ -141,15 +144,17 @@ def _render_device_verify_page(
             f'<input type="hidden" name="{name}" value="{html.escape(value, quote=True)}">'
             for name, value in fields.items()
         )
-        body = f"""<p>Code: <strong>{escaped}</strong></p>
-<p>Application: <strong>{html.escape(client_name or device.client_id, quote=True)}</strong>
-(client_id: <code>{html.escape(device.client_id, quote=True)}</code>)</p>
-<p>Requested access:</p>
-<ul>{scopes or "<li>(none)</li>"}</ul>
+        body = f"""{details}<p>Code: <strong>{escaped}</strong></p>
 <form method="post" action="/oauth/device/verify">
   {hidden}
   <button type="submit" name="action" value="approve">Approve</button>
   <button type="submit" name="action" value="deny">Deny</button>
+</form>"""
+    else:
+        body = f"""<form method="get" action="/oauth/device/verify">
+  <label for="user_code">Code</label>
+  <input type="text" id="user_code" name="user_code" value="{escaped}" autocomplete="off" required>
+  <button type="submit">Continue</button>
 </form>"""
     return f"""<!doctype html>
 <html lang="en">
@@ -180,6 +185,7 @@ async def device_verify_page(request: Request):
     user_code = request.query_params.get("user_code", "")
     device = None
     client_name = ""
+    account = ""
     if user_code:
         device = await _pending_device(request.app.state.storage, _normalize_user_code(user_code))
         if device is not None:
@@ -188,6 +194,8 @@ async def device_verify_page(request: Request):
                 device = None
             else:
                 client_name = client.name
+                user = await request.app.state.storage.get_user_by_id(session_user.id)
+                account = user.username if user is not None else ""
     # Normalize the displayed/echoed code so the POST matches the resolved row.
     shown = _normalize_user_code(user_code) if device is not None else user_code
     response = HTMLResponse(
@@ -195,6 +203,7 @@ async def device_verify_page(request: Request):
             shown,
             device=device,
             client_name=client_name,
+            account=account,
             csrf_token=session_csrf_token(request) if device is not None else "",
         )
     )
@@ -216,7 +225,10 @@ async def _pending_device(storage, user_code: str) -> DeviceAuthorization | None
 
 
 @router.post("/device/verify")
-async def device_verify(request: Request) -> ORJSONResponse:
+async def device_verify(request: Request) -> Response:
+    rejection = require_same_origin(request)
+    if rejection is not None:
+        return rejection
     session_user = await load_session_user(request)
     if session_user is None:
         return ORJSONResponse({"error": "login_required"}, status_code=401)

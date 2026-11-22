@@ -13,7 +13,19 @@ from fastapi.responses import ORJSONResponse
 from pydantic import BaseModel, ValidationError
 
 
+class UnsupportedMediaTypeError(Exception):
+    """Raised by `_json_body` when the request body is not JSON.
+
+    `create_app` registers a handler that turns this into a 415 response, so
+    body-parsing helpers never have to hand a Response back through every
+    admin handler.
+    """
+
+
 async def _json_body(request: Request) -> dict:
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise UnsupportedMediaTypeError(content_type)
     try:
         body = await request.json()
     except ValueError:

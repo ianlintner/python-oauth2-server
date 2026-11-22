@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import MutableMapping
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -62,6 +63,69 @@ _SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
 }
+
+# The default browser-facing CSP is deliberately limited to navigation and
+# framing controls. Several OIDC pages legitimately need inline scripts
+# (/oauth/check_session, front-channel logout) or cross-origin iframes
+# (front-channel logout), and the login/consent forms redirect to external
+# clients; a blanket `default-src 'none'; form-action 'self'` breaks those
+# flows. Routes that need tighter or looser rules set their own CSP and
+# `apply_security_headers` leaves an existing value untouched.
+_DEFAULT_CSP = (
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; style-src 'unsafe-inline'"
+)
+
+# OIDC Session Management's check_session_iframe must be frameable by any
+# RP and runs an inline postMessage listener. The OP-side XFO/CSP framing
+# controls are therefore relaxed for this one response by the route itself.
+_CHECK_SESSION_CSP = (
+    "default-src 'none'; frame-ancestors *; base-uri 'none'; "
+    "script-src 'unsafe-inline'; style-src 'unsafe-inline'"
+)
+
+# Front-channel logout loads RP logout URIs in sandboxed iframes and uses
+# an inline redirect script; both are required by OIDC RP-Initiated Logout.
+_FRONTCHANNEL_CSP = (
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
+    "script-src 'unsafe-inline'; frame-src https: http:; "
+    "style-src 'unsafe-inline'"
+)
+
+
+def security_csp_for_path(path: str) -> str:
+    """Return the CSP appropriate for a browser-facing path."""
+    if path == "/oauth/check_session":
+        return _CHECK_SESSION_CSP
+    if path == "/oauth/logout":
+        return _FRONTCHANNEL_CSP
+    return _DEFAULT_CSP
+
+
+def apply_security_headers(
+    headers: MutableMapping[str, str],
+    *,
+    csp: str | None = None,
+    hsts: str | None = None,
+    allow_framing: bool = False,
+) -> None:
+    """Stamp the shared browser-facing headers without clobbering route values.
+
+    Some endpoints deliberately set their own `Cache-Control` (JWKS and
+    discovery metadata are cacheable) or their own `Content-Security-Policy`
+    (the authorize form_post builder uses a tighter policy). Only add headers
+    that are not already present.
+    """
+    for name, value in _SECURITY_HEADERS.items():
+        if allow_framing and name.lower() == "x-frame-options":
+            if name.lower() in {key.lower() for key in headers}:
+                del headers[name]
+            continue
+        if name.lower() not in {key.lower() for key in headers}:
+            headers[name] = value
+    if csp and "content-security-policy" not in {key.lower() for key in headers}:
+        headers["Content-Security-Policy"] = csp
+    if hsts and "strict-transport-security" not in {key.lower() for key in headers}:
+        headers["Strict-Transport-Security"] = hsts
 
 
 class DenylistGuard:
@@ -101,10 +165,12 @@ class DenylistGuard:
                 logger.warning("denylist lookup failed for ip=%s", address, exc_info=True)
                 entry = None
             if entry is not None:
-                path = request.url.path
-                is_oauth_or_admin_api = path.startswith(("/oauth", "/admin/api"))
-                headers = _SECURITY_HEADERS if is_oauth_or_admin_api else None
-                response = JSONResponse(_ACCESS_DENIED_BODY, status_code=403, headers=headers)
+                # Browser-facing responses all carry the shared header set;
+                # a short-circuited 403 never reaches the app-level
+                # `security_headers` middleware, so stamp it here.
+                response = JSONResponse(
+                    _ACCESS_DENIED_BODY, status_code=403, headers=dict(_SECURITY_HEADERS)
+                )
                 await response(scope, receive, send)
                 return
 

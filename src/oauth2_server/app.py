@@ -18,9 +18,15 @@ from oauth2_server.config import Config
 from oauth2_server import clock, conformance_sut
 from oauth2_server.conformance import apply_seed, seed_from_env
 from oauth2_server.keys import seed_keyset
-from oauth2_server.middleware import _SECURITY_HEADERS, DenylistGuard, MetricsMiddleware
+from oauth2_server.middleware import (
+    apply_security_headers,
+    DenylistGuard,
+    MetricsMiddleware,
+    security_csp_for_path,
+)
 from oauth2_server.middleware_ratelimit import RateLimitMiddleware, ResilienceMiddleware
 from oauth2_server.routes.admin import admin_router
+from oauth2_server.routes.admin._util import UnsupportedMediaTypeError
 from oauth2_server.routes.admin.guard import AdminAuthError
 from oauth2_server.routes.authorize import router as authorize_router
 from oauth2_server.routes.device import router as device_router
@@ -170,12 +176,36 @@ def create_app(
     async def _admin_auth_error_handler(request: Request, exc: AdminAuthError):
         return exc.response
 
+    @app.exception_handler(UnsupportedMediaTypeError)
+    async def _unsupported_media_type_handler(request: Request, exc: UnsupportedMediaTypeError):
+        return ORJSONResponse(
+            {
+                "error": "invalid_request",
+                "error_description": "Content-Type must be application/json",
+            },
+            status_code=415,
+        )
+
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
-        path = request.url.path
-        if path.startswith(("/oauth", "/admin/api")):
-            response.headers.update(_SECURITY_HEADERS)
+        # Browser-facing headers apply to every response, including error
+        # paths and session/login pages. Route-specific values (e.g. the
+        # cacheable JWKS/discovery documents, or authorize_response's tighter
+        # CSP) are preserved. The CSP is chosen per path so OIDC pages with
+        # inline scripts/iframes keep working.
+        cfg: Config = request.app.state.config
+        hsts = None
+        if cfg.issuer.startswith("https://") and not cfg.allow_insecure_defaults:
+            hsts = f"max-age={cfg.hsts_max_age_secs}"
+            if cfg.hsts_include_subdomains:
+                hsts += "; includeSubDomains"
+        apply_security_headers(
+            response.headers,
+            csp=security_csp_for_path(request.url.path),
+            hsts=hsts,
+            allow_framing=request.url.path == "/oauth/check_session",
+        )
         return response
 
     if config.allowed_origins:

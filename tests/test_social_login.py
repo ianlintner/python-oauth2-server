@@ -904,3 +904,45 @@ async def test_google_verified_email_creates_verified_user():
         social = await client.storage.get_user_by_username("google:7")
         assert social is not None
         assert social.email_verified is True
+
+
+# --- Provider response bodies are not echoed ---
+
+
+async def test_provider_error_body_is_not_returned():
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as client:
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "oauth2.googleapis.com":
+                return httpx.Response(400, text="SECRET_PROVIDER_BODY_WITH_TOKEN=abc123")
+            return httpx.Response(404)
+
+        client.app.state.http_client = _mock_transport(handler)
+        login_resp = await client.get("/auth/login/google", follow_redirects=False)
+        state = _state_from_location(login_resp.headers["location"])
+        resp = await client.get("/auth/callback/google", params={"state": state, "code": "c"})
+        assert resp.status_code == 400
+        assert "SECRET_PROVIDER_BODY" not in resp.text
+        assert "400" in resp.text
+
+
+# --- Social callback honours the shared fresh return_to window ---
+
+
+async def test_callback_stale_return_to_is_ignored():
+    async with build_client_app(
+        {"google_client_id": "g-id", "google_client_secret": "g-secret"}
+    ) as client:
+
+        @client.app.get("/__test_set_stale_return_to")
+        async def _set(request: Request) -> ORJSONResponse:
+            request.session["return_to"] = "/admin/api/users"
+            request.session["return_to_ts"] = 1
+            return ORJSONResponse({})
+
+        await client.get("/__test_set_stale_return_to")
+        resp = await _run_callback(client, "google", _google_handler("99", "a@example.com"))
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/profile"

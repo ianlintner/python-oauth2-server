@@ -969,3 +969,35 @@ async def test_client_resources_rejects_invalid_values():
             resp = await client.post("/admin/api/clients", json={"name": "R", "resources": bad})
             assert resp.status_code == 400, (bad, resp.text)
             assert resp.json()["error"] == "invalid_request"
+
+
+# --- Same-origin proof and JSON Content-Type ---
+
+
+async def test_admin_post_with_cross_origin_rejected():
+    async with build_client_app() as client:
+        await _login(client)
+        cross = await client.post(
+            "/admin/api/clients",
+            json={"name": "Cross"},
+            headers={"Origin": "https://evil.example"},
+        )
+        assert cross.status_code == 403, cross.text
+        ok = await client.post(
+            "/admin/api/clients",
+            json={"name": "Same"},
+            headers={"Origin": "https://auth.example.com"},
+        )
+        assert ok.status_code == 201, ok.text
+
+
+async def test_admin_json_body_requires_json_content_type():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            content='{"name":"x"}',
+            headers={"Content-Type": "text/plain", "Origin": "https://auth.example.com"},
+        )
+        assert resp.status_code == 415, resp.text
+        assert resp.json()["error"] == "invalid_request"
