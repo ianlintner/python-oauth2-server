@@ -39,6 +39,7 @@ def test_main_passes_resolved_workers_to_uvicorn(monkeypatch):
     monkeypatch.setattr(entry.uvicorn, "run", lambda *a, **kw: captured.update(kw))
     entry.main()
     assert captured["workers"] == 1
+    assert captured["proxy_headers"] is False
 
 
 def test_main_refuses_multi_worker_before_starting(monkeypatch):

@@ -61,6 +61,36 @@ _SELF_SIGNED_NO_MATCH_MESSAGE = (
     "self_signed_tls_client_auth: certificate does not match a registered JWK"
 )
 SELF_SIGNED_REQUIRES_JWKS_ERROR = "self_signed_tls_client_auth requires jwks or jwks_uri"
+TLS_CLIENT_AUTH_REQUIRES_DN_ERROR = (
+    "tls_client_auth requires a non-blank tls_client_certificate_subject_dn"
+)
+BLANK_SUBJECT_DN_ERROR = "tls_client_certificate_subject_dn must not be blank"
+SUBJECT_DN_MAX_LENGTH = 1024
+
+
+def validate_subject_dn(auth_method: str, subject_dn: str | None) -> str | None:
+    """Intake-time shape check for `tls_client_certificate_subject_dn`.
+
+    Returns an error description, or `None` when acceptable. Shared by RFC
+    7591 registration and the admin API so both enforce the same rule. The
+    stored value is never normalised (authentication compares it byte-exactly
+    against the presented DN); this only refuses values that cannot be a
+    usable DN: empty/blank for `tls_client_auth`, blank for any method,
+    over-long, or containing control characters.
+    """
+    dn = subject_dn or ""
+    if dn and not dn.strip():
+        return BLANK_SUBJECT_DN_ERROR
+    if not dn:
+        return TLS_CLIENT_AUTH_REQUIRES_DN_ERROR if auth_method == TLS_CLIENT_AUTH else None
+    if len(dn) > SUBJECT_DN_MAX_LENGTH:
+        return (
+            f"tls_client_certificate_subject_dn must be at most {SUBJECT_DN_MAX_LENGTH} characters"
+        )
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in dn):
+        return "tls_client_certificate_subject_dn must not contain control characters"
+    return None
+
 
 # Every `token_endpoint_auth_method` this server accepts at registration. It
 # lives here rather than in `routes/register.py` because BOTH intake paths —
@@ -494,25 +524,23 @@ def _authenticate_tls_client_auth(
     """RFC 8705 §2.1 `tls_client_auth` — PKI-issued certificate, identified
     by its Subject DN.
 
-    Rust's outcomes are kept verbatim, including the permissive one: a
-    client registered with an EMPTY `tls_client_certificate_subject_dn`
-    authenticates on the mere presence of a certificate. The DN comparison
-    is byte-exact (no DN normalization, no case folding) — matching Rust,
-    and deliberately strict, since a lenient parser here would be a
+    **Divergence (deliberate).** Rust accepts a client registered with an
+    EMPTY `tls_client_certificate_subject_dn` on the mere presence of a
+    certificate. Here a client without a registered DN never authenticates:
+    the presented Subject DN must equal a non-empty registered one. The DN
+    comparison is byte-exact (no DN normalization, no case folding) —
+    deliberately strict, since a lenient parser here would be a
     client-impersonation surface.
     """
     if thumbprint is None:
         raise OAuthError("invalid_client", _TLS_NO_CERT_MESSAGE)
 
-    # NOT trimmed: only an EXACTLY empty registered DN is the permissive
-    # "any certificate" case. Trimming first would turn a whitespace-only
-    # stored DN into that wildcard — a fail-open that lets any certificate
-    # the proxy vouched for authenticate this client. Registration and the
-    # admin API refuse blank DNs outright, and this is the backstop for rows
-    # written before that rule.
+    # NOT trimmed, and an empty value is a failure, never a wildcard. Rows
+    # that predate the registration-time rule fail with the same fixed
+    # message as a mismatch.
     configured_dn = client.tls_client_certificate_subject_dn or ""
     if not configured_dn:
-        return
+        raise OAuthError("invalid_client", _TLS_DN_MISMATCH_MESSAGE)
     if subject_dn is None:
         raise OAuthError("invalid_client", _TLS_NO_DN_HEADER_MESSAGE)
     if subject_dn != configured_dn:

@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from oauth2_server.bootstrap import seed_admin_user
+from oauth2_server.bootstrap import seed_admin_user, warn_tls_clients_without_subject_dn
 from oauth2_server.config import Config
 from oauth2_server import clock, conformance_sut
 from oauth2_server.conformance import apply_seed, seed_from_env
@@ -331,6 +331,7 @@ def build() -> FastAPI:
             }
         else:
             await seed_admin_user(storage, config)
+        await warn_tls_clients_without_subject_dn(storage)
         yield
         await app.state.http_client.aclose()
 

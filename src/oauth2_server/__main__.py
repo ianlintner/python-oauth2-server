@@ -65,6 +65,11 @@ def main() -> None:
         loop="uvloop",
         http="httptools",
         workers=workers,
+        # Keep `scope["client"]` as the real TCP peer. Uvicorn would otherwise
+        # rewrite it from `X-Forwarded-For` for loopback peers, and the mTLS
+        # trusted-proxy check (`services/mtls.py`) must see the socket peer.
+        # Forwarded addresses are derived explicitly in `client_address.py`.
+        proxy_headers=False,
     )
 
 

@@ -37,3 +37,29 @@ async def seed_admin_user(storage: Storage, config: Config) -> bool:
         )
     )
     return True
+
+
+_TLS_CLIENT_AUTH_METHOD = "tls_client_auth"
+
+
+async def warn_tls_clients_without_subject_dn(storage: Storage) -> list[str]:
+    """Log one warning per `tls_client_auth` client with no registered Subject DN.
+
+    Such a client can no longer authenticate (every attempt fails
+    `invalid_client`); surfacing it at startup lets an operator set the DN via
+    the admin API instead of discovering the lock-out on the first request.
+    Returns the affected `client_id`s.
+    """
+    affected = [
+        client.client_id
+        for client in await storage.list_all_clients()
+        if client.token_endpoint_auth_method == _TLS_CLIENT_AUTH_METHOD
+        and not client.tls_client_certificate_subject_dn
+    ]
+    for client_id in affected:
+        logger.warning(
+            "client %r uses tls_client_auth but has no tls_client_certificate_subject_dn; "
+            "it cannot authenticate until one is set (PUT /admin/api/clients/{id})",
+            client_id,
+        )
+    return affected
