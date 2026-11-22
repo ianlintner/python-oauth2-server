@@ -14,6 +14,7 @@ from sqlalchemy import column as sa_column
 from sqlalchemy import select as sa_select
 from sqlalchemy import table as sa_table
 from sqlalchemy import text
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from oauth2_server import clock
@@ -81,8 +82,24 @@ _USER_UPDATE_COLS = [
     "enabled",
     "role",
     "password_hash",
+    "session_epoch",
     "updated_at",
 ]
+
+# Lightweight table construct for Core (non-text) UPDATEs.
+_USERS_TABLE = sa_table(
+    "users",
+    sa_column("id"),
+    sa_column("email"),
+    sa_column("email_verified"),
+    sa_column("enabled"),
+    sa_column("role"),
+    sa_column("updated_at"),
+    sa_column("session_epoch"),
+)
+
+# Columns update_user_fields (the partial, epoch-safe admin update) may set.
+_USER_FIELD_UPDATE_COLS = frozenset({"email", "email_verified", "enabled", "role"})
 
 # Columns update_client is allowed to change — mirrors the Rust UPDATE query,
 # which deliberately excludes id/client_id/created_at/require_state.
@@ -412,6 +429,21 @@ class SqlStorage:
                 self._dump(user),
             )
 
+    async def update_user_fields(
+        self, user_id: str, fields: dict, *, bump_session_epoch: bool = False
+    ) -> None:
+        if not set(fields) <= _USER_FIELD_UPDATE_COLS:
+            raise ValueError("unsupported user field")
+        # SQLAlchemy Core construct (no raw SQL text): column names come from
+        # the whitelist above and every value is a bound parameter.
+        values: dict = {c: fields[c] for c in fields}
+        values["updated_at"] = self._dt(datetime.now(UTC))
+        if bump_session_epoch:
+            values["session_epoch"] = _USERS_TABLE.c.session_epoch + 1
+        stmt = sa_update(_USERS_TABLE).where(_USERS_TABLE.c.id == user_id).values(**values)
+        async with self._engine.begin() as conn:
+            await conn.execute(stmt)
+
     async def delete_user(self, user_id: str) -> None:
         async with self._engine.begin() as conn:
             # Unlink + revoke the user's tokens before deleting the row (FK).
@@ -424,21 +456,29 @@ class SqlStorage:
     async def set_user_enabled(self, user_id: str, enabled: bool) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(
-                text("UPDATE users SET enabled = :e WHERE id = :uid"),
+                text(
+                    "UPDATE users SET enabled = :e, session_epoch = session_epoch + 1 "
+                    "WHERE id = :uid"
+                ),
                 {"e": enabled, "uid": user_id},
             )
 
     async def set_user_role(self, user_id: str, role: str) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(
-                text("UPDATE users SET role = :r WHERE id = :uid"),
+                text(
+                    "UPDATE users SET role = :r, session_epoch = session_epoch + 1 WHERE id = :uid"
+                ),
                 {"r": role, "uid": user_id},
             )
 
     async def set_user_password_hash(self, user_id: str, password_hash: str) -> None:
         async with self._engine.begin() as conn:
             await conn.execute(
-                text("UPDATE users SET password_hash = :p WHERE id = :uid"),
+                text(
+                    "UPDATE users SET password_hash = :p, session_epoch = session_epoch + 1 "
+                    "WHERE id = :uid"
+                ),
                 {"p": password_hash, "uid": user_id},
             )
 

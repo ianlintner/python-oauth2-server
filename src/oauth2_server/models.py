@@ -164,6 +164,9 @@ class User(BaseModel):
     email_verified: bool = True
     enabled: bool = True
     role: str = "user"
+    # Bumped by storage whenever the account's standing changes (disable, role
+    # change, password reset); a session stamped with an older value is ended.
+    session_epoch: int = 0
     created_at: MongoDateTime = Field(default_factory=_now)
     updated_at: MongoDateTime = Field(default_factory=_now)
 
