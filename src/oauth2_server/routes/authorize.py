@@ -99,7 +99,7 @@ from oauth2_server.services.jar import process_jar
 from oauth2_server.services.limits import LimitError, check_json_param
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource_for_client
-from oauth2_server.sessions import current_acr, current_amr, current_user_id
+from oauth2_server.sessions import current_acr, current_amr, load_session_user
 
 logger = logging.getLogger(__name__)
 
@@ -494,7 +494,8 @@ async def authorize(request: Request):
             config.issuer,
         )
 
-    user_id = current_user_id(request)
+    session_user = await load_session_user(request)
+    user_id = session_user.id if session_user is not None else None
 
     # max_age: if the session's auth_time is older than max_age seconds (or
     # missing entirely), the user must re-authenticate.
@@ -684,9 +685,12 @@ async def consent(request: Request):
     storage = request.app.state.storage
     store = request.app.state.consent_store
 
-    user_id = current_user_id(request)
-    if user_id is None:
+    # Standing (enabled, denylist, epoch) comes from the stored user, not the
+    # cookie copy, as on `/oauth/authorize`.
+    session_user = await load_session_user(request)
+    if session_user is None:
         return _error_page(401, "login_required", "login required")
+    user_id = session_user.id
 
     form = dict(await request.form())
     handle = form.get("handle")

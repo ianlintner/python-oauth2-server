@@ -39,6 +39,8 @@ class Config(BaseSettings):
     refresh_token_ttl_secs: int = 86400
     authorization_code_ttl_secs: int = 600
     allow_insecure_defaults: bool = False
+    # Lifetime of the signed session cookie (signature age and `Max-Age`).
+    session_max_age_secs: int = Field(default=28800, gt=0)
     host: str = "0.0.0.0"
     port: int = 8080
     max_connections: Annotated[int, Field(validation_alias="OAUTH2_DATABASE_MAX_CONNECTIONS")] = 10
