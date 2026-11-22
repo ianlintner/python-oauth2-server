@@ -79,7 +79,9 @@ async def _best_effort_revoke_by_user(storage, user_id: str) -> None:
     try:
         await storage.revoke_tokens_by_user_id(user_id)
     except Exception:
-        logger.warning("failed to revoke tokens for user_id=%s", user_id, exc_info=True)
+        # Fixed message only: neither the user-supplied id nor the exception
+        # (its text and traceback can echo ids / bound SQL parameters) is logged.
+        logger.error("best-effort user token revocation failed")
 
 
 @router.get("/users")
@@ -206,9 +208,15 @@ async def update_user(
     if "enabled" in fields_set:
         updates["enabled"] = body_model.enabled
 
-    now = datetime.now(UTC)
-    updated = user.model_copy(update={**updates, "updated_at": now})
-    await storage.update_user(updated)
+    # Write only the requested fields and bump the stored epoch in the same
+    # atomic statement. Never write back a value derived from the read above:
+    # a concurrent password reset / role change would otherwise be overwritten
+    # and an invalidated session cookie would become valid again.
+    changed = any(getattr(user, k) != v for k, v in updates.items())
+    await storage.update_user_fields(user_id, updates, bump_session_epoch=changed)
+    updated = await storage.get_user_by_id(user_id)
+    if updated is None:  # deleted concurrently
+        return _user_not_found()
 
     if updates.get("enabled") is False:
         await _best_effort_revoke_by_user(storage, user_id)
@@ -216,7 +224,14 @@ async def update_user(
     await record_audit(
         storage,
         events,
-        build_audit(request, actor, "user.update", "user", user.id, {"fields": sorted(updates)}),
+        build_audit(
+            request,
+            actor,
+            "user.update",
+            "user",
+            user.id,
+            {"fields": sorted(updates)},
+        ),
     )
 
     return ORJSONResponse(_user_response(updated))

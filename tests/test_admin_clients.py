@@ -16,6 +16,7 @@ import pytest
 
 from oauth2_server.models import Token
 from oauth2_server.services.client_assertion import JWT_BEARER_ASSERTION_TYPE
+from oauth2_server.services.credential_storage import verify_client_secret
 from tests.conftest import build_client_app
 from tests.helpers import (
     generate_rsa_keypair,
@@ -207,7 +208,8 @@ async def test_create_client_confidential_returns_secret_once():
         assert body["redirect_uris"] == []
 
         stored = await client.storage.get_client(body["client_id"])
-        assert stored.client_secret == body["client_secret"]
+        assert stored.client_secret != body["client_secret"]  # stored as a verifier
+        assert verify_client_secret(stored.client_secret, body["client_secret"])
 
 
 async def test_create_client_rejects_short_secret():
@@ -491,7 +493,8 @@ async def test_regenerate_client_secret_replaces_secret():
         assert body["client_secret"] != "s3cret"
 
         reloaded = await client.storage.get_client("client1")
-        assert reloaded.client_secret == body["client_secret"]
+        assert verify_client_secret(reloaded.client_secret, body["client_secret"])
+        assert reloaded.hmac_secret() == body["client_secret"]
 
 
 # --- private_key_jwt / key material ---
@@ -966,3 +969,35 @@ async def test_client_resources_rejects_invalid_values():
             resp = await client.post("/admin/api/clients", json={"name": "R", "resources": bad})
             assert resp.status_code == 400, (bad, resp.text)
             assert resp.json()["error"] == "invalid_request"
+
+
+# --- Same-origin proof and JSON Content-Type ---
+
+
+async def test_admin_post_with_cross_origin_rejected():
+    async with build_client_app() as client:
+        await _login(client)
+        cross = await client.post(
+            "/admin/api/clients",
+            json={"name": "Cross"},
+            headers={"Origin": "https://evil.example"},
+        )
+        assert cross.status_code == 403, cross.text
+        ok = await client.post(
+            "/admin/api/clients",
+            json={"name": "Same"},
+            headers={"Origin": "https://auth.example.com"},
+        )
+        assert ok.status_code == 201, ok.text
+
+
+async def test_admin_json_body_requires_json_content_type():
+    async with build_client_app() as client:
+        await _login(client)
+        resp = await client.post(
+            "/admin/api/clients",
+            content='{"name":"x"}',
+            headers={"Content-Type": "text/plain", "Origin": "https://auth.example.com"},
+        )
+        assert resp.status_code == 415, resp.text
+        assert resp.json()["error"] == "invalid_request"

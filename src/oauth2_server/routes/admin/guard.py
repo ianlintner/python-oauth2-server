@@ -11,6 +11,12 @@ Bearer is checked first, matching the Rust guard: a Bearer header present but
 invalid/unknown/revoked/expired short-circuits with 401 even if a valid
 session cookie is also present. Only the absence of a Bearer header falls
 through to the session path.
+
+Cookie-authenticated admin calls carry a same-origin proof on every method,
+GETs included: this is a JSON API with no cross-site navigation use case, so
+a cross-site navigation to an admin URL is rejected with 403 rather than
+rendered. Bearer-authenticated calls are not browser-driven and skip the
+check.
 """
 
 from __future__ import annotations
@@ -24,6 +30,8 @@ from fastapi.responses import ORJSONResponse, RedirectResponse, Response
 
 from oauth2_server.config import Config
 from oauth2_server.models import User
+from oauth2_server.services.csrf import cross_origin_error, is_same_origin_request
+from oauth2_server.sessions import load_session_user
 
 logger = logging.getLogger(__name__)
 
@@ -143,29 +151,30 @@ async def _authenticate_bearer(request: Request, token_value: str) -> AdminActor
     return AdminActor(actor_id=user.id, actor_email=user.email)
 
 
-def _authenticate_session(request: Request) -> AdminActor:
+async def _authenticate_session(request: Request) -> AdminActor:
     config = request.app.state.config
-    session = request.session
 
-    user_id = session.get("user_id")
-    if not user_id:
+    if not request.session.get("user_id"):
         raise _login_required_error()
 
-    role = session.get("role", "")
-    email = session.get("email", "")
-    if role != "admin" and email.lower() in config.admin_emails:
-        # The allow-list only applies to an email the server established as
-        # verified. A missing flag (older session cookie) counts as unverified.
-        if session.get("email_verified") is not True:
-            logger.warning(
-                "admin email allow-list match refused for user %s: email is not verified",
-                user_id,
-            )
-            raise _insufficient_permissions_error()
-    elif role != "admin":
+    # Standing comes from the stored row, never from the cookie copy.
+    user = await load_session_user(request)
+    if user is None:
         raise _insufficient_permissions_error()
 
-    return AdminActor(actor_id=user_id, actor_email=email)
+    if user.role != "admin":
+        if user.email.lower() not in config.admin_emails:
+            raise _insufficient_permissions_error()
+        # The allow-list only applies to an email the server established as
+        # verified (the stored flag, not the cookie copy).
+        if not user.email_verified:
+            logger.warning(
+                "admin email allow-list match refused for user %s: email is not verified",
+                user.id,
+            )
+            raise _insufficient_permissions_error()
+
+    return AdminActor(actor_id=user.id, actor_email=user.email)
 
 
 async def require_admin(request: Request) -> AdminActor:
@@ -174,7 +183,12 @@ async def require_admin(request: Request) -> AdminActor:
     if auth_header[:7].lower() == "bearer ":
         token_value = auth_header[7:].strip()
         return await _authenticate_bearer(request, token_value)
-    return _authenticate_session(request)
+    # Cookie-authenticated admin calls are browser-driven: require proof that
+    # the state-changing request originated from this server. Bearer callers
+    # above are not browser-bound and skip this check.
+    if not is_same_origin_request(request):
+        raise AdminAuthError(cross_origin_error())
+    return await _authenticate_session(request)
 
 
 # Module-level singleton for the mutating admin handlers that need the

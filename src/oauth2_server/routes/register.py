@@ -23,6 +23,7 @@ from oauth2_server.services.clients import (
     is_valid_jwks_uri,
     is_valid_redirect_uri,
 )
+from oauth2_server.services.client_secrets import protect_client_secret
 from oauth2_server.services.events_bus import emit_event
 from oauth2_server import clock
 
@@ -198,11 +199,18 @@ async def register_client(request: Request) -> ORJSONResponse:
     client_id = secrets.token_urlsafe(16)
     client_secret = "" if is_public else secrets.token_urlsafe(32)
     registration_access_token = secrets.token_urlsafe(32)
+    # Persist only the verifier + sealed HMAC key; the plaintext secret and
+    # registration access token go back in this response once and are never
+    # stored (storage digests the registration access token on save).
+    secret_verifier_value, sealed_secret_key = await protect_client_secret(
+        client_secret, client_id, config.jwt_secret
+    )
 
     client = Client(
         id=uuid.uuid4().hex,
         client_id=client_id,
-        client_secret=client_secret,
+        client_secret=secret_verifier_value,
+        client_secret_key=sealed_secret_key,
         redirect_uris=json.dumps(reg.redirect_uris),
         grant_types=json.dumps(reg.grant_types),
         response_types=json.dumps(reg.response_types),

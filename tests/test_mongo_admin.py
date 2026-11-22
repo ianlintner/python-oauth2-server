@@ -43,6 +43,7 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
+from oauth2_server.services.credential_storage import digest  # noqa: E402
 from oauth2_server.models import (  # noqa: E402
     AuditLogEntry,
     Client,
@@ -179,15 +180,15 @@ async def test_tokens_page_status_filter(storage):
 
     items, total = await storage.list_tokens_page(ListQuery(status="active"))
     assert total == 1
-    assert items[0].access_token == active.access_token
+    assert items[0].access_token == digest(active.access_token, "access")
 
     items, total = await storage.list_tokens_page(ListQuery(status="revoked"))
     assert total == 1
-    assert items[0].access_token == revoked.access_token
+    assert items[0].access_token == digest(revoked.access_token, "access")
 
     items, total = await storage.list_tokens_page(ListQuery(status="expired"))
     assert total == 1
-    assert items[0].access_token == expired.access_token
+    assert items[0].access_token == digest(expired.access_token, "access")
 
 
 # --- Device authorizations ---

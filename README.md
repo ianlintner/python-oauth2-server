@@ -136,6 +136,9 @@ Phase 3a (see `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` and `docs/P
 |---|---|---|
 | `OAUTH2_LOGIN_RATE_LIMIT_ATTEMPTS` | `10` | Max `POST /auth/login` attempts allowed per window, per IP and per username (either exhausted → blocked). |
 | `OAUTH2_LOGIN_RATE_LIMIT_WINDOW_SECS` | `900` | Fixed-window duration (seconds) for the login rate limiter. |
+| `OAUTH2_SESSION_MAX_AGE_SECS` | `28800` | Lifetime of the session cookie. Sessions are also re-checked against the stored user on each request. |
+
+SQL deployments must apply migration `V27` (adds `users.session_epoch`). Sessions issued before this change carry no epoch, so users sign in once more after upgrading.
 
 ## Phase 3b: DPoP, RAR, Token Exchange
 
@@ -745,6 +748,10 @@ authenticating with its OWN certificate cannot introspect a token bound to a DIF
 certificate: the binding check fails and the response is `{"active": false}`. For that topology,
 give the resource server an introspection client that authenticates with a secret or a JWT
 assertion, so the thumbprint header is free to carry the token's binding.
+
+## Credentials hashed at rest (breaking cutover)
+
+Access/refresh tokens, authorization and device codes and registration access tokens are stored as domain-separated SHA-256 digests; client secrets as Argon2id verifiers, with sealed (AES-256-GCM) key material kept only for the HMAC uses (`client_secret_jwt`, HS256 JAR/introspection). Existing databases must be converted by the operator with `python -m oauth2_server.cutover` — never at startup. See `docs/credential-cutover.md` for the procedure, rotation, already-issued JWT behaviour and rollback.
 
 ## Running
 
