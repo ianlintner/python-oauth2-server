@@ -974,7 +974,7 @@ async def test_client_resources_rejects_invalid_values():
 # --- Same-origin proof and JSON Content-Type ---
 
 
-async def test_admin_post_without_origin_rejected():
+async def test_admin_post_with_cross_origin_rejected():
     async with build_client_app() as client:
         await _login(client)
         cross = await client.post(

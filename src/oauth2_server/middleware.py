@@ -62,15 +62,52 @@ _SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
-    "Content-Security-Policy": (
-        "default-src 'none'; frame-ancestors 'none'; form-action 'self'; "
-        "base-uri 'none'; style-src 'unsafe-inline'"
-    ),
-    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
 }
 
+# The default browser-facing CSP is deliberately limited to navigation and
+# framing controls. Several OIDC pages legitimately need inline scripts
+# (/oauth/check_session, front-channel logout) or cross-origin iframes
+# (front-channel logout), and the login/consent forms redirect to external
+# clients; a blanket `default-src 'none'; form-action 'self'` breaks those
+# flows. Routes that need tighter or looser rules set their own CSP and
+# `apply_security_headers` leaves an existing value untouched.
+_DEFAULT_CSP = (
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; style-src 'unsafe-inline'"
+)
 
-def apply_security_headers(headers: MutableMapping[str, str]) -> None:
+# OIDC Session Management's check_session_iframe must be frameable by any
+# RP and runs an inline postMessage listener. The OP-side XFO/CSP framing
+# controls are therefore relaxed for this one response by the route itself.
+_CHECK_SESSION_CSP = (
+    "default-src 'none'; frame-ancestors *; base-uri 'none'; "
+    "script-src 'unsafe-inline'; style-src 'unsafe-inline'"
+)
+
+# Front-channel logout loads RP logout URIs in sandboxed iframes and uses
+# an inline redirect script; both are required by OIDC RP-Initiated Logout.
+_FRONTCHANNEL_CSP = (
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; "
+    "script-src 'unsafe-inline'; frame-src https: http:; "
+    "style-src 'unsafe-inline'"
+)
+
+
+def security_csp_for_path(path: str) -> str:
+    """Return the CSP appropriate for a browser-facing path."""
+    if path == "/oauth/check_session":
+        return _CHECK_SESSION_CSP
+    if path == "/oauth/logout":
+        return _FRONTCHANNEL_CSP
+    return _DEFAULT_CSP
+
+
+def apply_security_headers(
+    headers: MutableMapping[str, str],
+    *,
+    csp: str | None = None,
+    hsts: str | None = None,
+    allow_framing: bool = False,
+) -> None:
     """Stamp the shared browser-facing headers without clobbering route values.
 
     Some endpoints deliberately set their own `Cache-Control` (JWKS and
@@ -79,8 +116,16 @@ def apply_security_headers(headers: MutableMapping[str, str]) -> None:
     that are not already present.
     """
     for name, value in _SECURITY_HEADERS.items():
+        if allow_framing and name.lower() == "x-frame-options":
+            if name.lower() in {key.lower() for key in headers}:
+                del headers[name]
+            continue
         if name.lower() not in {key.lower() for key in headers}:
             headers[name] = value
+    if csp and "content-security-policy" not in {key.lower() for key in headers}:
+        headers["Content-Security-Policy"] = csp
+    if hsts and "strict-transport-security" not in {key.lower() for key in headers}:
+        headers["Strict-Transport-Security"] = hsts
 
 
 class DenylistGuard:

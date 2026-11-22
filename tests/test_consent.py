@@ -69,6 +69,17 @@ async def test_authorize_without_prior_consent_renders_consent_page(consent_app)
     assert PKCE_CHALLENGE not in resp.text
 
 
+async def test_consent_page_csp_does_not_block_client_redirect(consent_app):
+    await login_session(consent_app)
+    page = await _authorize(consent_app)
+    assert page.status_code == 200
+    csp = page.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in csp
+    # POST /oauth/consent 302s to the client's external redirect_uri; a
+    # form-action 'self' directive breaks that browser-side redirect chain.
+    assert "form-action" not in csp
+
+
 async def test_authorize_consent_post_issues_code(consent_app):
     await login_session(consent_app)
     page = await _authorize(consent_app)

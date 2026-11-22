@@ -11,6 +11,12 @@ Bearer is checked first, matching the Rust guard: a Bearer header present but
 invalid/unknown/revoked/expired short-circuits with 401 even if a valid
 session cookie is also present. Only the absence of a Bearer header falls
 through to the session path.
+
+Cookie-authenticated admin calls carry a same-origin proof on every method,
+GETs included: this is a JSON API with no cross-site navigation use case, so
+a cross-site navigation to an admin URL is rejected with 403 rather than
+rendered. Bearer-authenticated calls are not browser-driven and skip the
+check.
 """
 
 from __future__ import annotations

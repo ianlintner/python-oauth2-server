@@ -58,6 +58,12 @@ class Config(BaseSettings):
     refresh_token_ttl_secs: int = 86400
     authorization_code_ttl_secs: int = 600
     allow_insecure_defaults: bool = False
+    # HSTS is opt-in per deployment: `includeSubDomains` affects every sibling
+    # subdomain of the issuer, which only the operator can decide. Default is
+    # a host-only max-age header on https issuers; set the explicit subdomain
+    # flag only when all subdomains are known to be https-ready.
+    hsts_include_subdomains: bool = False
+    hsts_max_age_secs: int = 31536000
     host: str = "0.0.0.0"
     port: int = 8080
     max_connections: Annotated[int, Field(validation_alias="OAUTH2_DATABASE_MAX_CONNECTIONS")] = 10

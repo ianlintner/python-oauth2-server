@@ -178,7 +178,7 @@ async def test_device_verify_page_preserves_normal_user_code(client_app):
     assert 'value="WDJB-MJHT"' in resp.text
 
 
-async def test_login_post_without_origin_rejected(client_app):
+async def test_login_post_with_cross_origin_rejected(client_app):
     cross = await client_app.post(
         "/auth/login",
         data={"username": "user_rfc", "password": "password123"},
@@ -201,6 +201,9 @@ async def test_login_page_has_anti_framing_headers(client_app):
     csp = resp.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in csp
     assert resp.headers["strict-transport-security"].startswith("max-age=")
+    # The login form 303-redirects through /oauth/authorize to the client's
+    # external redirect_uri; a form-action 'self' directive breaks that chain.
+    assert "form-action" not in csp
 
 
 async def test_global_security_headers_preserve_cacheable_metadata(client_app):
