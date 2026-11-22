@@ -64,6 +64,8 @@ class Config(BaseSettings):
     # flag only when all subdomains are known to be https-ready.
     hsts_include_subdomains: bool = False
     hsts_max_age_secs: int = 31536000
+    # Lifetime of the signed session cookie (signature age and `Max-Age`).
+    session_max_age_secs: int = Field(default=28800, gt=0)
     host: str = "0.0.0.0"
     port: int = 8080
     max_connections: Annotated[int, Field(validation_alias="OAUTH2_DATABASE_MAX_CONNECTIONS")] = 10

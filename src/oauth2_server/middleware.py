@@ -270,10 +270,20 @@ async def check_subject_denylisted(storage, kind: str, value: str) -> str | None
     if not value:
         return None
     try:
-        entry = await storage.find_denylist_entry(kind, value)
+        return await check_subject_denylisted_strict(storage, kind, value)
     except Exception:
         logger.warning("denylist lookup failed for kind=%s", kind, exc_info=True)
         return None
-    if entry is None:
+
+
+async def check_subject_denylisted_strict(storage, kind: str, value: str) -> str | None:
+    """Like `check_subject_denylisted`, but a storage error propagates.
+
+    For paths where unknown standing must not be read as "not listed" (session
+    validation, grant redemption, first social sign-in): the caller fails
+    closed because the exception is not swallowed here.
+    """
+    if not value:
         return None
-    return entry.reason
+    entry = await storage.find_denylist_entry(kind, value)
+    return None if entry is None else entry.reason
