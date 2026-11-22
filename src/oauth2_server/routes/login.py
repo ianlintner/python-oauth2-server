@@ -30,18 +30,15 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from oauth2_server.client_address import client_address
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.security import verify_password_async
-from oauth2_server.services.auth import is_safe_redirect
+from oauth2_server.services.auth import RETURN_TO_MAX_AGE_SECS as RETURN_TO_MAX_AGE_SECS  # noqa: F401
+from oauth2_server.services.auth import fresh_return_to
+from oauth2_server.services.csrf import require_same_origin
 from oauth2_server.sessions import set_login
 from oauth2_server import clock
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# How long a pending `return_to` saved by GET /oauth/authorize (or
-# GET /oauth/device/verify) stays valid. After this window a login no longer
-# replays the stored redirect target.
-RETURN_TO_MAX_AGE_SECS = 600
 
 _SERVER_ERROR_PLACEHOLDER = "<!--SERVER_ERROR-->"
 
@@ -106,6 +103,9 @@ async def login_page(request: Request) -> HTMLResponse:
 
 @router.post("/login")
 async def login(request: Request):
+    rejection = require_same_origin(request)
+    if rejection is not None:
+        return rejection
     form = await request.form()
     username = form.get("username", "")
     password = form.get("password", "")
@@ -184,8 +184,7 @@ async def login(request: Request):
     # `return_to` was saved to the session by GET /oauth/authorize (or
     # GET /oauth/device/verify) before redirecting here; read it before
     # set_login() clears the session.
-    return_to = request.session.get("return_to")
-    return_to_ts = request.session.get("return_to_ts")
+    return_to_data = dict(request.session)
     set_login(
         request,
         user,
@@ -196,9 +195,7 @@ async def login(request: Request):
     # Only honor return_to when it was stamped by a recent redirect. A stale
     # (or unstamped) value from an abandoned request must not be replayed on
     # a later unrelated login (login-CSRF hardening).
-    fresh = isinstance(return_to_ts, int) and clock.time() - return_to_ts <= RETURN_TO_MAX_AGE_SECS
-
-    target = return_to if fresh and is_safe_redirect(return_to) else "/"
+    target = fresh_return_to(return_to_data, "/", now=clock.time())
     # RFC 9700 §4.11: 303 See Other for a POST-triggered redirect, so a
     # client always re-issues the follow-up as GET.
     return RedirectResponse(target, status_code=303)

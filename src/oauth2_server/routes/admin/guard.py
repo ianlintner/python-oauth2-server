@@ -11,6 +11,12 @@ Bearer is checked first, matching the Rust guard: a Bearer header present but
 invalid/unknown/revoked/expired short-circuits with 401 even if a valid
 session cookie is also present. Only the absence of a Bearer header falls
 through to the session path.
+
+Cookie-authenticated admin calls carry a same-origin proof on every method,
+GETs included: this is a JSON API with no cross-site navigation use case, so
+a cross-site navigation to an admin URL is rejected with 403 rather than
+rendered. Bearer-authenticated calls are not browser-driven and skip the
+check.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ from fastapi.responses import ORJSONResponse, RedirectResponse, Response
 
 from oauth2_server.config import Config
 from oauth2_server.models import User
+from oauth2_server.services.csrf import cross_origin_error, is_same_origin_request
 from oauth2_server.sessions import load_session_user
 
 logger = logging.getLogger(__name__)
@@ -176,6 +183,11 @@ async def require_admin(request: Request) -> AdminActor:
     if auth_header[:7].lower() == "bearer ":
         token_value = auth_header[7:].strip()
         return await _authenticate_bearer(request, token_value)
+    # Cookie-authenticated admin calls are browser-driven: require proof that
+    # the state-changing request originated from this server. Bearer callers
+    # above are not browser-bound and skip this check.
+    if not is_same_origin_request(request):
+        raise AdminAuthError(cross_origin_error())
     return await _authenticate_session(request)
 
 

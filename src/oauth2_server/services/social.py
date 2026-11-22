@@ -255,7 +255,9 @@ async def exchange_code(
     except httpx.HTTPError as exc:
         raise ProviderError(f"token exchange request failed: {exc}") from exc
     if response.status_code != 200:
-        raise ProviderError(f"token endpoint returned {response.status_code}: {response.text}")
+        # Never surface the provider's response body: it can contain tokens,
+        # user data or internal diagnostics. The status is enough to act on.
+        raise ProviderError(f"token endpoint returned {response.status_code}")
     try:
         payload = response.json()
     except ValueError as exc:
@@ -278,7 +280,8 @@ async def _get_json(http_client: httpx.AsyncClient, url: str, headers: dict[str,
     except httpx.HTTPError as exc:
         raise ProviderError(f"userinfo request failed: {exc}") from exc
     if response.status_code != 200:
-        raise ProviderError(f"userinfo endpoint returned {response.status_code}: {response.text}")
+        # Same rule as the token endpoint: the status is safe, the body is not.
+        raise ProviderError(f"userinfo endpoint returned {response.status_code}")
     try:
         return response.json()
     except ValueError as exc:

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 
 from oauth2_server.app import create_app
 from oauth2_server.config import Config
@@ -42,6 +43,54 @@ def test_config_reads_env_vars(monkeypatch):
     c = Config()
     assert c.issuer == "https://issuer.test"
     assert c.allowed_origins == ["https://a.test", "https://b.test"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "*",
+        "https://*.example.com",
+        "https://example.com/path",
+        "https://example.com?x=1",
+        "example.com",
+        "ftp://example.com",
+        "https://user:pass@example.com",
+        "null",
+    ],
+)
+def test_config_rejects_invalid_allowed_origins(bad):
+    with pytest.raises(ValidationError):
+        Config(
+            jwt_secret="unit-test-secret-not-for-production-0123456789abcdef",
+            allowed_origins=[bad],
+        )
+
+
+async def test_hsts_include_subdomains_is_opt_in():
+    secret = "unit-test-secret-not-for-production-0123456789abcdef"
+    storage = await make_storage()
+    app = create_app(Config(jwt_secret=secret, issuer="https://auth.example.com"), storage)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://auth.example.com"
+    ) as c:
+        resp = await c.get("/health")
+    assert resp.headers["strict-transport-security"] == "max-age=31536000"
+    assert "includeSubDomains" not in resp.headers["strict-transport-security"]
+
+    opt_in = create_app(
+        Config(
+            jwt_secret=secret,
+            issuer="https://auth.example.com",
+            hsts_include_subdomains=True,
+            hsts_max_age_secs=600,
+        ),
+        storage,
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=opt_in), base_url="https://auth.example.com"
+    ) as c:
+        resp = await c.get("/health")
+    assert resp.headers["strict-transport-security"] == "max-age=600; includeSubDomains"
 
 
 async def test_session_cookie_is_secure_by_default():
