@@ -73,10 +73,9 @@ import json
 import logging
 import re
 import secrets
-import time
 import uuid
-from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode
+from oauth2_server import clock
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
@@ -100,7 +99,7 @@ from oauth2_server.services.jar import process_jar
 from oauth2_server.services.limits import LimitError, check_json_param
 from oauth2_server.services.rar import RarError, validate_authorization_details
 from oauth2_server.services.resource import validate_resource_for_client
-from oauth2_server.sessions import current_acr, current_amr, current_user_id
+from oauth2_server.sessions import current_acr, current_amr, load_session_user
 
 logger = logging.getLogger(__name__)
 
@@ -495,7 +494,8 @@ async def authorize(request: Request):
             config.issuer,
         )
 
-    user_id = current_user_id(request)
+    session_user = await load_session_user(request)
+    user_id = session_user.id if session_user is not None else None
 
     # max_age: if the session's auth_time is older than max_age seconds (or
     # missing entirely), the user must re-authenticate.
@@ -508,7 +508,7 @@ async def authorize(request: Request):
             max_age_secs = None
         if max_age_secs is not None:
             auth_time = request.session.get("auth_time")
-            auth_expired = auth_time is None or (time.time() - auth_time) >= max_age_secs
+            auth_expired = auth_time is None or (clock.time() - auth_time) >= max_age_secs
 
     # prompt=none: the AS must not display any UI. If the caller isn't
     # authenticated, re-authentication would be forced, or the existing
@@ -532,7 +532,7 @@ async def authorize(request: Request):
         # Timestamp the pending redirect so POST /auth/login can reject a stale
         # return_to left over from an abandoned (possibly attacker-initiated)
         # authorization request instead of silently replaying it.
-        request.session["return_to_ts"] = int(time.time())
+        request.session["return_to_ts"] = int(clock.time())
         return RedirectResponse("/auth/login", status_code=302)
 
     # --- 5a. `admin` scope requires the user to currently be an admin ---
@@ -685,9 +685,12 @@ async def consent(request: Request):
     storage = request.app.state.storage
     store = request.app.state.consent_store
 
-    user_id = current_user_id(request)
-    if user_id is None:
+    # Standing (enabled, denylist, epoch) comes from the stored user, not the
+    # cookie copy, as on `/oauth/authorize`.
+    session_user = await load_session_user(request)
+    if session_user is None:
         return _error_page(401, "login_required", "login required")
+    user_id = session_user.id
 
     form = dict(await request.form())
     handle = form.get("handle")
@@ -768,7 +771,7 @@ async def consent(request: Request):
         )
 
     # Approve: record the union of what was previously approved and this request.
-    now = datetime.now(UTC)
+    now = clock.now()
     existing = await storage.get_grant(user_id, client.client_id)
     merged_scope = set(entry.scope.split())
     if existing is not None:

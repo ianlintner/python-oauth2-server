@@ -40,7 +40,7 @@ from fastapi.responses import ORJSONResponse, PlainTextResponse, RedirectRespons
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import User
 from oauth2_server.security import hash_password_async
-from oauth2_server.services.auth import is_safe_redirect
+from oauth2_server.services.auth import fresh_return_to
 from oauth2_server.services.social import (
     ALL_PROVIDERS,
     DISPLAY_NAMES,
@@ -54,7 +54,9 @@ from oauth2_server.services.social import (
     generate_pkce_pair,
     resolve_provider_config,
 )
+from oauth2_server.services.users import ensure_user_active
 from oauth2_server.sessions import set_login
+from oauth2_server import clock
 
 if TYPE_CHECKING:
     from oauth2_server.config import Config
@@ -251,6 +253,8 @@ async def social_callback(provider: str, request: Request):
             http_client, rc, code, pkce_verifier if rc.pkce else None
         )
     except ProviderError as exc:
+        # `exc` no longer carries a provider response body — the service
+        # strips it. Its own diagnostic messages are safe to surface.
         logger.warning("social login token exchange failed for %s: %s", provider, exc)
         return _error("token_exchange_failed", str(exc), 400)
 
@@ -279,6 +283,7 @@ async def social_callback(provider: str, request: Request):
     user = await storage.get_user_by_username(username)
     if user is None:
         user = await _link_by_verified_email(config, storage, userinfo)
+    is_new = user is None
     if user is None:
         # Placeholder password: an Argon2id hash of a random UUIDv4, never
         # logged or returned — social users authenticate solely via the
@@ -294,15 +299,20 @@ async def social_callback(provider: str, request: Request):
             email_verified=userinfo.email_verified,
             role="user",
         )
+    # Same standing rules as password login, applied to existing, linked AND
+    # candidate (first sign-in) users — before anything is saved or signed:
+    # disabled or denylisted accounts get neither a row nor a session. The
+    # lookup is strict, so a storage error fails the request closed.
+    if await ensure_user_active(storage, user) is None:
+        return _error("access_denied", "account is not permitted to sign in", 403)
+    if is_new:
         await storage.save_user(user)
-    elif await _subject_denylisted(
-        storage, (("user_id", user.id), ("username", user.username), ("email", user.email))
-    ):
-        # Linked/existing local account: check the account's own identifiers.
+    elif await _subject_denylisted(storage, (("user_id", user.id),)):
+        # Linked/existing local account: also check its own id.
         return _error("access_denied", "account is blocked", 403)
 
     # Read before set_login() clears the session (mirrors routes/login.py).
-    return_to = request.session.get("return_to")
+    return_to_data = dict(request.session)
     # `amr=["fed"]`: the user was authenticated by an external identity
     # provider, not by a password presented here (OIDC Core §2 / RFC 8176).
     set_login(
@@ -312,5 +322,5 @@ async def social_callback(provider: str, request: Request):
         amr=["fed"],
     )
 
-    target = return_to if is_safe_redirect(return_to) else "/profile"
+    target = fresh_return_to(return_to_data, "/profile", now=clock.time())
     return RedirectResponse(target, status_code=302)

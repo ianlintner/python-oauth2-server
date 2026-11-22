@@ -176,3 +176,38 @@ async def test_device_verify_page_preserves_normal_user_code(client_app):
     resp = await client_app.get("/oauth/device/verify", params={"user_code": "WDJB-MJHT"})
     assert resp.status_code == 200
     assert 'value="WDJB-MJHT"' in resp.text
+
+
+async def test_login_post_with_cross_origin_rejected(client_app):
+    cross = await client_app.post(
+        "/auth/login",
+        data={"username": "user_rfc", "password": "password123"},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert cross.status_code == 403, cross.text
+    ok = await client_app.post(
+        "/auth/login",
+        data={"username": "user_rfc", "password": "password123"},
+        headers={"Origin": "https://auth.example.com"},
+    )
+    assert ok.status_code == 303
+    assert ok.headers["location"] == "/"
+
+
+async def test_login_page_has_anti_framing_headers(client_app):
+    resp = await client_app.get("/auth/login")
+    assert resp.status_code == 200
+    assert resp.headers["x-frame-options"] == "DENY"
+    csp = resp.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in csp
+    assert resp.headers["strict-transport-security"].startswith("max-age=")
+    # The login form 303-redirects through /oauth/authorize to the client's
+    # external redirect_uri; a form-action 'self' directive breaks that chain.
+    assert "form-action" not in csp
+
+
+async def test_global_security_headers_preserve_cacheable_metadata(client_app):
+    jwks = await client_app.get("/.well-known/jwks.json")
+    assert jwks.status_code == 200
+    assert jwks.headers["cache-control"] == "public, max-age=3600"
+    assert jwks.headers["x-frame-options"] == "DENY"

@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from oauth2_server.config import Config
 from oauth2_server.models import AuthorizationCode, Client
 from oauth2_server.storage.base import Storage
+from oauth2_server import clock
 
 
 def is_safe_redirect(url: str | None) -> bool:
@@ -27,6 +28,25 @@ def is_safe_redirect(url: str | None) -> bool:
     if "\\" in url:  # noqa: SIM103 - guard-clause form reads clearer for a redirect safety check
         return False
     return True
+
+
+# How long a pending `return_to` saved before a login stays valid. After this
+# window a login no longer replays the stored redirect target.
+RETURN_TO_MAX_AGE_SECS = 600
+
+
+def fresh_return_to(session: dict, fallback: str, *, now: float) -> str:
+    """Resolve a session's `return_to` only if it is safe and recently stamped.
+
+    Shared by password and social login so both enforce the same replay
+    window against stale redirect targets.
+    """
+    target = session.get("return_to")
+    stamped = session.get("return_to_ts")
+    fresh = isinstance(stamped, int) and now - stamped <= RETURN_TO_MAX_AGE_SECS
+    if not fresh or not isinstance(target, str) or not is_safe_redirect(target):
+        return fallback
+    return target
 
 
 def scope_is_subset(requested: str, allowed: str) -> bool:
@@ -53,7 +73,7 @@ class AuthorizeService:
         claims_request: str | None = None,
         dpop_jkt: str | None = None,
     ) -> AuthorizationCode:
-        now = datetime.now(UTC)
+        now = clock.now()
         auth_code = AuthorizationCode(
             id=uuid.uuid4().hex,
             code=secrets.token_urlsafe(32),

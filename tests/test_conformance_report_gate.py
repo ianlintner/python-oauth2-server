@@ -150,5 +150,5 @@ def test_the_checked_in_manifest_is_valid():
         "extended-grants",
         "sender-constrained",
     ]
-    assert manifest["contract"] == "b968cb19a2194268b819effae8b060b1e62d99df"
+    assert manifest["contract"] == "b7620924068f32c8800cb23c8d47b6c1b2b6c583"
     assert manifest["deviations"] == []

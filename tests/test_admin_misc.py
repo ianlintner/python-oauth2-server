@@ -16,6 +16,7 @@ import pytest
 
 from oauth2_server import security
 from oauth2_server.models import DeviceAuthorization, Token, User
+from oauth2_server.services.credential_storage import digest
 from oauth2_server.storage.paging import ListQuery
 from tests.conftest import build_client_app
 from tests.helpers import login_admin, seed_admin, seed_client
@@ -85,7 +86,7 @@ async def test_list_devices_item_shape():
         item = next(i for i in resp.json()["items"] if i["id"] == device.id)
         assert item == {
             "id": device.id,
-            "device_code": device.device_code,
+            "device_code": digest(device.device_code, "device"),  # digest at rest
             "user_code": device.user_code,
             "client_id": "client1",
             "scope": "read",
@@ -192,7 +193,8 @@ async def test_dashboard_returns_expected_counts():
         await _login(client)
         storage = client.storage
         await _clear_default_clients(storage)
-        await _clear_default_users(storage)
+        await storage.delete_user("u1")
+        await storage.delete_user("test-user-id")
 
         await seed_client(storage, id=uuid.uuid4().hex, client_id="dash-c1")
         await seed_client(storage, id=uuid.uuid4().hex, client_id="dash-c2")
@@ -210,7 +212,7 @@ async def test_dashboard_returns_expected_counts():
         assert resp.status_code == 200
         body = resp.json()
         assert body["total_clients"] == 2
-        assert body["total_users"] == 1
+        assert body["total_users"] == 2  # dash-user + the logged-in admin
         assert "active_tokens" in body
         assert "pending_device_codes" in body
 

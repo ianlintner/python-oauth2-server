@@ -2,13 +2,21 @@
 # `oauth2-conformance` runner contract
 # (https://github.com/ianlintner/oauth2-conformance).
 #
-# Pinned contract commit: b968cb19a2194268b819effae8b060b1e62d99df
-# (contract v0.7 modern-server: +6 promoted-to-stable core scenarios (PR #21),
-# generated STATUS dashboard (PR #20), modern-server gap catalog (PR #22), runner
-# duplicate-form-key/header-matcher/step-repetition capabilities (PR #23); also
-# pinned as CONFORMANCE_REF in the `conformance` job of .github/workflows/ci.yml;
-# the manifest schema has no field for a commit, so the two are kept in sync by
-# hand).
+# Pinned contract commit: b7620924068f32c8800cb23c8d47b6c1b2b6c583
+# (contract main after SUT interface v2 (PRs #24, #33, #37): seeded client jwks,
+# test-clock / dpop-nonce-mode / restart / multi-instance / mtls capability
+# advertisement and runner helpers, plus #36 (core.authorize.iss-form-urlencoded,
+# RFC 9207 2.1 raw-Location iss encoding) and #34 (token-lifecycle/hardening
+# security-review batch 1). The `conformance` CI job starts a fresh SUT per
+# profile because the invalid-client limiter is process state. Also pinned as CONFORMANCE_REF in the
+# `conformance` job of .github/workflows/ci.yml; the manifest schema has no
+# field for a commit, so the two are kept in sync by hand).
+#
+# SUT interface v2 (this port): seed `jwks` + private_key_jwt, `test-clock` and
+# `dpop-nonce-mode` are implemented and advertised at
+# GET /conformance/capabilities (conformance mode only). `restart`,
+# `multi-instance` and `mtls` are NOT implemented and NOT advertised, so the
+# scenarios needing them stay draft/deferred here.
 #
 # Every profile listed under `profiles` MUST pass in the `conformance` CI job.
 #
@@ -43,7 +51,7 @@
 # contract itself, not by this manifest: a failing non-stable scenario is
 # reported as `deferred` by the runner and never gates here.
 implementation: python-oauth2-server
-contract: b968cb19a2194268b819effae8b060b1e62d99df
+contract: b7620924068f32c8800cb23c8d47b6c1b2b6c583
 profiles: [core, token-lifecycle, oidc-basic, extended-grants, sender-constrained]
 endpoint: http://localhost:8080
 deviations: []

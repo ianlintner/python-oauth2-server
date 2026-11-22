@@ -215,17 +215,17 @@ async def test_global_limit_429_on_admin_api_carries_no_store():
         assert resp.headers["cache-control"] == "no-store"
 
 
-async def test_global_limit_429_off_oauth_admin_api_has_no_security_headers():
-    # Negative case: a non-`/oauth*`/`/admin/api*` path's 429 does NOT gain
-    # the security-header bundle -- the condition is genuinely path-scoped,
-    # not applied unconditionally to every 429.
+async def test_global_limit_429_off_oauth_admin_api_carries_security_headers():
+    # Browser-facing headers are global: the 429 on a non-`/oauth*`/`/admin/api*`
+    # path carries the same bundle as every other response.
     async with _build_client({"rate_limit_enabled": True, "rate_limit_max_requests": 1}) as c:
         resp = await c.get("/auth/login")
         assert resp.status_code != 429
 
         resp = await c.get("/auth/login")
         assert resp.status_code == 429
-        assert "cache-control" not in resp.headers
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["x-frame-options"] == "DENY"
 
 
 async def test_exempt_paths_bypass_rate_limit():

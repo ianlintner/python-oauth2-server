@@ -15,20 +15,21 @@ from __future__ import annotations
 
 import html
 import secrets
-import time
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse, Response
 
+from oauth2_server import clock
 from oauth2_server.errors import OAuthError, oauth_error
 from oauth2_server.models import DeviceAuthorization
 from oauth2_server.routes.token import client_auth_failure_response
 from oauth2_server.services.clients import ClientService
+from oauth2_server.services.csrf import require_same_origin
 from oauth2_server.services.mtls import mtls_headers
-from oauth2_server.sessions import current_user_id
+from oauth2_server.sessions import load_session_user
 
 router = APIRouter()
 
@@ -78,7 +79,7 @@ async def device_authorization(request: Request) -> ORJSONResponse:
     else:
         scope = client.scope
 
-    now = datetime.now(UTC)
+    now = clock.now()
     device = DeviceAuthorization(
         id=uuid.uuid4().hex,
         device_code=secrets.token_urlsafe(32),
@@ -106,19 +107,40 @@ async def device_authorization(request: Request) -> ORJSONResponse:
     return response
 
 
-def _render_device_verify_page(user_code: str) -> str:
+def _render_device_verify_page(
+    user_code: str,
+    *,
+    client_id: str = "",
+    client_name: str = "",
+    scope: str = "",
+    account: str = "",
+) -> str:
     """Ported from `render_device_verify_page` (device.rs): `user_code` is
     html-escaped before being embedded as the input's `value` attribute so a
     crafted `?user_code=` query value can't break out of the attribute and
     inject markup (reflected-XSS hardening — see the ported unit tests
-    `user_code_is_html_escaped` / `normal_user_code_is_preserved`)."""
+    `user_code_is_html_escaped` / `normal_user_code_is_preserved`).
+
+    When a pending device authorization is found for the code, the page names
+    the client, requested scopes and signed-in account so the approving user
+    can see what the POST will authorize.
+    """
     escaped = html.escape(user_code, quote=True)
+    details = ""
+    if client_id or scope or account:
+        details = (
+            "<dl>\n"
+            f"  <dt>Client</dt><dd>{html.escape(client_name or client_id, quote=True)}</dd>\n"
+            f"  <dt>Scopes</dt><dd>{html.escape(scope, quote=True)}</dd>\n"
+            f"  <dt>Account</dt><dd>{html.escape(account, quote=True)}</dd>\n"
+            "</dl>\n"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Authorize Device</title></head>
 <body>
 <h1>Authorize Device</h1>
-<form method="post" action="/oauth/device/verify">
+{details}<form method="post" action="/oauth/device/verify">
   <label for="user_code">Code</label>
   <input type="text" id="user_code" name="user_code" value="{escaped}" autocomplete="off" required>
   <button type="submit" name="action" value="approve">Approve</button>
@@ -131,8 +153,8 @@ def _render_device_verify_page(user_code: str) -> str:
 
 @router.get("/device/verify")
 async def device_verify_page(request: Request):
-    user_id = current_user_id(request)
-    if user_id is None:
+    session_user = await load_session_user(request)
+    if session_user is None:
         target = "/oauth/device/verify"
         raw_user_code = request.query_params.get("user_code")
         if raw_user_code:
@@ -141,18 +163,37 @@ async def device_verify_page(request: Request):
         # Timestamped identically to GET /oauth/authorize's pending redirect
         # (routes/authorize.py) so POST /auth/login's shared freshness check
         # (RETURN_TO_MAX_AGE_SECS) applies uniformly to both replay targets.
-        request.session["return_to_ts"] = int(time.time())
+        request.session["return_to_ts"] = int(clock.time())
         return RedirectResponse("/auth/login", status_code=302)
 
     user_code = request.query_params.get("user_code", "")
-    return HTMLResponse(_render_device_verify_page(user_code))
+    details: dict[str, str] = {}
+    if user_code:
+        storage = request.app.state.storage
+        device = await storage.get_device_authorization_by_user_code(
+            _normalize_user_code(user_code)
+        )
+        if device is not None and not device.used and device.expires_at > clock.now():
+            client = await storage.get_client(device.client_id)
+            user = await storage.get_user_by_id(session_user.id)
+            details = {
+                "client_id": device.client_id,
+                "client_name": client.name if client is not None else "",
+                "scope": device.scope,
+                "account": user.username if user is not None else "",
+            }
+    return HTMLResponse(_render_device_verify_page(user_code, **details))
 
 
 @router.post("/device/verify")
-async def device_verify(request: Request) -> ORJSONResponse:
-    user_id = current_user_id(request)
-    if user_id is None:
+async def device_verify(request: Request) -> Response:
+    rejection = require_same_origin(request)
+    if rejection is not None:
+        return rejection
+    session_user = await load_session_user(request)
+    if session_user is None:
         return ORJSONResponse({"error": "login_required"}, status_code=401)
+    user_id = session_user.id
 
     form = dict(await request.form())
     raw_user_code = form.get("user_code")
@@ -169,7 +210,7 @@ async def device_verify(request: Request) -> ORJSONResponse:
         or device.used
         or device.approved
         or device.denied
-        or device.expires_at <= datetime.now(UTC)
+        or device.expires_at <= clock.now()
     ):
         return ORJSONResponse({"error": "invalid_user_code"}, status_code=400)
 

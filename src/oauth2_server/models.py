@@ -7,11 +7,13 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, model_validator
+
+from oauth2_server import clock
 
 
 def _now() -> datetime:
-    return datetime.now(UTC)
+    return clock.now()
 
 
 def _coerce_datetime(value: Any) -> Any:
@@ -57,6 +59,10 @@ MongoDateTime = Annotated[datetime, BeforeValidator(_coerce_datetime)]
 class Client(BaseModel):
     id: str
     client_id: str
+    # At rest this holds a nonrecoverable Argon2id verifier
+    # (`argon2id-v1$...`), never the plaintext secret. HMAC uses read the
+    # separately sealed `client_secret_key`. The column name is unchanged so
+    # the SQL column set and Mongo field stay stable across the cutover.
     client_secret: str
     redirect_uris: str  # JSON array stored as string (TEXT column)
     grant_types: str  # JSON array stored as string
@@ -65,6 +71,9 @@ class Client(BaseModel):
     created_at: MongoDateTime
     updated_at: MongoDateTime
     token_endpoint_auth_method: str = "client_secret_basic"
+    # At rest a `services.credential_storage` lookup digest
+    # (`sha256-rat-v1$...`): the RFC 7592 bearer credential is presented and
+    # looked up by digest, never stored raw. Empty when the client has none.
     registration_access_token: str = ""
     response_types: str = '["code"]'
     contacts: str = ""
@@ -86,9 +95,33 @@ class Client(BaseModel):
     # RFC 8707: JSON array of resource indicators this client may request.
     # Empty means "not configured" (fall back to the server-wide list).
     resources: str = "[]"
+    # Sealed (AES-256-GCM) symmetric key material for the HMAC uses of the
+    # client secret; see `services/credential_storage.py`. Empty = none.
+    client_secret_key: str = ""
+
+    _hmac_secret: str = PrivateAttr(default="")
 
     def is_public(self) -> bool:
         return self.token_endpoint_auth_method == "none"
+
+    def has_client_secret(self) -> bool:
+        """Whether this client holds a confidential secret (verifier present)."""
+        return bool(self.client_secret)
+
+    def hmac_secret(self) -> str:
+        """The unsealed secret for HMAC uses (`client_secret_jwt`, HS256 JAR,
+        HS256 introspection JWTs), or `""` when none is available.
+
+        Populated in memory by the storage backend when it loads the row (it
+        holds the server key); never persisted or serialized. Empty for a
+        public client, a pre-cutover row, or when no server key is
+        configured — callers must treat empty as "cannot HMAC", never sign or
+        verify under an empty key.
+        """
+        return self._hmac_secret
+
+    def set_hmac_secret(self, value: str) -> None:
+        self._hmac_secret = value
 
     def redirect_uri_list(self) -> list[str]:
         return json.loads(self.redirect_uris) if self.redirect_uris else []
@@ -131,6 +164,9 @@ class User(BaseModel):
     email_verified: bool = True
     enabled: bool = True
     role: str = "user"
+    # Bumped by storage whenever the account's standing changes (disable, role
+    # change, password reset); a session stamped with an older value is ended.
+    session_epoch: int = 0
     created_at: MongoDateTime = Field(default_factory=_now)
     updated_at: MongoDateTime = Field(default_factory=_now)
 
@@ -152,6 +188,16 @@ class User(BaseModel):
 
 
 class Token(BaseModel):
+    """A stored token row.
+
+    `access_token` holds the at-rest LOOKUP DIGEST of the issued access token
+    (`sha256-access-v1$...`), not the token itself; `refresh_token` likewise
+    (`sha256-refresh-v1$...`) when present. The plaintext values are returned
+    to the client exactly once, from `TokenResponse`, and never persisted. See
+    `services/credential_storage.py` for the rationale and
+    `oauth2_server.cutover` for the operator-run migration.
+    """
+
     id: str
     access_token: str
     refresh_token: str | None = None
@@ -164,9 +210,33 @@ class Token(BaseModel):
     expires_at: MongoDateTime
     revoked: bool = False
     token_family: str | None = None
+    # JSON text of the issued access token's `cnf` claim / `aud` list ('' =
+    # none). Kept so a refresh can carry them forward: the plaintext access
+    # token they used to be salvaged from is no longer stored.
+    cnf: str = ""
+    audience: str = ""
+
+    def access_token_digest(self) -> str:
+        """The stored access-token digest (never the token itself)."""
+        return self.access_token
+
+    def refresh_token_digest(self) -> str | None:
+        """The stored refresh-token digest, or `None` when the row has none."""
+        return self.refresh_token
+
+    def has_refresh_token(self) -> bool:
+        """Whether this row carries a refresh credential (digest present)."""
+        return bool(self.refresh_token)
 
 
 class AuthorizationCode(BaseModel):
+    """A stored authorization code.
+
+    `code` holds the at-rest lookup digest of the issued code
+    (`sha256-authcode-v1$...`); the plaintext code only ever exists in the
+    authorization response delivered to the client.
+    """
+
     id: str
     code: str
     client_id: str
@@ -187,6 +257,16 @@ class AuthorizationCode(BaseModel):
 
 
 class DeviceAuthorization(BaseModel):
+    """An RFC 8628 device authorization request.
+
+    `device_code` holds the at-rest lookup digest of the issued device code
+    (`sha256-device-v1$...`); the plaintext device code is returned to the
+    device once. `user_code` stays plaintext: it is short, human-transcribed
+    and typed by a user rather than presented as a bearer credential, so it
+    must remain readable for the verification page's lookup, and it is
+    protected by the RFC 8628 §3.2 polling rate limit rather than secrecy.
+    """
+
     id: str
     device_code: str
     user_code: str

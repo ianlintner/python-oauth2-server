@@ -10,6 +10,8 @@ import secrets
 import socket
 from urllib.parse import unquote_plus, urlparse
 
+import anyio.to_thread
+
 from oauth2_server.errors import OAuthError
 from oauth2_server.middleware import check_subject_denylisted
 from oauth2_server.models import Client
@@ -19,6 +21,7 @@ from oauth2_server.services.client_assertion import (
     unverified_assertion_subject,
     validate_client_assertion,
 )
+from oauth2_server.services.credential_storage import verify_client_secret
 from oauth2_server.services.events_bus import EventBus, emit_event
 from oauth2_server.services.jwks_cache import JwksCache, resolve_client_jwks
 from oauth2_server.storage.base import Storage
@@ -105,6 +108,32 @@ VALID_AUTH_METHODS = frozenset(
         "none",
     }
 )
+
+# Grant types a client may declare at registration. Anonymous self-service
+# registration is limited to the first set; the remainder require the
+# operator-issued initial access token (RFC 7591 §3). Anything outside
+# `KNOWN_GRANT_TYPES` is rejected for every caller.
+SELF_REGISTRABLE_GRANT_TYPES = frozenset(
+    {
+        "authorization_code",
+        "refresh_token",
+        "urn:ietf:params:oauth:grant-type:device_code",
+    }
+)
+KNOWN_GRANT_TYPES = SELF_REGISTRABLE_GRANT_TYPES | frozenset(
+    {
+        "client_credentials",
+        "urn:ietf:params:oauth:grant-type:token-exchange",
+        "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    }
+)
+
+# `response_type` values `/oauth/authorize` implements.
+SUPPORTED_RESPONSE_TYPES = frozenset({"code", "code id_token"})
+
+# Never requestable through registration, even if an operator lists it in
+# `self_registration_scopes`.
+RESERVED_REGISTRATION_SCOPES = frozenset({"admin"})
 
 JWKS_URI_ERROR = "jwks_uri must be an absolute https URL"
 
@@ -409,7 +438,12 @@ class ClientService:
             await self._authenticate_self_signed_tls(client, thumbprint)
             return client
 
-        if not client_secret or not _secrets_equal(client_secret, client.client_secret):
+        # The stored value is a nonrecoverable Argon2id verifier; a legacy
+        # plaintext row never verifies (no silent legacy acceptance after the
+        # cutover). Off-thread: Argon2 is CPU-bound.
+        if not client_secret or not await anyio.to_thread.run_sync(
+            verify_client_secret, client.client_secret, client_secret
+        ):
             self._emit_client_validated(client.client_id, success=False)
             raise OAuthError("invalid_client", "invalid client secret")
         self._emit_client_validated(client.client_id, success=True)

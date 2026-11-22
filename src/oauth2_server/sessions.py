@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 from starlette.requests import Request
+from oauth2_server import clock
+
+from oauth2_server.services.users import load_active_user
 
 if TYPE_CHECKING:
     from oauth2_server.models import User
@@ -13,6 +15,27 @@ if TYPE_CHECKING:
 
 def current_user_id(request: Request) -> str | None:
     return request.session.get("user_id")
+
+
+async def load_session_user(request: Request) -> User | None:
+    """The active user behind this request's session, re-read from storage.
+
+    The cookie is client-held, so it only names the user (`user_id`) and the
+    `session_epoch` it was issued under; standing (enabled, denylist, role,
+    epoch) always comes from the stored row. A session whose user is gone,
+    inactive or at a different epoch is cleared and treated as logged out. A
+    session without an epoch (issued before it existed) is also ended.
+    """
+    session = request.session
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+    user = await load_active_user(request.app.state.storage, user_id)
+    epoch = session.get("session_epoch")
+    if user is None or not isinstance(epoch, int) or epoch != user.session_epoch:
+        session.clear()
+        return None
+    return user
 
 
 def current_acr(request: Request) -> str | None:
@@ -44,10 +67,11 @@ def set_login(
     # discarded rather than reused post-authentication.
     request.session.clear()
     request.session["user_id"] = user.id
-    request.session["auth_time"] = int(time.time())
+    request.session["auth_time"] = int(clock.time())
     # role/email/username feed the admin guard (routes/admin/guard.py) and
     # future admin-surface actor attribution — mirrors the Rust session,
     # which stores the same fields at login.
+    request.session["session_epoch"] = user.session_epoch
     request.session["role"] = user.role
     request.session["email"] = user.email
     request.session["email_verified"] = user.email_verified

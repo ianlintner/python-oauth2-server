@@ -70,6 +70,11 @@ All are `OAUTH2_`-prefixed (see `src/oauth2_server/config.py` for the full `Conf
 | `OAUTH2_ID_TOKEN_ALG` | `RS256` if a PEM is set, else `HS256` | Explicit override for the signing algorithm; normalized to upper-case. |
 | `OAUTH2_KEY_ROTATION_GRACE_HOURS` | `24` | How long a rotated-out RS256 key stays published in JWKS after `POST /admin/api/keys/rotate`, so tokens signed just before rotation still verify. |
 | `OAUTH2_DYNAMIC_REGISTRATION_ENABLED` | `false` | Gates `POST /connect/register`. Off by default, unlike Rust. |
+| `OAUTH2_DYNAMIC_REGISTRATION_INITIAL_ACCESS_TOKEN` | unset | When set, `POST /connect/register` requires `Authorization: Bearer <token>` (RFC 7591 §3). A caller presenting it may also register `client_credentials`, token-exchange and jwt-bearer clients. |
+| `OAUTH2_DYNAMIC_REGISTRATION_ANONYMOUS` | `false` | Explicit opt-in for registration without an initial access token. With neither this nor a token configured, an enabled endpoint answers `403`. Anonymous callers may only register `authorization_code`, `refresh_token` and device-code clients. |
+| `OAUTH2_SELF_REGISTRATION_SCOPES` | `openid profile email offline_access read` | Space- or comma-separated scopes a registering client may request. Empty permits none; `admin` is never accepted. |
+
+Registration metadata outside these allow-lists (grant types, `response_types` other than `code` / `code id_token`, scopes) is rejected with `400 invalid_client_metadata` rather than dropped. Deployments that previously registered privileged grants or scopes anonymously must now configure an initial access token or adjust the scope allow-list.
 
 ### User consent
 
@@ -131,6 +136,9 @@ Phase 3a (see `docs/plans/2026-07-20-python-oauth2-port-phase-3a.md` and `docs/P
 |---|---|---|
 | `OAUTH2_LOGIN_RATE_LIMIT_ATTEMPTS` | `10` | Max `POST /auth/login` attempts allowed per window, per IP and per username (either exhausted → blocked). |
 | `OAUTH2_LOGIN_RATE_LIMIT_WINDOW_SECS` | `900` | Fixed-window duration (seconds) for the login rate limiter. |
+| `OAUTH2_SESSION_MAX_AGE_SECS` | `28800` | Lifetime of the session cookie. Sessions are also re-checked against the stored user on each request. |
+
+SQL deployments must apply migration `V27` (adds `users.session_epoch`). Sessions issued before this change carry no epoch, so users sign in once more after upgrading.
 
 ## Phase 3b: DPoP, RAR, Token Exchange
 
@@ -753,6 +761,10 @@ certificate: the binding check fails and the response is `{"active": false}`. Fo
 give the resource server an introspection client that authenticates with a secret or a JWT
 assertion, so the thumbprint header is free to carry the token's binding.
 
+## Credentials hashed at rest (breaking cutover)
+
+Access/refresh tokens, authorization and device codes and registration access tokens are stored as domain-separated SHA-256 digests; client secrets as Argon2id verifiers, with sealed (AES-256-GCM) key material kept only for the HMAC uses (`client_secret_jwt`, HS256 JAR/introspection). Existing databases must be converted by the operator with `python -m oauth2_server.cutover` — never at startup. See `docs/credential-cutover.md` for the procedure, rotation, already-issued JWT behaviour and rollback.
+
 ## Running
 
 ```bash
@@ -817,6 +829,18 @@ ambiguous switch value, a missing/unreadable/invalid seed, a
 production-looking environment (`OAUTH2_ENV`/`APP_ENV`/`NODE_ENV`/... set to anything
 other than a known non-production name), a non-in-memory database, or a
 configured signing key. Seeded credentials are valid only in conformance mode.
+
+**SUT interface v2** (contract section 7), also conformance-mode only and not
+registered at all otherwise (they answer `404`): `GET /conformance/capabilities`
+advertises exactly `test-clock` and `dpop-nonce-mode`;
+`POST /conformance/clock {"advance_seconds": N}` moves every protocol time
+decision forward (cumulative, monotonic, reset on restart);
+`POST /conformance/dpop-nonce {"required": bool}` toggles server-provided DPoP
+nonces for the token and userinfo endpoints. A seeded client with
+`token_endpoint_auth_method: private_key_jwt` carries a public-only `jwks`
+(private members such as `d` are rejected). `restart`, `multi-instance` and
+`mtls` are not implemented and not advertised (this mode requires an
+in-memory store, so there is no durable state to restart against).
 
 ```bash
 OAUTH2_CONFORMANCE_MODE=1 OAUTH2_CONFORMANCE_SEED=./seed.yaml \
