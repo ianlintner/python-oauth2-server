@@ -810,48 +810,63 @@ async def test_oidc_logout_redirects_with_exact_state(client_app):
     )
 
 
-async def test_backchannel_logout_token_shape(client_app):
+async def test_backchannel_logout_token_shape():
     """Full coverage: test_logout.py::test_backchannel_logout_posts_valid_token."""
-    captured: list[httpx.Request] = []
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(200)
+    async with build_client_app(
+        {"id_token_private_key_pem": pem, "id_token_kid": "pin-logout-key"}
+    ) as client_app:
+        captured: list[httpx.Request] = []
 
-    client_app.app.state.http_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), timeout=10
-    )
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            return httpx.Response(200)
 
-    await reseed_client(
-        client_app,
-        backchannel_logout_uri="https://rp.example/bc-logout",
-        backchannel_logout_session_required=False,
-    )
-    await login_session(client_app)
+        client_app.app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), timeout=10
+        )
 
-    id_token_hint = jwt.encode(
-        {"iss": ISSUER, "sub": "u1", "aud": "client1", "exp": 9999999999, "iat": 0},
-        JWT_SECRET,
-        algorithm="HS256",
-    )
-    resp = await client_app.get("/oauth/logout", params={"id_token_hint": id_token_hint})
-    assert resp.status_code == 200, resp.text
+        await reseed_client(
+            client_app,
+            backchannel_logout_uri="https://rp.example/bc-logout",
+            backchannel_logout_session_required=False,
+        )
+        await login_session(client_app)
 
-    assert len(captured) == 1, "back-channel logout must POST exactly once to the RP"
-    logout_token = captured[0].content.decode().removeprefix("logout_token=")
+        id_token_hint = jwt.encode(
+            {"iss": ISSUER, "sub": "u1", "aud": "client1", "exp": 9999999999, "iat": 0},
+            JWT_SECRET,
+            algorithm="HS256",
+        )
+        resp = await client_app.get("/oauth/logout", params={"id_token_hint": id_token_hint})
+        assert resp.status_code == 200, resp.text
 
-    header = jwt.get_unverified_header(logout_token)
-    assert header["typ"] == "logout+JWT", "back-channel logout token must be typed logout+JWT"
+        assert len(captured) == 1, "back-channel logout must POST exactly once to the RP"
+        logout_token = captured[0].content.decode().removeprefix("logout_token=")
 
-    claims = jwt.decode(
-        logout_token, JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False}
-    )
-    assert claims["events"] == {"http://schemas.openid.net/event/backchannel-logout": {}}
-    assert claims["sub"] == "u1"
-    assert claims["aud"] == "client1"
-    assert "jti" in claims
-    assert "iat" in claims
-    assert "exp" in claims
+        header = jwt.get_unverified_header(logout_token)
+        assert header["typ"] == "logout+JWT", "back-channel logout token must be typed logout+JWT"
+        assert header["alg"] == "RS256"
+        assert header["kid"] == "pin-logout-key"
+
+        claims = jwt.decode(
+            logout_token,
+            private_key.public_key(),
+            algorithms=["RS256"],
+            options={"verify_aud": False},
+        )
+        assert claims["events"] == {"http://schemas.openid.net/event/backchannel-logout": {}}
+        assert claims["sub"] == "u1"
+        assert claims["aud"] == "client1"
+        assert "jti" in claims
+        assert "iat" in claims
+        assert "exp" in claims
 
 
 async def test_jwks_rs256_shape(client_app):

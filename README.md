@@ -37,6 +37,12 @@ remaining Rust feature set:
   require an active session (an `id_token_hint` for a different user revokes nothing), and
   `post_logout_redirect_uri` must be one of the `post_logout_redirect_uris` registered by the
   client named in the `id_token_hint`.
+  A `backchannel_logout_uri` must be an `https` URL with a public host (registration and admin
+  API); at dispatch the host is resolved, every address must be public, and the POST goes to that
+  pinned address, so a stored or DNS-rebound internal target is skipped. The `logout_token` is
+  signed RS256 with the keyset's current key and its `kid` — verifiable against the published
+  JWKS, never `jwt_secret` (security over parity); with no RS256 key, back-channel delivery is
+  skipped.
   `dynamic_registration_enabled` gates `/connect/register` (default off).
 - **PAR (RFC 9126)** — `POST /oauth/par` pushes authorization parameters and returns a
   short-lived, single-use `request_uri` that `GET /oauth/authorize` can consume.

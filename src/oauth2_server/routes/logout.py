@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import logging
 import uuid
 from urllib.parse import quote, urlparse
 
@@ -28,8 +29,10 @@ from fastapi.responses import HTMLResponse, ORJSONResponse, RedirectResponse
 from oauth2_server.keys import KeySet, rsa_public_key
 from oauth2_server.models import Client
 from oauth2_server import clock
+from oauth2_server.services.outbound import OutboundTargetError, post_to_public_https_target
 from oauth2_server.sessions import current_user_id
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # OIDC Back-Channel Logout 1.0 §2.2: logout_token lifetime and event claim.
@@ -183,6 +186,7 @@ async def _dispatch_backchannel_logout(
     http_client: httpx.AsyncClient,
     client: Client,
     config,
+    keyset: KeySet | None,
     sub: str | None,
     sid: str | None,
 ) -> None:
@@ -200,16 +204,35 @@ async def _dispatch_backchannel_logout(
     if sid is not None:
         claims["sid"] = sid
 
-    # Back-channel logout_token is always HS256(jwt_secret), independent of
-    # the id_token signing alg (Rust parity — see research gotchas).
+    # The logout_token is signed with the current RS256 keyset key (kid in
+    # the header), so the RP verifies it against the published JWKS — the same
+    # way it verifies an id_token. `jwt_secret` is never used: it would have to
+    # be shared with every RP to be verifiable. Without an RS256 key there is
+    # nothing verifiable to send, so the dispatch is skipped.
+    signing_key = keyset.current_for_alg("RS256") if keyset is not None else None
+    if signing_key is None:
+        logger.warning(
+            "skipping back-channel logout for client %s: no RS256 signing key",
+            client.client_id,
+        )
+        return
     logout_token = jwt.encode(
-        claims, config.jwt_secret, algorithm="HS256", headers={"typ": "logout+JWT"}
+        claims,
+        signing_key.key_material,
+        algorithm="RS256",
+        headers={"typ": "logout+JWT", "kid": signing_key.kid},
     )
     try:
-        await http_client.post(
+        await post_to_public_https_target(
+            http_client,
             client.backchannel_logout_uri,
             content=f"logout_token={logout_token}",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    except OutboundTargetError:
+        logger.warning(
+            "skipping back-channel logout for client %s: unacceptable target",
+            client.client_id,
         )
     except Exception:  # noqa: S110, BLE001 - fire-and-forget by design, see comment below
         # Fire-and-forget: a slow/broken/unreachable RP must never fail (or
@@ -222,11 +245,12 @@ async def _dispatch_backchannel_logout_bounded(
     http_client: httpx.AsyncClient,
     client: Client,
     config,
+    keyset: KeySet | None,
     sub: str | None,
     sid: str | None,
 ) -> None:
     async with semaphore:
-        await _dispatch_backchannel_logout(http_client, client, config, sub, sid)
+        await _dispatch_backchannel_logout(http_client, client, config, keyset, sub, sid)
 
 
 def _redirect_script(url: str) -> str:
@@ -342,6 +366,7 @@ async def logout(request: Request, background_tasks: BackgroundTasks):
                 http_client,
                 client,
                 config,
+                keyset,
                 session_user,
                 token_sid,
             )

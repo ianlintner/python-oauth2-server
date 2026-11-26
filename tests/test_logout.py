@@ -8,13 +8,19 @@ stays in `tests/test_rfc_compliance.py`.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 
 import httpx
 import jwt
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from oauth2_server.routes import logout
-from tests.helpers import login_session, reseed_client, seed_client
+from tests.conftest import build_client_app
+from tests.helpers import login_admin, login_session, reseed_client, seed_admin, seed_client
 from tests.test_introspection import post_introspect
 from tests.test_token_endpoint import run_code_flow
 
@@ -162,60 +168,205 @@ async def test_logout_renders_frontchannel_iframes(client_app):
 # ---------------------------------------------------------------------------
 
 
-async def test_backchannel_logout_posts_valid_token(client_app):
+@pytest.fixture(scope="module")
+def rsa_pem() -> str:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+
+def _rs256_app(rsa_pem: str):
+    return build_client_app({"id_token_private_key_pem": rsa_pem, "id_token_kid": "test-rs256-key"})
+
+
+def _capture_http(app) -> list[httpx.Request]:
     captured: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
         return httpx.Response(200)
 
-    client_app.app.state.http_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), timeout=10
-    )
+    app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=10)
+    return captured
 
-    await reseed_client(
-        client_app,
-        backchannel_logout_uri="https://rp.example/bc-logout",
-        backchannel_logout_session_required=False,
-    )
+
+def _public_key_from_jwk(jwk: dict):
+    def to_int(raw: str) -> int:
+        return int.from_bytes(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)), "big")
+
+    return rsa.RSAPublicNumbers(to_int(jwk["e"]), to_int(jwk["n"])).public_key()
+
+
+async def test_backchannel_logout_posts_valid_token(rsa_pem):
+    async with _rs256_app(rsa_pem) as client_app:
+        captured = _capture_http(client_app.app)
+        await reseed_client(
+            client_app,
+            backchannel_logout_uri="https://rp.example/bc-logout",
+            backchannel_logout_session_required=False,
+        )
+        await login_session(client_app)
+
+        id_token_hint = _id_token_hint(sub="u1", aud="client1")
+        resp = await client_app.get("/oauth/logout", params={"id_token_hint": id_token_hint})
+        assert resp.status_code == 200, resp.text
+
+        assert len(captured) == 1
+        req = captured[0]
+        assert req.headers["content-type"] == "application/x-www-form-urlencoded"
+        # Delivered to the resolved public address, addressed to the RP's host.
+        assert req.headers["host"] == "rp.example"
+        assert req.extensions["sni_hostname"] == "rp.example"
+        assert req.url.host == "93.184.216.34"
+        assert req.url.path == "/bc-logout"
+        body = req.content.decode()
+        assert body.startswith("logout_token=")
+        logout_token = body.removeprefix("logout_token=")
+
+        header = jwt.get_unverified_header(logout_token)
+        assert header["typ"] == "logout+JWT"
+        assert header["alg"] == "RS256"
+        assert header["kid"] == "test-rs256-key"
+
+        jwks = (await client_app.get("/.well-known/jwks.json")).json()
+        public_key = _public_key_from_jwk(
+            next(k for k in jwks["keys"] if k["kid"] == header["kid"])
+        )
+        claims = jwt.decode(logout_token, public_key, algorithms=["RS256"], audience="client1")
+        assert claims["iss"] == ISSUER
+        assert claims["aud"] == "client1"
+        assert isinstance(claims["iat"], int)
+        assert isinstance(claims["exp"], int)
+        assert isinstance(claims["jti"], str)
+        assert claims["events"] == {"http://schemas.openid.net/event/backchannel-logout": {}}
+        assert claims["sub"] == "u1"
+
+
+async def test_backchannel_logout_token_signed_with_published_key(rsa_pem):
+    async with _rs256_app(rsa_pem) as client_app:
+        captured = _capture_http(client_app.app)
+        await reseed_client(client_app, backchannel_logout_uri="https://rp.example/bc")
+        await login_session(client_app)
+        resp = await client_app.get("/oauth/logout")
+        assert resp.status_code == 200, resp.text
+
+        token = captured[0].content.decode().removeprefix("logout_token=")
+        assert jwt.get_unverified_header(token)["alg"] == "RS256"
+        jwks = (await client_app.get("/.well-known/jwks.json")).json()
+        public_key = _public_key_from_jwk(jwks["keys"][0])
+        jwt.decode(token, public_key, algorithms=["RS256"], audience="client1")
+        # The server-wide secret must not verify (or have produced) the token.
+        with pytest.raises(jwt.PyJWTError):
+            jwt.decode(token, JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False})
+
+
+async def test_backchannel_logout_skipped_without_rs256_key(client_app):
+    """No RS256 key: nothing verifiable can be sent, and `jwt_secret` is never used."""
+    captured = _capture_http(client_app.app)
+    await reseed_client(client_app, backchannel_logout_uri="https://rp.example/bc")
     await login_session(client_app)
-
-    id_token_hint = _id_token_hint(sub="u1", aud="client1")
-    resp = await client_app.get("/oauth/logout", params={"id_token_hint": id_token_hint})
+    resp = await client_app.get("/oauth/logout")
     assert resp.status_code == 200, resp.text
-
-    assert len(captured) == 1
-    req = captured[0]
-    assert req.headers["content-type"] == "application/x-www-form-urlencoded"
-    body = req.content.decode()
-    assert body.startswith("logout_token=")
-    logout_token = body.removeprefix("logout_token=")
-
-    header = jwt.get_unverified_header(logout_token)
-    assert header["typ"] == "logout+JWT"
-
-    claims = jwt.decode(
-        logout_token, JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False}
-    )
-    assert claims["iss"] == ISSUER
-    assert claims["aud"] == "client1"
-    assert isinstance(claims["iat"], int)
-    assert isinstance(claims["exp"], int)
-    assert isinstance(claims["jti"], str)
-    assert claims["events"] == {"http://schemas.openid.net/event/backchannel-logout": {}}
-    assert claims["sub"] == "u1"
+    assert captured == []
 
 
-async def test_backchannel_logout_delivers_to_multiple_clients_concurrently(client_app):
-    captured: list[httpx.Request] = []
+@pytest.mark.parametrize(
+    "answers",
+    [["127.0.0.1"], ["10.0.0.5"], ["169.254.169.254"], ["::1"], ["93.184.216.34", "192.168.1.9"]],
+)
+async def test_backchannel_logout_skips_targets_resolving_to_non_public_addresses(
+    rsa_pem, monkeypatch, answers
+):
+    async def resolve(host: str, port: int) -> list[str]:
+        return answers
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(200)
+    monkeypatch.setattr("oauth2_server.services.outbound.resolve_host", resolve)
+    async with _rs256_app(rsa_pem) as client_app:
+        captured = _capture_http(client_app.app)
+        await reseed_client(client_app, backchannel_logout_uri="https://rp.example/bc")
+        await login_session(client_app)
+        resp = await client_app.get("/oauth/logout")
+        assert resp.status_code == 200, resp.text
+        assert captured == []
 
-    client_app.app.state.http_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), timeout=10
-    )
+
+@pytest.mark.parametrize(
+    "uri", ["http://rp.example/bc", "https://127.0.0.1/bc", "https://10.0.0.5/bc"]
+)
+async def test_backchannel_logout_skips_stored_rows_with_unacceptable_uris(rsa_pem, uri):
+    async with _rs256_app(rsa_pem) as client_app:
+        captured = _capture_http(client_app.app)
+        await reseed_client(client_app, backchannel_logout_uri=uri)
+        await login_session(client_app)
+        resp = await client_app.get("/oauth/logout")
+        assert resp.status_code == 200, resp.text
+        assert captured == []
+
+
+async def test_backchannel_logout_stalled_dns_lookup_releases_slot_without_sending(
+    rsa_pem, monkeypatch
+):
+    async def stalled(host: str, port: int) -> list[str]:
+        await asyncio.sleep(3600)
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr("oauth2_server.services.outbound.resolve_host", stalled)
+    async with _rs256_app(rsa_pem) as client_app:
+        captured = _capture_http(client_app.app)
+        # A short connect timeout also bounds name resolution.
+        client_app.app.state.http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda r: captured.append(r) or httpx.Response(200)),
+            timeout=httpx.Timeout(10, connect=0.05),
+        )
+        await reseed_client(client_app, backchannel_logout_uri="https://rp.example/bc")
+        await login_session(client_app)
+        resp = await asyncio.wait_for(client_app.get("/oauth/logout"), timeout=5)
+        assert resp.status_code == 200, resp.text
+        assert captured == []
+
+
+async def test_backchannel_logout_requests_do_not_share_connections_across_hostnames(rsa_pem):
+    """Both RPs resolve to the same pinned IP and port, so the pool origin is
+    identical; every request must therefore ask for its own connection."""
+    async with _rs256_app(rsa_pem) as client_app:
+        captured = await _deliver_to_multiple_clients(client_app)
+        assert len(captured) == 2
+        for req in captured:
+            assert req.headers["connection"] == "close"
+            assert req.extensions["sni_hostname"] == req.headers["host"]
+
+
+async def test_backchannel_logout_uri_rejects_private_targets():
+    async with build_client_app() as client:
+        await seed_admin(client.storage)
+        await login_admin(client)
+        for uri in (
+            "http://169.254.169.254/meta",
+            "https://10.0.0.5/bc",
+            "http://rp.example/bc",
+            "https://localhost/bc",
+            "https://2130706433/bc",
+            "https://[::1/bc",
+            "https://rp.example:notaport/bc",
+            "https://rp.example:99999/bc",
+            "https://rp.example:/bc",
+        ):
+            resp = await client.post(
+                "/admin/api/clients", json={"name": "Bc", "backchannel_logout_uri": uri}
+            )
+            assert resp.status_code == 400, (uri, resp.text)
+
+
+async def test_backchannel_logout_delivers_to_multiple_clients_concurrently(rsa_pem):
+    async with _rs256_app(rsa_pem) as client_app:
+        await _deliver_to_multiple_clients(client_app)
+
+
+async def _deliver_to_multiple_clients(client_app):
+    captured = _capture_http(client_app.app)
 
     await reseed_client(
         client_app,
@@ -236,12 +387,13 @@ async def test_backchannel_logout_delivers_to_multiple_clients_concurrently(clie
     assert resp.status_code == 200, resp.text
 
     assert len(captured) == 2
-    urls = {str(req.url) for req in captured}
-    assert urls == {"https://rp1.example/bc-logout", "https://rp2.example/bc-logout"}
+    hosts = {req.headers["host"] for req in captured}
+    assert hosts == {"rp1.example", "rp2.example"}
     for req in captured:
         assert req.headers["content-type"] == "application/x-www-form-urlencoded"
         body = req.content.decode()
         assert body.startswith("logout_token=")
+    return captured
 
 
 async def test_anon_sid_does_not_dispatch_backchannel(client_app):

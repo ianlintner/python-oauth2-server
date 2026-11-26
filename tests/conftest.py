@@ -41,6 +41,18 @@ async def build_client_app(config_overrides: dict | None = None):
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch):
+    """Resolve every hostname to a public address so back-channel logout
+    dispatch never touches real DNS; tests that need another answer patch
+    `outbound.resolve_host` themselves."""
+
+    async def fake_resolve(host: str, port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr("oauth2_server.services.outbound.resolve_host", fake_resolve)
+
+
 @pytest.fixture
 async def client_app():
     async with build_client_app() as c:

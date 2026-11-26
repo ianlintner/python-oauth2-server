@@ -750,6 +750,10 @@ admin-session server-side revocation.
     client(s) named by the hint's `aud`; a client's plain `redirect_uris` no longer qualify and a
     request without a hint gets no redirect (400 `invalid_request`). Clients that relied on
     the old fallback must register their post-logout URIs explicitly.
+    The back-channel `logout_token` is signed RS256 with the keyset's current key (`kid` header)
+    instead of Rust's HS256(`jwt_secret`), and `backchannel_logout_uri` must be `https` with a
+    public host, re-checked against the resolved address at dispatch (`services/outbound.py`).
+    Without an RS256 key, back-channel logout is skipped.
 66. `tls_client_auth` requires a registered Subject DN (RFC 8705 §2.1.2). A client with an empty
     `tls_client_certificate_subject_dn` fails `invalid_client` instead of authenticating on the
     mere presence of a certificate (Rust still accepts it — this is a **deliberate divergence;
