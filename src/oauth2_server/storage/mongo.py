@@ -470,6 +470,17 @@ class MongoStorage:
             {"$set": {"revoked": True}},
         )
 
+    async def claim_refresh_token(self, refresh_token: str) -> int:
+        # Atomic single-claim by the PRESENTED value (digested here), same
+        # 1/0 contract as `SqlStorage`'s rowcount. The paired access token
+        # lives on the same document.
+        doc = await self.tokens.find_one_and_update(
+            {"refresh_token": digest(refresh_token, "refresh"), "revoked": False},
+            {"$set": {"revoked": True}},
+            return_document=ReturnDocument.BEFORE,
+        )
+        return 1 if doc is not None else 0
+
     async def revoke_token_family(self, family: str) -> int:
         result = await self.tokens.update_many(
             {"token_family": family}, {"$set": {"revoked": True}}

@@ -580,6 +580,17 @@ class SqlStorage:
                 {"r": True, "a": digest(token, "access"), "f": digest(token, "refresh")},
             )
 
+    async def claim_refresh_token(self, refresh_token: str) -> int:
+        # Single conditional transition, keyed by the PRESENTED value (the
+        # backend digests it). Only the caller that flips `revoked` false ->
+        # true gets rowcount 1; the same row holds the paired access token.
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                text("UPDATE tokens SET revoked = :r WHERE refresh_token = :t AND revoked = :f"),
+                {"r": True, "t": digest(refresh_token, "refresh"), "f": False},
+            )
+        return result.rowcount
+
     async def revoke_token_family(self, family: str) -> int:
         async with self._engine.begin() as conn:
             result = await conn.execute(

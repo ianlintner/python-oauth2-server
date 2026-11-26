@@ -166,6 +166,19 @@ async def test_revoke_by_presented_value_and_by_id(storage):
     assert (await storage.get_token_by_refresh_token("synthetic-refresh-2")).revoked is True
 
 
+async def test_refresh_claim_uses_presented_value_not_stored_digest(storage):
+    """The atomic claim must match the presented refresh token: a stored
+    digest is NOT a credential and must never be able to claim the row."""
+    await seed_client(storage)
+    await storage.save_token(_token())
+    stored = (await storage.get_token_by_refresh_token(RAW_REFRESH)).refresh_token
+    assert stored == digest(RAW_REFRESH, "refresh")
+    assert await storage.claim_refresh_token(stored) == 0
+    assert await storage.claim_refresh_token(RAW_REFRESH) == 1
+    assert await storage.claim_refresh_token(RAW_REFRESH) == 0
+    assert (await storage.get_token_by_access_token(RAW_ACCESS)).revoked is True
+
+
 async def test_authorization_code_and_device_code_single_claim(storage):
     await seed_client(storage)
     await storage.save_authorization_code(

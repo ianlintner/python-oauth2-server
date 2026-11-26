@@ -108,6 +108,20 @@ async def test_mark_authorization_code_used_is_single_claim(storage):
     assert await storage.mark_authorization_code_used("c-race") == 0
 
 
+async def test_claim_refresh_token_is_single_claim(storage):
+    await storage.save_client(_client())
+    tok = _token("at-race")
+    tok.refresh_token = "r-race"
+    await storage.save_token(tok)
+    assert await storage.claim_refresh_token("r-race") == 1
+    assert await storage.claim_refresh_token("r-race") == 0
+    assert await storage.claim_refresh_token("r-missing") == 0
+    row = await storage.get_token_by_refresh_token("r-race")
+    assert row.revoked is True
+    # The paired access token is the same row, so it is revoked too.
+    assert (await storage.get_token_by_access_token("at-race")).revoked is True
+
+
 async def test_mark_device_authorization_used_is_single_claim(storage):
     await storage.save_client(_client())
     d = DeviceAuthorization(
