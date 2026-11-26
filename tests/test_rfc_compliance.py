@@ -1220,7 +1220,7 @@ async def test_token_exchange_round_trip(client_app):
     subject_token = Token(
         id=uuid.uuid4().hex,
         access_token="rfc-subject-token",
-        client_id="other-client",
+        client_id="rfc-exchange-client",
         user_id="u1",
         scope="read",
         expires_at=datetime.now(UTC) + timedelta(hours=1),
