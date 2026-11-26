@@ -42,6 +42,7 @@ from pydantic import BaseModel
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from oauth2_server import clock
 from oauth2_server.errors import OAuthError
 from oauth2_server.services.credential_storage import (
     SealError,
@@ -574,15 +575,28 @@ class MongoStorage:
         doc = await self.device_authorizations.find_one({"user_code": user_code})
         return _from_doc(DeviceAuthorization, doc)
 
-    async def approve_device_authorization(self, user_code: str, user_id: str) -> None:
-        await self.device_authorizations.update_one(
-            {"user_code": user_code},
-            {"$set": {"approved": True, "denied": False, "user_id": user_id}},
+    async def _transition_pending_device(self, user_code: str, fields: dict) -> int:
+        # One conditional find_one_and_update from the pending state.
+        # `expires_at` is an RFC 3339 string here, so expiry is judged on the
+        # matched document rather than inside the filter.
+        doc = await self.device_authorizations.find_one_and_update(
+            {"user_code": user_code, "approved": False, "denied": False, "used": False},
+            {"$set": fields},
+            return_document=ReturnDocument.BEFORE,
+        )
+        if doc is None:
+            return 0
+        before = _from_doc(DeviceAuthorization, doc)
+        return 1 if before.expires_at > clock.now() else 0
+
+    async def approve_device_authorization(self, user_code: str, user_id: str) -> int:
+        return await self._transition_pending_device(
+            user_code, {"approved": True, "user_id": user_id}
         )
 
-    async def deny_device_authorization(self, user_code: str) -> None:
-        await self.device_authorizations.update_one(
-            {"user_code": user_code}, {"$set": {"denied": True, "approved": False}}
+    async def deny_device_authorization(self, user_code: str, user_id: str | None = None) -> int:
+        return await self._transition_pending_device(
+            user_code, {"denied": True, "user_id": user_id}
         )
 
     async def mark_device_authorization_used(self, device_code: str) -> int:

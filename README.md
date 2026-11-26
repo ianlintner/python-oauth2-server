@@ -47,6 +47,13 @@ remaining Rust feature set:
 - **Login + device-verify UI** — minimal server-rendered HTML for `/auth/login` and the
   `GET /oauth/device/verify` user-code entry page (the `POST` endpoint stays JSON, a
   deliberate divergence from Rust — see "Accepted divergences" in `docs/PHASE2-BACKLOG.md`).
+  Once a code resolves, the page names the requesting client and its scopes and renders the
+  approve/deny form with hidden `user_code`, `client_id`, `scope` and `csrf_token` fields.
+  `POST /oauth/device/verify` requires the `csrf_token` issued with that page (custom
+  integrations must `GET` the page first and echo the hidden fields), rejects a cross-origin
+  `Origin` / `Sec-Fetch-Site`, and answers every failed transition with the same
+  `invalid_user_code`. `approve_device_authorization` / `deny_device_authorization` are single
+  conditional writes from the pending state and return the affected-row count.
 - Hardening carried over from the Phase 1 backlog: refresh-token TTL enforcement (+
   `id_token` re-mint on refresh/device-code grants), a migration advisory lock so multiple
   workers can boot against a fresh DB safely, HKDF-derived session-cookie signing key,

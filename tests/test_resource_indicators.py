@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, urlparse
 import jwt
 
 from tests.conftest import build_client_app
-from tests.helpers import login_session, post_token
+from tests.helpers import device_verify_post, login_session, post_token
 from tests.test_device_flow import start_device_flow
 from tests.test_token_endpoint import _pkce_pair, run_code_flow
 
@@ -201,9 +201,7 @@ async def test_resource_on_device_grant_binds_aud(client_app):
     user_code = start.json()["user_code"]
 
     await login_session(client_app)
-    approve = await client_app.post(
-        "/oauth/device/verify", data={"user_code": user_code, "action": "approve"}
-    )
+    approve = await device_verify_post(client_app, user_code, "approve")
     assert approve.status_code == 200, approve.text
 
     resp = await post_token(
@@ -350,9 +348,7 @@ async def test_device_grant_rejects_unlisted_resource():
     async with build_client_app({"resource_allow_list": [ALLOWED_RESOURCE]}) as app:
         start = (await start_device_flow(app)).json()
         await login_session(app)
-        approve = await app.post(
-            "/oauth/device/verify", data={"user_code": start["user_code"], "action": "approve"}
-        )
+        approve = await device_verify_post(app, start["user_code"], "approve")
         assert approve.status_code == 200, approve.text
         data = {
             "grant_type": _DEVICE_URN,
